@@ -3,8 +3,14 @@
 final class PhluxVariableQuery
   extends PhabricatorCursorPagedPolicyAwareQuery {
 
+  private $ids;
   private $keys;
   private $phids;
+
+  public function withIDs(array $ids) {
+    $this->ids = $ids;
+    return $this;
+  }
 
   public function withPHIDs(array $phids) {
     $this->phids = $phids;
@@ -31,42 +37,59 @@ final class PhluxVariableQuery
     return $table->loadAllFromArray($rows);
   }
 
-  private function buildWhereClause(AphrontDatabaseConnection $conn_r) {
+  protected function buildWhereClause(AphrontDatabaseConnection $conn) {
     $where = array();
 
-    $where[] = $this->buildPagingClause($conn_r);
-
-    if ($this->keys) {
+    if ($this->ids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
+        'id IN (%Ld)',
+        $this->ids);
+    }
+
+    if ($this->keys !== null) {
+      $where[] = qsprintf(
+        $conn,
         'variableKey IN (%Ls)',
         $this->keys);
     }
 
-    if ($this->phids) {
+    if ($this->phids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'phid IN (%Ls)',
         $this->phids);
     }
 
-    return $this->formatWhereClause($where);
+    $where[] = $this->buildPagingClause($conn);
+
+    return $this->formatWhereClause($conn, $where);
   }
 
-  protected function getPagingColumn() {
-    return 'variableKey';
+  protected function getDefaultOrderVector() {
+    return array('key');
   }
 
-  protected function getPagingValue($result) {
-    return $result->getVariableKey();
+  public function getOrderableColumns() {
+    return array(
+      'key' => array(
+        'column' => 'variableKey',
+        'type' => 'string',
+        'reverse' => true,
+        'unique' => true,
+      ),
+    );
   }
 
-  protected function getReversePaging() {
-    return true;
+  protected function newPagingMapFromPartialObject($object) {
+    return array(
+      'id' => (int)$object->getID(),
+      'key' => $object->getVariableKey(),
+    );
   }
 
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationPhlux';
+    return 'PhabricatorPhluxApplication';
   }
 
 }

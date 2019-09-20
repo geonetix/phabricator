@@ -3,23 +3,17 @@
 final class PhabricatorApplicationTransactionCommentHistoryController
   extends PhabricatorApplicationTransactionController {
 
-  private $phid;
-
   public function shouldAllowPublic() {
     return true;
   }
 
-  public function willProcessRequest(array $data) {
-    $this->phid = $data['phid'];
-  }
-
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
+    $phid = $request->getURIData('phid');
 
     $xaction = id(new PhabricatorObjectQuery())
-      ->withPHIDs(array($this->phid))
-      ->setViewer($user)
+      ->withPHIDs(array($phid))
+      ->setViewer($viewer)
       ->executeOne();
 
     if (!$xaction) {
@@ -31,8 +25,13 @@ final class PhabricatorApplicationTransactionCommentHistoryController
       return new Aphront404Response();
     }
 
-    $comments = id(new PhabricatorApplicationTransactionCommentQuery())
-      ->setViewer($user)
+    if ($xaction->getComment()->getIsRemoved()) {
+      // You can't view history of a transaction with a removed comment.
+      return new Aphront400Response();
+    }
+
+    $comments = id(new PhabricatorApplicationTransactionTemplatedCommentQuery())
+      ->setViewer($viewer)
       ->setTemplate($xaction->getApplicationTransactionCommentObject())
       ->withTransactionPHIDs(array($xaction->getPHID()))
       ->execute();
@@ -55,19 +54,21 @@ final class PhabricatorApplicationTransactionCommentHistoryController
 
     $obj_phid = $xaction->getObjectPHID();
     $obj_handle = id(new PhabricatorHandleQuery())
-      ->setViewer($user)
+      ->setViewer($viewer)
       ->withPHIDs(array($obj_phid))
       ->executeOne();
 
     $view = id(new PhabricatorApplicationTransactionView())
-      ->setUser($user)
+      ->setUser($viewer)
       ->setObjectPHID($obj_phid)
       ->setTransactions($xactions)
-      ->setShowEditActions(false);
+      ->setShowEditActions(false)
+      ->setHideCommentOptions(true);
 
     $dialog = id(new AphrontDialogView())
-      ->setUser($user)
+      ->setUser($viewer)
       ->setWidth(AphrontDialogView::WIDTH_FULL)
+      ->setFlush(true)
       ->setTitle(pht('Comment History'));
 
     $dialog->appendChild($view);

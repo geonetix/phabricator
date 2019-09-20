@@ -2,8 +2,6 @@
 
 final class PhabricatorRedirectController extends PhabricatorController {
 
-  private $uri;
-
   public function shouldRequireLogin() {
     return false;
   }
@@ -12,12 +10,12 @@ final class PhabricatorRedirectController extends PhabricatorController {
     return false;
   }
 
-  public function willProcessRequest(array $data) {
-    $this->uri = $data['uri'];
-  }
-
-  public function processRequest() {
-    return id(new AphrontRedirectResponse())->setURI($this->uri);
+  public function handleRequest(AphrontRequest $request) {
+    $uri = $request->getURIData('uri');
+    $external = $request->getURIData('external', false);
+    return id(new AphrontRedirectResponse())
+      ->setURI($uri)
+      ->setIsExternal($external);
   }
 
 }

@@ -1,128 +1,212 @@
 <?php
 
-final class DrydockResourceViewController extends DrydockController {
+final class DrydockResourceViewController extends DrydockResourceController {
 
-  private $id;
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $id = $request->getURIData('id');
 
-  public function willProcessRequest(array $data) {
-    $this->id = $data['id'];
-  }
-
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
-
-    $resource = id(new DrydockResource())->load($this->id);
+    $resource = id(new DrydockResourceQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($id))
+      ->needUnconsumedCommands(true)
+      ->executeOne();
     if (!$resource) {
       return new Aphront404Response();
     }
 
-    $title = 'Resource '.$resource->getID().' '.$resource->getName();
+    $title = pht(
+      'Resource %s %s',
+      $resource->getID(),
+      $resource->getResourceName());
 
     $header = id(new PHUIHeaderView())
-      ->setHeader($title);
+      ->setUser($viewer)
+      ->setPolicyObject($resource)
+      ->setHeader($title)
+      ->setHeaderIcon('fa-map')
+      ->setStatus(
+        $resource->getStatusIcon(),
+        $resource->getStatusColor(),
+        $resource->getStatusDisplayName());
 
-    $actions = $this->buildActionListView($resource);
-    $properties = $this->buildPropertyListView($resource, $actions);
+    if ($resource->isReleasing()) {
+      $header->addTag(
+        id(new PHUITagView())
+          ->setType(PHUITagView::TYPE_SHADE)
+          ->setIcon('fa-exclamation-triangle')
+          ->setColor('red')
+          ->setName('Releasing'));
+    }
 
-    $resource_uri = 'resource/'.$resource->getID().'/';
-    $resource_uri = $this->getApplicationURI($resource_uri);
+    $curtain = $this->buildCurtain($resource);
+    $properties = $this->buildPropertyListView($resource);
 
-    $leases = id(new DrydockLeaseQuery())
-      ->withResourceIDs(array($resource->getID()))
-      ->needResources(true)
-      ->execute();
+    $id = $resource->getID();
+    $resource_uri = $this->getApplicationURI("resource/{$id}/");
 
-    $lease_header = id(new PHUIHeaderView())
-      ->setHeader(pht('Leases'));
+    $log_query = id(new DrydockLogQuery())
+      ->withResourcePHIDs(array($resource->getPHID()));
 
-    $lease_list = $this->buildLeaseListView($leases);
-    $lease_list->setNoDataString(pht('This resource has no leases.'));
+    $log_table = $this->buildLogTable($log_query)
+      ->setHideResources(true);
 
-    $pager = new AphrontPagerView();
-    $pager->setURI(new PhutilURI($resource_uri), 'offset');
-    $pager->setOffset($request->getInt('offset'));
-
-    $logs = id(new DrydockLogQuery())
-      ->withResourceIDs(array($resource->getID()))
-      ->executeWithOffsetPager($pager);
-
-    $log_table = $this->buildLogTableView($logs);
-    $log_table->appendChild($pager);
+    $logs = $this->buildLogBox(
+      $log_table,
+      $this->getApplicationURI("resource/{$id}/logs/query/all/"));
 
     $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->setActionList($actions);
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('Resource %d', $resource->getID())));
+    $crumbs->addTextCrumb(pht('Resource %d', $resource->getID()));
+    $crumbs->setBorder(true);
+
+    $locks = $this->buildLocksTab($resource->getPHID());
+    $commands = $this->buildCommandsTab($resource->getPHID());
+
+    $tab_group = id(new PHUITabGroupView())
+      ->addTab(
+        id(new PHUITabView())
+          ->setName(pht('Properties'))
+          ->setKey('properties')
+          ->appendChild($properties))
+      ->addTab(
+        id(new PHUITabView())
+          ->setName(pht('Slot Locks'))
+          ->setKey('locks')
+          ->appendChild($locks))
+      ->addTab(
+        id(new PHUITabView())
+          ->setName(pht('Commands'))
+          ->setKey('commands')
+          ->appendChild($commands));
 
     $object_box = id(new PHUIObjectBoxView())
-      ->setHeader($header)
-      ->addPropertyList($properties);
+      ->setHeaderText(pht('Properties'))
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->addTabGroup($tab_group);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $object_box,
-        $lease_header,
-        $lease_list,
-        $log_table,
-      ),
-      array(
-        'device'  => true,
-        'title'   => $title,
+    $lease_box = $this->buildLeaseBox($resource);
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setCurtain($curtain)
+      ->setMainColumn(
+        array(
+          $object_box,
+          $lease_box,
+          $logs,
+        ));
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild(
+        array(
+          $view,
       ));
 
   }
 
-  private function buildActionListView(DrydockResource $resource) {
-    $view = id(new PhabricatorActionListView())
-      ->setUser($this->getRequest()->getUser())
-      ->setObjectURI($this->getRequest()->getRequestURI())
-      ->setObject($resource);
+  private function buildCurtain(DrydockResource $resource) {
+    $viewer = $this->getViewer();
 
-    $can_close = ($resource->getStatus() == DrydockResourceStatus::STATUS_OPEN);
-    $uri = '/resource/'.$resource->getID().'/close/';
+    $curtain = $this->newCurtainView($resource);
+
+    $can_release = $resource->canRelease();
+    if ($resource->isReleasing()) {
+      $can_release = false;
+    }
+
+    $can_edit = PhabricatorPolicyFilter::hasCapability(
+      $viewer,
+      $resource,
+      PhabricatorPolicyCapability::CAN_EDIT);
+
+    $uri = '/resource/'.$resource->getID().'/release/';
     $uri = $this->getApplicationURI($uri);
 
-    $view->addAction(
+    $curtain->addAction(
       id(new PhabricatorActionView())
         ->setHref($uri)
-        ->setName(pht('Close Resource'))
-        ->setIcon('delete')
+        ->setName(pht('Release Resource'))
+        ->setIcon('fa-times')
         ->setWorkflow(true)
-        ->setDisabled(!$can_close));
+        ->setDisabled(!$can_release || !$can_edit));
 
-    return $view;
+    return $curtain;
   }
 
   private function buildPropertyListView(
-    DrydockResource $resource,
-    PhabricatorActionListView $actions) {
+    DrydockResource $resource) {
+    $viewer = $this->getViewer();
 
     $view = new PHUIPropertyListView();
-    $view->setActionList($actions);
 
-    $status = $resource->getStatus();
-    $status = DrydockResourceStatus::getNameForStatus($status);
-
-    $view->addProperty(
-      pht('Status'),
-      $status);
+    $until = $resource->getUntil();
+    if ($until) {
+      $until_display = phabricator_datetime($until, $viewer);
+    } else {
+      $until_display = phutil_tag('em', array(), pht('Never'));
+    }
+    $view->addProperty(pht('Expires'), $until_display);
 
     $view->addProperty(
       pht('Resource Type'),
       $resource->getType());
 
+    $view->addProperty(
+      pht('Blueprint'),
+      $viewer->renderHandle($resource->getBlueprintPHID()));
+
     $attributes = $resource->getAttributes();
     if ($attributes) {
-      $view->addSectionHeader(pht('Attributes'));
+      $view->addSectionHeader(
+        pht('Attributes'), 'fa-list-ul');
       foreach ($attributes as $key => $value) {
         $view->addProperty($key, $value);
       }
     }
 
     return $view;
+  }
+
+  private function buildLeaseBox(DrydockResource $resource) {
+    $viewer = $this->getViewer();
+
+    $leases = id(new DrydockLeaseQuery())
+      ->setViewer($viewer)
+      ->withResourcePHIDs(array($resource->getPHID()))
+      ->withStatuses(
+        array(
+          DrydockLeaseStatus::STATUS_PENDING,
+          DrydockLeaseStatus::STATUS_ACQUIRED,
+          DrydockLeaseStatus::STATUS_ACTIVE,
+        ))
+      ->setLimit(100)
+      ->execute();
+
+    $id = $resource->getID();
+    $leases_uri = "resource/{$id}/leases/query/all/";
+    $leases_uri = $this->getApplicationURI($leases_uri);
+
+    $lease_header = id(new PHUIHeaderView())
+      ->setHeader(pht('Active Leases'))
+      ->addActionLink(
+        id(new PHUIButtonView())
+          ->setTag('a')
+          ->setHref($leases_uri)
+          ->setIcon('fa-search')
+          ->setText(pht('View All')));
+
+    $lease_list = id(new DrydockLeaseListView())
+      ->setUser($viewer)
+      ->setLeases($leases)
+      ->render()
+      ->setNoDataString(pht('This resource has no active leases.'));
+
+    return id(new PHUIObjectBoxView())
+      ->setHeader($lease_header)
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->setObjectList($lease_list);
   }
 
 }

@@ -2,35 +2,32 @@
 
 final class PhabricatorUIExampleRenderController extends PhabricatorController {
 
-  private $class;
-
-  public function willProcessRequest(array $data) {
-    $this->class = idx($data, 'class');
+  public function shouldAllowPublic() {
+    return true;
   }
 
-  public function processRequest() {
+  public function handleRequest(AphrontRequest $request) {
+    $id = $request->getURIData('class');
 
-    $classes = id(new PhutilSymbolLoader())
+    $classes = id(new PhutilClassMapQuery())
       ->setAncestorClass('PhabricatorUIExample')
-      ->setConcreteOnly(true)
-      ->selectAndLoadSymbols();
-    $classes = ipull($classes, 'name', 'name');
-
-    foreach ($classes as $class => $ignored) {
-      $classes[$class] = newv($class, array());
-    }
-
-    $classes = msort($classes, 'getName');
+      ->setSortMethod('getName')
+      ->execute();
 
     $nav = new AphrontSideNavFilterView();
     $nav->setBaseURI(new PhutilURI($this->getApplicationURI('view/')));
 
-    foreach ($classes as $class => $obj) {
-      $name = $obj->getName();
-      $nav->addFilter($class, $name);
+    $groups = mgroup($classes, 'getCategory');
+    ksort($groups);
+    foreach ($groups as $group => $group_classes) {
+      $nav->addLabel($group);
+      foreach ($group_classes as $class => $obj) {
+        $name = $obj->getName();
+        $nav->addFilter($class, $name);
+      }
     }
 
-    $selected = $nav->selectFilter($this->class, head_key($classes));
+    $selected = $nav->selectFilter($id, head_key($classes));
 
     $example = $classes[$selected];
     $example->setRequest($this->getRequest());
@@ -43,23 +40,24 @@ final class PhabricatorUIExampleRenderController extends PhabricatorController {
 
     require_celerity_resource('phabricator-ui-example-css');
 
-    $nav->appendChild(hsprintf(
-      '<div class="phabricator-ui-example-header">'.
-        '<h1 class="phabricator-ui-example-name">%s (%s)</h1>'.
-        '<p class="phabricator-ui-example-description">%s</p>'.
-      '</div>',
-      $example->getName(),
-      get_class($example),
-      $example->getDescription()));
+    $crumbs = $this->buildApplicationCrumbs();
+    $crumbs->addTextCrumb($example->getName());
 
-    $nav->appendChild($result);
+    $note = id(new PHUIInfoView())
+      ->setTitle(pht('%s (%s)', $example->getName(), get_class($example)))
+      ->appendChild($example->getDescription())
+      ->setSeverity(PHUIInfoView::SEVERITY_NODATA);
 
-    return $this->buildApplicationPage(
-      $nav,
+    $nav->appendChild(
       array(
-        'title'   => 'UI Example',
-        'device'  => true,
+        $crumbs,
+        $note,
+        $result,
       ));
+
+    return $this->newPage()
+      ->setTitle($example->getName())
+      ->appendChild($nav);
   }
 
 }

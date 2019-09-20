@@ -1,12 +1,13 @@
 <?php
 
-final class DifferentialHunkParser {
+final class DifferentialHunkParser extends Phobject {
 
   private $oldLines;
   private $newLines;
   private $intraLineDiffs;
+  private $depthOnlyLines;
   private $visibleLinesMask;
-  private $whitespaceMode;
+  private $normalized;
 
   /**
    * Get a map of lines on which hunks start, other than line 1. This
@@ -35,9 +36,7 @@ final class DifferentialHunkParser {
   }
   public function getVisibleLinesMask() {
     if ($this->visibleLinesMask === null) {
-      throw new Exception(
-        'You must generateVisibileLinesMask before accessing this data.'
-      );
+      throw new PhutilInvalidStateException('generateVisibileLinesMask');
     }
     return $this->visibleLinesMask;
   }
@@ -48,9 +47,7 @@ final class DifferentialHunkParser {
   }
   public function getIntraLineDiffs() {
     if ($this->intraLineDiffs === null) {
-      throw new Exception(
-        'You must generateIntraLineDiffs before accessing this data.'
-      );
+      throw new PhutilInvalidStateException('generateIntraLineDiffs');
     }
     return $this->intraLineDiffs;
   }
@@ -61,9 +58,7 @@ final class DifferentialHunkParser {
   }
   public function getNewLines() {
     if ($this->newLines === null) {
-      throw new Exception(
-        'You must parseHunksForLineData before accessing this data.'
-      );
+      throw new PhutilInvalidStateException('parseHunksForLineData');
     }
     return $this->newLines;
   }
@@ -74,9 +69,7 @@ final class DifferentialHunkParser {
   }
   public function getOldLines() {
     if ($this->oldLines === null) {
-      throw new Exception(
-        'You must parseHunksForLineData before accessing this data.'
-      );
+      throw new PhutilInvalidStateException('parseHunksForLineData');
     }
     return $this->oldLines;
   }
@@ -96,7 +89,7 @@ final class DifferentialHunkParser {
   public function setOldLineTypeMap(array $map) {
     $lines = $this->getOldLines();
     foreach ($lines as $key => $data) {
-      $lines[$key]['type'] = $map[$data['line']];
+      $lines[$key]['type'] = idx($map, $data['line']);
     }
     $this->oldLines = $lines;
     return $this;
@@ -117,25 +110,28 @@ final class DifferentialHunkParser {
   public function setNewLineTypeMap(array $map) {
     $lines = $this->getNewLines();
     foreach ($lines as $key => $data) {
-      $lines[$key]['type'] = $map[$data['line']];
+      $lines[$key]['type'] = idx($map, $data['line']);
     }
     $this->newLines = $lines;
     return $this;
   }
 
-
-  public function setWhitespaceMode($white_space_mode) {
-    $this->whitespaceMode = $white_space_mode;
+  public function setDepthOnlyLines(array $map) {
+    $this->depthOnlyLines = $map;
     return $this;
   }
 
-  private function getWhitespaceMode() {
-    if ($this->whitespaceMode === null) {
-      throw new Exception(
-        'You must setWhitespaceMode before accessing this data.'
-      );
-    }
-    return $this->whitespaceMode;
+  public function getDepthOnlyLines() {
+    return $this->depthOnlyLines;
+  }
+
+  public function setNormalized($normalized) {
+    $this->normalized = $normalized;
+    return $this;
+  }
+
+  public function getNormalized() {
+    return $this->normalized;
   }
 
   public function getIsDeleted() {
@@ -158,13 +154,6 @@ final class DifferentialHunkParser {
   }
 
   /**
-   * Returns true if the hunks change any text, not just whitespace.
-   */
-  public function getHasTextChanges() {
-    return $this->getHasChanges('text');
-  }
-
-  /**
    * Returns true if the hunks change anything, including whitespace.
    */
   public function getHasAnyChanges() {
@@ -173,7 +162,7 @@ final class DifferentialHunkParser {
 
   private function getHasChanges($filter) {
     if ($filter !== 'any' && $filter !== 'text') {
-      throw new Exception("Unknown change filter '{$filter}'.");
+      throw new Exception(pht("Unknown change filter '%s'.", $filter));
     }
 
     $old = $this->getOldLines();
@@ -191,9 +180,6 @@ final class DifferentialHunkParser {
       }
 
       if ($o['type'] !== $n['type']) {
-        // The types are different, so either the underlying text is actually
-        // different or whatever whitespace rules we're using consider them
-        // different.
         return true;
       }
 
@@ -276,62 +262,7 @@ final class DifferentialHunkParser {
     $this->setOldLines($rebuild_old);
     $this->setNewLines($rebuild_new);
 
-    $this->updateChangeTypesForWhitespaceMode();
-
-    return $this;
-  }
-
-  private function updateChangeTypesForWhitespaceMode() {
-    $mode = $this->getWhitespaceMode();
-
-    $mode_show_all = DifferentialChangesetParser::WHITESPACE_SHOW_ALL;
-    if ($mode === $mode_show_all) {
-      // If we're showing all whitespace, we don't need to perform any updates.
-      return;
-    }
-
-    $mode_trailing = DifferentialChangesetParser::WHITESPACE_IGNORE_TRAILING;
-    $is_trailing = ($mode === $mode_trailing);
-
-    $new = $this->getNewLines();
-    $old = $this->getOldLines();
-    foreach ($old as $key => $o) {
-      $n = $new[$key];
-
-      if (!$o || !$n) {
-        continue;
-      }
-
-      if ($is_trailing) {
-        // In "trailing" mode, we need to identify lines which are marked
-        // changed but differ only by trailing whitespace. We mark these lines
-        // unchanged.
-        if ($o['type'] != $n['type']) {
-          if (rtrim($o['text']) === rtrim($n['text'])) {
-            $old[$key]['type'] = null;
-            $new[$key]['type'] = null;
-          }
-        }
-      } else {
-        // In "ignore most" and "ignore all" modes, we need to identify lines
-        // which are marked unchanged but have internal whitespace changes.
-        // We want to ignore leading and trailing whitespace changes only, not
-        // internal whitespace changes (`diff` doesn't have a mode for this, so
-        // we have to fix it here). If the text is marked unchanged but the
-        // old and new text differs by internal space, mark the lines changed.
-        if ($o['type'] === null && $n['type'] === null) {
-          if ($o['text'] !== $n['text']) {
-            if (trim($o['text']) !== trim($n['text'])) {
-              $old[$key]['type'] = '-';
-              $new[$key]['type'] = '+';
-            }
-          }
-        }
-      }
-    }
-
-    $this->setOldLines($old);
-    $this->setNewLines($new);
+    $this->updateChangeTypesForNormalization();
 
     return $this;
   }
@@ -341,6 +272,7 @@ final class DifferentialHunkParser {
     $new = $this->getNewLines();
 
     $diffs = array();
+    $depth_only = array();
     foreach ($old as $key => $o) {
       $n = $new[$key];
 
@@ -349,19 +281,80 @@ final class DifferentialHunkParser {
       }
 
       if ($o['type'] != $n['type']) {
-        $diffs[$key] = ArcanistDiffUtils::generateIntralineDiff(
-          $o['text'],
-          $n['text']);
+        $o_segments = array();
+        $n_segments = array();
+        $tab_width = 2;
+
+        $o_text = $o['text'];
+        $n_text = $n['text'];
+
+        if ($o_text !== $n_text && (ltrim($o_text) === ltrim($n_text))) {
+          $o_depth = $this->getIndentDepth($o_text, $tab_width);
+          $n_depth = $this->getIndentDepth($n_text, $tab_width);
+
+          if ($o_depth < $n_depth) {
+            $segment_type = '>';
+            $segment_width = $this->getCharacterCountForVisualWhitespace(
+              $n_text,
+              ($n_depth - $o_depth),
+              $tab_width);
+            if ($segment_width) {
+              $n_text = substr($n_text, $segment_width);
+              $n_segments[] = array(
+                $segment_type,
+                $segment_width,
+              );
+            }
+          } else if ($o_depth > $n_depth) {
+            $segment_type = '<';
+            $segment_width = $this->getCharacterCountForVisualWhitespace(
+              $o_text,
+              ($o_depth - $n_depth),
+              $tab_width);
+            if ($segment_width) {
+              $o_text = substr($o_text, $segment_width);
+              $o_segments[] = array(
+                $segment_type,
+                $segment_width,
+              );
+            }
+          }
+
+          // If there are no remaining changes to this line after we've marked
+          // off the indent depth changes, this line was only modified by
+          // changing the indent depth. Mark it for later so we can change how
+          // it is displayed.
+          if ($o_text === $n_text) {
+            $depth_only[$key] = $segment_type;
+          }
+        }
+
+        $intraline_segments = ArcanistDiffUtils::generateIntralineDiff(
+          $o_text,
+          $n_text);
+
+        foreach ($intraline_segments[0] as $o_segment) {
+          $o_segments[] = $o_segment;
+        }
+
+        foreach ($intraline_segments[1] as $n_segment) {
+          $n_segments[] = $n_segment;
+        }
+
+        $diffs[$key] = array(
+          $o_segments,
+          $n_segments,
+        );
       }
     }
 
     $this->setIntraLineDiffs($diffs);
+    $this->setDepthOnlyLines($depth_only);
 
     return $this;
   }
 
-  public function generateVisibileLinesMask() {
-    $lines_context = DifferentialChangesetParser::LINES_CONTEXT;
+  public function generateVisibileLinesMask($lines_context) {
     $old = $this->getOldLines();
     $new = $this->getNewLines();
     $max_length = max(count($old), count($new));
@@ -418,21 +411,44 @@ final class DifferentialHunkParser {
     $old_lines = array();
     $new_lines = array();
     foreach ($hunks as $hunk) {
-
-      $lines = $hunk->getChanges();
-      $lines = phutil_split_lines($lines);
+      $lines = $hunk->getSplitLines();
 
       $line_type_map = array();
+      $line_text = array();
       foreach ($lines as $line_index => $line) {
         if (isset($line[0])) {
           $char = $line[0];
-          if ($char == ' ') {
-            $line_type_map[$line_index] = null;
-          } else {
-            $line_type_map[$line_index] = $char;
+          switch ($char) {
+            case ' ':
+              $line_type_map[$line_index] = null;
+              $line_text[$line_index] = substr($line, 1);
+              break;
+            case "\r":
+            case "\n":
+              // NOTE: Normally, the first character is a space, plus, minus or
+              // backslash, but it may be a newline if it used to be a space and
+              // trailing whitespace has been stripped via email transmission or
+              // some similar mechanism. In these cases, we essentially pretend
+              // the missing space is still there.
+              $line_type_map[$line_index] = null;
+              $line_text[$line_index] = $line;
+              break;
+            case '+':
+            case '-':
+            case '\\':
+              $line_type_map[$line_index] = $char;
+              $line_text[$line_index] = substr($line, 1);
+              break;
+            default:
+              throw new Exception(
+                pht(
+                  'Unexpected leading character "%s" at line index %s!',
+                  $char,
+                  $line_index));
           }
         } else {
           $line_type_map[$line_index] = null;
+          $line_text[$line_index] = '';
         }
       }
 
@@ -444,7 +460,7 @@ final class DifferentialHunkParser {
         $type = $line_type_map[$cursor];
         $data = array(
           'type'  => $type,
-          'text'  => (string)substr($lines[$cursor], 1),
+          'text'  => $line_text[$cursor],
           'line'  => $new_line,
         );
         if ($type == '\\') {
@@ -489,22 +505,32 @@ final class DifferentialHunkParser {
     // Put changes side by side.
     $olds = array();
     $news = array();
+    $olds_cursor = -1;
+    $news_cursor = -1;
     foreach ($changeset_hunks as $hunk) {
       $n_old = $hunk->getOldOffset();
       $n_new = $hunk->getNewOffset();
-      $changes = phutil_split_lines($hunk->getChanges());
+      $changes = $hunk->getSplitLines();
       foreach ($changes as $line) {
         $diff_type = $line[0]; // Change type in diff of diffs.
         $orig_type = $line[1]; // Change type in the original diff.
         if ($diff_type == ' ') {
           // Use the same key for lines that are next to each other.
-          $key = max(last_key($olds), last_key($news)) + 1;
+          if ($olds_cursor > $news_cursor) {
+            $key = $olds_cursor + 1;
+          } else {
+            $key = $news_cursor + 1;
+          }
           $olds[$key] = null;
           $news[$key] = null;
+          $olds_cursor = $key;
+          $news_cursor = $key;
         } else if ($diff_type == '-') {
           $olds[] = array($n_old, $orig_type);
+          $olds_cursor++;
         } else if ($diff_type == '+') {
           $news[] = array($n_new, $orig_type);
+          $news_cursor++;
         }
         if (($diff_type == '-' || $diff_type == ' ') && $orig_type != '-') {
           $n_old++;
@@ -545,38 +571,31 @@ final class DifferentialHunkParser {
 
   public function makeContextDiff(
     array $hunks,
-    PhabricatorInlineCommentInterface $inline,
+    $is_new,
+    $line_number,
+    $line_length,
     $add_context) {
 
     assert_instances_of($hunks, 'DifferentialHunk');
 
     $context = array();
-    $debug = false;
-    if ($debug) {
-      $context[] = 'Inline: '.$inline->getIsNewFile().' '.
-        $inline->getLineNumber().' '.$inline->getLineLength();
-      foreach ($hunks as $hunk) {
-        $context[] = 'hunk: '.$hunk->getOldOffset().'-'.
-          $hunk->getOldLen().'; '.$hunk->getNewOffset().'-'.$hunk->getNewLen();
-        $context[] = $hunk->getChanges();
-      }
-    }
 
-    if ($inline->getIsNewFile()) {
+    if ($is_new) {
       $prefix = '+';
     } else {
       $prefix = '-';
     }
+
     foreach ($hunks as $hunk) {
-      if ($inline->getIsNewFile()) {
+      if ($is_new) {
         $offset = $hunk->getNewOffset();
         $length = $hunk->getNewLen();
       } else {
         $offset = $hunk->getOldOffset();
         $length = $hunk->getOldLen();
       }
-      $start = $inline->getLineNumber() - $offset;
-      $end = $start + $inline->getLineLength();
+      $start = $line_number - $offset;
+      $end = $start + $line_length;
       // We need to go in if $start == $length, because the last line
       // might be a "\No newline at end of file" marker, which we want
       // to show if the additional context is > 0.
@@ -584,13 +603,13 @@ final class DifferentialHunkParser {
         $start = $start - $add_context;
         $end = $end + $add_context;
         $hunk_content = array();
-        $hunk_pos = array( "-" => 0, "+" => 0 );
-        $hunk_offset = array( "-" => null, "+" => null );
-        $hunk_last = array( "-" => null, "+" => null );
+        $hunk_pos = array('-' => 0, '+' => 0);
+        $hunk_offset = array('-' => null, '+' => null);
+        $hunk_last = array('-' => null, '+' => null);
         foreach (explode("\n", $hunk->getChanges()) as $line) {
-          $in_common = strncmp($line, " ", 1) === 0;
-          $in_old = strncmp($line, "-", 1) === 0 || $in_common;
-          $in_new = strncmp($line, "+", 1) === 0 || $in_common;
+          $in_common = strncmp($line, ' ', 1) === 0;
+          $in_old = strncmp($line, '-', 1) === 0 || $in_common;
+          $in_new = strncmp($line, '+', 1) === 0 || $in_common;
           $in_selected = strncmp($line, $prefix, 1) === 0;
           $skip = !$in_selected && !$in_common;
           if ($hunk_pos[$prefix] <= $end) {
@@ -598,36 +617,36 @@ final class DifferentialHunkParser {
               if (!$skip || ($hunk_pos[$prefix] != $start &&
                 $hunk_pos[$prefix] != $end)) {
                   if ($in_old) {
-                    if ($hunk_offset["-"] === null) {
-                      $hunk_offset["-"] = $hunk_pos["-"];
+                    if ($hunk_offset['-'] === null) {
+                      $hunk_offset['-'] = $hunk_pos['-'];
                     }
-                    $hunk_last["-"] = $hunk_pos["-"];
+                    $hunk_last['-'] = $hunk_pos['-'];
                   }
                   if ($in_new) {
-                    if ($hunk_offset["+"] === null) {
-                      $hunk_offset["+"] = $hunk_pos["+"];
+                    if ($hunk_offset['+'] === null) {
+                      $hunk_offset['+'] = $hunk_pos['+'];
                     }
-                    $hunk_last["+"] = $hunk_pos["+"];
+                    $hunk_last['+'] = $hunk_pos['+'];
                   }
 
                   $hunk_content[] = $line;
                 }
             }
-            if ($in_old) { ++$hunk_pos["-"]; }
-            if ($in_new) { ++$hunk_pos["+"]; }
+            if ($in_old) { ++$hunk_pos['-']; }
+            if ($in_new) { ++$hunk_pos['+']; }
           }
         }
-        if ($hunk_offset["-"] !== null || $hunk_offset["+"] !== null) {
-          $header = "@@";
-          if ($hunk_offset["-"] !== null) {
-            $header .= " -" . ($hunk->getOldOffset() + $hunk_offset["-"]) .
-              "," . ($hunk_last["-"] - $hunk_offset["-"] + 1);
+        if ($hunk_offset['-'] !== null || $hunk_offset['+'] !== null) {
+          $header = '@@';
+          if ($hunk_offset['-'] !== null) {
+            $header .= ' -'.($hunk->getOldOffset() + $hunk_offset['-']).
+              ','.($hunk_last['-'] - $hunk_offset['-'] + 1);
           }
-          if ($hunk_offset["+"] !== null) {
-            $header .= " +" . ($hunk->getNewOffset() + $hunk_offset["+"]) .
-              "," . ($hunk_last["+"] - $hunk_offset["+"] + 1);
+          if ($hunk_offset['+'] !== null) {
+            $header .= ' +'.($hunk->getNewOffset() + $hunk_offset['+']).
+              ','.($hunk_last['+'] - $hunk_offset['+'] + 1);
           }
-          $header .= " @@";
+          $header .= ' @@';
           $context[] = $header;
           $context[] = implode("\n", $hunk_content);
         }
@@ -642,11 +661,159 @@ final class DifferentialHunkParser {
     $offsets = array();
     $n = 1;
     foreach ($hunks as $hunk) {
-      for ($i = 0; $i < $hunk->getNewLen(); $i++) {
-        $offsets[$n] = $hunk->getNewOffset() + $i;
+      $new_length = $hunk->getNewLen();
+      $new_offset = $hunk->getNewOffset();
+
+      for ($i = 0; $i < $new_length; $i++) {
+        $offsets[$n] = $new_offset + $i;
         $n++;
       }
     }
+
     return $offsets;
   }
+
+  private function getIndentDepth($text, $tab_width) {
+    $len = strlen($text);
+
+    $depth = 0;
+    for ($ii = 0; $ii < $len; $ii++) {
+      $c = $text[$ii];
+
+      // If this is a space, increase the indent depth by 1.
+      if ($c == ' ') {
+        $depth++;
+        continue;
+      }
+
+      // If this is a tab, increase the indent depth to the next tabstop.
+
+      // For example, if the tab width is 4, these sequences both lead us to
+      // a visual width of 8, i.e. the cursor will be in the 8th column:
+      //
+      //   <tab><tab>
+      //   <space><tab><space><space><space><tab>
+
+      if ($c == "\t") {
+        $depth = ($depth + $tab_width);
+        $depth = $depth - ($depth % $tab_width);
+        continue;
+      }
+
+      break;
+    }
+
+    return $depth;
+  }
+
+  private function getCharacterCountForVisualWhitespace(
+    $text,
+    $depth,
+    $tab_width) {
+
+    // Here, we know the visual indent depth of a line has been increased by
+    // some amount (for example, 6 characters).
+
+    // We want to find the largest whitespace prefix of the string we can
+    // which still fits into that amount of visual space.
+
+    // In most cases, this is very easy. For example, if the string has been
+    // indented by two characters and the string begins with two spaces, that's
+    // a perfect match.
+
+    // However, if the string has been indented by 7 characters, the tab width
+    // is 8, and the string begins with "<space><space><tab>", we can only
+    // mark the two spaces as an indent change. These cases are unusual.
+
+    $character_depth = 0;
+    $visual_depth = 0;
+
+    $len = strlen($text);
+    for ($ii = 0; $ii < $len; $ii++) {
+      if ($visual_depth >= $depth) {
+        break;
+      }
+
+      $c = $text[$ii];
+
+      if ($c == ' ') {
+        $character_depth++;
+        $visual_depth++;
+        continue;
+      }
+
+      if ($c == "\t") {
+        // Figure out how many visual spaces we have until the next tabstop.
+        $tab_visual = ($visual_depth + $tab_width);
+        $tab_visual = $tab_visual - ($tab_visual % $tab_width);
+        $tab_visual = ($tab_visual - $visual_depth);
+
+        // If this tab would take us over the limit, we're all done.
+        $remaining_depth = ($depth - $visual_depth);
+        if ($remaining_depth < $tab_visual) {
+          break;
+        }
+
+        $character_depth++;
+        $visual_depth += $tab_visual;
+        continue;
+      }
+
+      break;
+    }
+
+    return $character_depth;
+  }
+
+  private function updateChangeTypesForNormalization() {
+    if (!$this->getNormalized()) {
+      return;
+    }
+
+    // If we've parsed based on a normalized diff alignment, we may currently
+    // believe some lines are unchanged when they have actually changed. This
+    // happens when:
+    //
+    //   - a line changes;
+    //   - the change is a kind of change we normalize away when aligning the
+    //     diff, like an indentation change;
+    //   - we normalize the change away to align the diff; and so
+    //   - the old and new copies of the line are now aligned in the new
+    //     normalized diff.
+    //
+    // Then we end up with an alignment where the two lines that differ only
+    // in some some trivial way are aligned. This is great, and exactly what
+    // we're trying to accomplish by doing all this alignment stuff in the
+    // first place.
+    //
+    // However, in this case the correctly-aligned lines will be incorrectly
+    // marked as unchanged because the diff alorithm was fed normalized copies
+    // of the lines, and these copies truly weren't any different.
+    //
+    // When lines are aligned and marked identical, but they're not actually
+    // identical, we now mark them as changed. The rest of the processing will
+    // figure out how to render them appropritely.
+
+    $new = $this->getNewLines();
+    $old = $this->getOldLines();
+    foreach ($old as $key => $o) {
+      $n = $new[$key];
+
+      if (!$o || !$n) {
+        continue;
+      }
+
+      if ($o['type'] === null && $n['type'] === null) {
+        if ($o['text'] !== $n['text']) {
+          $old[$key]['type'] = '-';
+          $new[$key]['type'] = '+';
+        }
+      }
+    }
+
+    $this->setOldLines($old);
+    $this->setNewLines($new);
+  }
+
+
 }

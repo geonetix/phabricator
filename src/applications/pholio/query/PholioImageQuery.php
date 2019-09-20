@@ -1,18 +1,14 @@
 <?php
 
-/**
- * @group pholio
- */
 final class PholioImageQuery
   extends PhabricatorCursorPagedPolicyAwareQuery {
 
   private $ids;
   private $phids;
-  private $mockIDs;
-  private $obsolete;
+  private $mockPHIDs;
+  private $mocks;
 
   private $needInlineComments;
-  private $mockCache = array();
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -24,13 +20,18 @@ final class PholioImageQuery
     return $this;
   }
 
-  public function withMockIDs(array $mock_ids) {
-    $this->mockIDs = $mock_ids;
+  public function withMocks(array $mocks) {
+    assert_instances_of($mocks, 'PholioMock');
+
+    $mocks = mpull($mocks, null, 'getPHID');
+    $this->mocks = $mocks;
+    $this->mockPHIDs = array_keys($mocks);
+
     return $this;
   }
 
-  public function withObsolete($obsolete) {
-    $this->obsolete = $obsolete;
+  public function withMockPHIDs(array $mock_phids) {
+    $this->mockPHIDs = $mock_phids;
     return $this;
   }
 
@@ -39,88 +40,78 @@ final class PholioImageQuery
     return $this;
   }
 
-  public function setMockCache($mock_cache) {
-    $this->mockCache = $mock_cache;
-    return $this;
-  }
-  public function getMockCache() {
-    return $this->mockCache;
+  public function newResultObject() {
+    return new PholioImage();
   }
 
   protected function loadPage() {
-    $table = new PholioImage();
-    $conn_r = $table->establishConnection('r');
-
-    $data = queryfx_all(
-      $conn_r,
-      'SELECT * FROM %T %Q %Q %Q',
-      $table->getTableName(),
-      $this->buildWhereClause($conn_r),
-      $this->buildOrderClause($conn_r),
-      $this->buildLimitClause($conn_r));
-
-    $images = $table->loadAllFromArray($data);
-
-    return $images;
+    return $this->loadStandardPage($this->newResultObject());
   }
 
-  private function buildWhereClause(AphrontDatabaseConnection $conn_r) {
-    $where = array();
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
 
-    $where[] = $this->buildPagingClause($conn_r);
-
-    if ($this->ids) {
+    if ($this->ids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'id IN (%Ld)',
         $this->ids);
     }
 
-    if ($this->phids) {
+    if ($this->phids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'phid IN (%Ls)',
         $this->phids);
     }
 
-    if ($this->mockIDs) {
+    if ($this->mockPHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'mockID IN (%Ld)',
-        $this->mockIDs);
+        $conn,
+        'mockPHID IN (%Ls)',
+        $this->mockPHIDs);
     }
 
-    if ($this->obsolete !== null) {
-      $where[] = qsprintf(
-        $conn_r,
-        'isObsolete = %d',
-        $this->obsolete);
-    }
-
-    return $this->formatWhereClause($where);
+    return $where;
   }
 
   protected function willFilterPage(array $images) {
     assert_instances_of($images, 'PholioImage');
 
-    if ($this->getMockCache()) {
-      $mocks = $this->getMockCache();
-    } else {
-      $mock_ids = mpull($images, 'getMockID');
-      // DO NOT set needImages to true; recursion results!
-      $mocks = id(new PholioMockQuery())
-        ->setViewer($this->getViewer())
-        ->withIDs($mock_ids)
-        ->execute();
-      $mocks = mpull($mocks, null, 'getID');
+    $mock_phids = array();
+    foreach ($images as $image) {
+      if (!$image->hasMock()) {
+        continue;
+      }
+
+      $mock_phids[] = $image->getMockPHID();
     }
-    foreach ($images as $index => $image) {
-      $mock = idx($mocks, $image->getMockID());
-      if ($mock) {
-        $image->attachMock($mock);
+
+    if ($mock_phids) {
+      if ($this->mocks) {
+        $mocks = $this->mocks;
       } else {
-        // mock is missing or we can't see it
-        unset($images[$index]);
+        $mocks = id(new PholioMockQuery())
+          ->setViewer($this->getViewer())
+          ->withPHIDs($mock_phids)
+          ->execute();
+      }
+
+      $mocks = mpull($mocks, null, 'getPHID');
+
+      foreach ($images as $key => $image) {
+        if (!$image->hasMock()) {
+          continue;
+        }
+
+        $mock = idx($mocks, $image->getMockPHID());
+        if (!$mock) {
+          unset($images[$key]);
+          $this->didRejectResult($image);
+          continue;
+        }
+
+        $image->attachMock($mock);
       }
     }
 
@@ -140,9 +131,12 @@ final class PholioImageQuery
     $all_files = mpull($all_files, null, 'getPHID');
 
     if ($this->needInlineComments) {
-      $all_inline_comments = id(new PholioTransactionComment())
-        ->loadAllWhere('imageid IN (%Ld)',
-          mpull($images, 'getID'));
+      // Only load inline comments the viewer has permission to see.
+      $all_inline_comments = id(new PholioTransactionComment())->loadAllWhere(
+        'imageID IN (%Ld)
+          AND (transactionPHID IS NOT NULL OR authorPHID = %s)',
+        mpull($images, 'getID'),
+        $this->getViewer()->getPHID());
       $all_inline_comments = mgroup($all_inline_comments, 'getImageID');
     }
 
@@ -162,7 +156,7 @@ final class PholioImageQuery
   }
 
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationPholio';
+    return 'PhabricatorPholioApplication';
   }
 
 }

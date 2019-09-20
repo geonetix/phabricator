@@ -1,45 +1,37 @@
 <?php
 
-final class DrydockResourceListController extends DrydockController {
+final class DrydockResourceListController extends DrydockResourceController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function shouldAllowPublic() {
+    return true;
+  }
 
-    $title = pht('Resources');
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
 
-    $resource_header = id(new PHUIHeaderView())
-      ->setHeader($title);
+    $engine = new DrydockResourceSearchEngine();
 
-    $pager = new AphrontPagerView();
-    $pager->setURI(new PhutilURI('/drydock/resource/'), 'offset');
-    $resources = id(new DrydockResourceQuery())
-      ->executeWithOffsetPager($pager);
+    $id = $request->getURIData('id');
+    if ($id) {
+      $blueprint = id(new DrydockBlueprintQuery())
+        ->setViewer($viewer)
+        ->withIDs(array($id))
+        ->executeOne();
+      if (!$blueprint) {
+        return new Aphront404Response();
+      }
+      $this->setBlueprint($blueprint);
+      $engine->setBlueprint($blueprint);
+    }
 
-    $resource_list = $this->buildResourceListView($resources);
+    $querykey = $request->getURIData('queryKey');
 
-    $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName($title)
-        ->setHref($request->getRequestURI()));
+    $controller = id(new PhabricatorApplicationSearchController())
+      ->setQueryKey($querykey)
+      ->setSearchEngine($engine)
+      ->setNavigation($this->buildSideNavView());
 
-    $nav = $this->buildSideNav('resource');
-    $nav->setCrumbs($crumbs);
-    $nav->appendChild(
-      array(
-        $resource_header,
-        $resource_list,
-        $pager,
-      ));
-
-    return $this->buildApplicationPage(
-      $nav,
-      array(
-        'title' => $title,
-        'device' => true,
-      ));
-
+    return $this->delegateToController($controller);
   }
 
 }

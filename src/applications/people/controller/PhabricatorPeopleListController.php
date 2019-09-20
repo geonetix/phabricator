@@ -1,9 +1,7 @@
 <?php
 
-final class PhabricatorPeopleListController extends PhabricatorPeopleController
-  implements PhabricatorApplicationSearchResultsControllerInterface {
-
-  private $key;
+final class PhabricatorPeopleListController
+  extends PhabricatorPeopleController {
 
   public function shouldAllowPublic() {
     return true;
@@ -13,73 +11,32 @@ final class PhabricatorPeopleListController extends PhabricatorPeopleController
     return false;
   }
 
-  public function willProcessRequest(array $data) {
-    $this->key = idx($data, 'key');
-  }
+  public function handleRequest(AphrontRequest $request) {
+    $this->requireApplicationCapability(
+      PeopleBrowseUserDirectoryCapability::CAPABILITY);
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $controller = id(new PhabricatorApplicationSearchController($request))
-      ->setQueryKey($this->key)
+    $controller = id(new PhabricatorApplicationSearchController())
+      ->setQueryKey($request->getURIData('queryKey'))
       ->setSearchEngine(new PhabricatorPeopleSearchEngine())
       ->setNavigation($this->buildSideNavView());
 
     return $this->delegateToController($controller);
   }
 
-  public function renderResultsList(
-    array $users,
-    PhabricatorSavedQuery $query) {
+  protected function buildApplicationCrumbs() {
+    $crumbs = parent::buildApplicationCrumbs();
+    $viewer = $this->getRequest()->getUser();
 
-    assert_instances_of($users, 'PhabricatorUser');
-
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
-
-    $list = new PHUIObjectItemListView();
-
-    foreach ($users as $user) {
-      $primary_email = $user->loadPrimaryEmail();
-      if ($primary_email && $primary_email->getIsVerified()) {
-        $email = pht('Verified');
-      } else {
-        $email = pht('Unverified');
-      }
-
-      $user_handle = new PhabricatorObjectHandle();
-      $user_handle->setImageURI($user->loadProfileImageURI());
-
-      $item = new PHUIObjectItemView();
-      $item->setHeader($user->getFullName())
-        ->setHref('/p/'.$user->getUsername().'/')
-        ->addAttribute(hsprintf('%s %s',
-            phabricator_date($user->getDateCreated(), $viewer),
-            phabricator_time($user->getDateCreated(), $viewer)))
-        ->addAttribute($email);
-
-      if ($user->getIsDisabled()) {
-        $item->addIcon('disable', pht('Disabled'));
-      }
-
-      if ($user->getIsAdmin()) {
-        $item->addIcon('highlight', pht('Admin'));
-      }
-
-      if ($user->getIsSystemAgent()) {
-        $item->addIcon('computer', pht('System Agent'));
-      }
-
-      if ($viewer->getIsAdmin()) {
-        $uid = $user->getID();
-        $item->addAction(
-          id(new PHUIListItemView())
-            ->setIcon('edit')
-            ->setHref($this->getApplicationURI('edit/'.$uid.'/')));
-      }
-
-      $list->addItem($item);
+    if ($viewer->getIsAdmin()) {
+      $crumbs->addAction(
+        id(new PHUIListItemView())
+        ->setName(pht('Create New User'))
+        ->setHref($this->getApplicationURI('create/'))
+        ->setIcon('fa-plus-square'));
     }
 
-    return $list;
+    return $crumbs;
   }
+
+
 }

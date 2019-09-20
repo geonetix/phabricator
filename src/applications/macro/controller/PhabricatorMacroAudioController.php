@@ -1,21 +1,13 @@
 <?php
 
-final class PhabricatorMacroAudioController
-  extends PhabricatorMacroController {
+final class PhabricatorMacroAudioController extends PhabricatorMacroController {
 
-  private $id;
-
-  public function willProcessRequest(array $data) {
-    $this->id = idx($data, 'id');
-  }
-
-  public function processRequest() {
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $id = $request->getURIData('id');
 
     $this->requireApplicationCapability(
-      PhabricatorMacroCapabilityManage::CAPABILITY);
-
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+      PhabricatorMacroManageCapability::CAPABILITY);
 
     $macro = id(new PhabricatorMacroQuery())
       ->setViewer($viewer)
@@ -23,7 +15,7 @@ final class PhabricatorMacroAudioController
         array(
           PhabricatorPolicyCapability::CAN_VIEW,
         ))
-      ->withIDs(array($this->id))
+      ->withIDs(array($id))
       ->executeOne();
 
     if (!$macro) {
@@ -42,7 +34,7 @@ final class PhabricatorMacroAudioController
       if ($request->getBool('behaviorForm')) {
         $xactions[] = id(new PhabricatorMacroTransaction())
           ->setTransactionType(
-            PhabricatorMacroTransactionType::TYPE_AUDIO_BEHAVIOR)
+            PhabricatorMacroAudioBehaviorTransaction::TRANSACTIONTYPE)
           ->setNewValue($request->getStr('audioBehavior'));
       } else {
         $file = null;
@@ -58,15 +50,20 @@ final class PhabricatorMacroAudioController
 
         if ($file) {
           if (!$file->isAudio()) {
-            $errors[] = pht('You must upload audio.');
+            $errors[] = pht(
+              'The file you uploaded is invalid: it is not recognizable as '.
+              'a valid audio file.');
             $e_file = pht('Invalid');
           } else {
             $xactions[] = id(new PhabricatorMacroTransaction())
-              ->setTransactionType(PhabricatorMacroTransactionType::TYPE_AUDIO)
+              ->setTransactionType(
+                PhabricatorMacroAudioTransaction::TRANSACTIONTYPE)
               ->setNewValue($file->getPHID());
           }
         } else {
-          $errors[] = pht('You must upload an audio file.');
+          $errors[] = pht(
+            'To change the audio for a macro, you must upload an audio '.
+            'file.');
           $e_file = pht('Required');
         }
       }
@@ -80,14 +77,6 @@ final class PhabricatorMacroAudioController
 
         return id(new AphrontRedirectResponse())->setURI($view_uri);
       }
-    }
-
-    if ($errors) {
-      $error_view = new AphrontErrorView();
-      $error_view->setTitle(pht('Form Errors'));
-      $error_view->setErrors($errors);
-    } else {
-      $error_view = null;
     }
 
     $form = id(new AphrontFormView())
@@ -120,27 +109,19 @@ final class PhabricatorMacroAudioController
         'Best for ambient sounds.'));
 
     $form->appendChild($options);
-
-    $form
-      ->appendChild(
+    $form->appendChild(
         id(new AphrontFormSubmitControl())
           ->setValue(pht('Save Audio Behavior'))
           ->addCancelButton($view_uri));
 
     $crumbs = $this->buildApplicationCrumbs();
 
-    $title = pht('Edit Audio Behavior');
+    $title = pht('Edit Audio: %s', $macro->getName());
     $crumb = pht('Edit Audio');
 
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setHref($view_uri)
-        ->setName(pht('Macro "%s"', $macro->getName())));
-
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setHref($request->getRequestURI())
-        ->setName($crumb));
+    $crumbs->addTextCrumb(pht('Macro "%s"', $macro->getName()), $view_uri);
+    $crumbs->addTextCrumb($crumb, $request->getRequestURI());
+    $crumbs->setBorder(true);
 
     $upload_form = id(new AphrontFormView())
       ->setEncType('multipart/form-data')
@@ -155,22 +136,30 @@ final class PhabricatorMacroAudioController
 
     $upload = id(new PHUIObjectBoxView())
       ->setHeaderText(pht('Upload New Audio'))
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
       ->setForm($upload_form);
 
     $form_box = id(new PHUIObjectBoxView())
-      ->setHeaderText($title)
-      ->setFormError($error_view)
+      ->setHeaderText(pht('Behavior'))
+      ->setFormErrors($errors)
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
       ->setForm($form);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
+    $header = id(new PHUIHeaderView())
+      ->setHeader($title)
+      ->setHeaderIcon('fa-pencil');
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter(array(
         $form_box,
         $upload,
-      ),
-      array(
-        'title' => $title,
-        'device' => true,
       ));
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
   }
+
 }

@@ -3,15 +3,27 @@
 final class ReleephBranchSearchEngine
   extends PhabricatorApplicationSearchEngine {
 
-  private $projectID;
+  private $product;
 
-  public function setProjectID($project_id) {
-    $this->projectID = $project_id;
+  public function getResultTypeDescription() {
+    return pht('Releeph Branches');
+  }
+
+  public function canUseInPanelContext() {
+    return false;
+  }
+
+  public function getApplicationClassName() {
+    return 'PhabricatorReleephApplication';
+  }
+
+  public function setProduct(ReleephProject $product) {
+    $this->product = $product;
     return $this;
   }
 
-  public function getProjectID() {
-    return $this->projectID;
+  public function getProduct() {
+    return $this->product;
   }
 
   public function buildSavedQueryFromRequest(AphrontRequest $request) {
@@ -25,7 +37,7 @@ final class ReleephBranchSearchEngine
   public function buildQueryFromSavedQuery(PhabricatorSavedQuery $saved) {
     $query = id(new ReleephBranchQuery())
       ->needCutPointCommits(true)
-      ->withProjectIDs(array($this->getProjectID()));
+      ->withProductPHIDs(array($this->getProduct()->getPHID()));
 
     $active = $saved->getParameter('active');
     $value = idx($this->getActiveValues(), $active);
@@ -49,10 +61,10 @@ final class ReleephBranchSearchEngine
   }
 
   protected function getURI($path) {
-    return '/releeph/project/'.$this->getProjectID().'/'.$path;
+    return '/releeph/product/'.$this->getProduct()->getID().'/'.$path;
   }
 
-  public function getBuiltinQueryNames() {
+  protected function getBuiltinQueryNames() {
     $names = array(
       'open' => pht('Open'),
       'all' => pht('All'),
@@ -91,4 +103,98 @@ final class ReleephBranchSearchEngine
     );
   }
 
+  protected function renderResultList(
+    array $branches,
+    PhabricatorSavedQuery $query,
+    array $handles) {
+
+
+    assert_instances_of($branches, 'ReleephBranch');
+
+    $viewer = $this->getRequest()->getUser();
+
+    $products = mpull($branches, 'getProduct');
+    $repo_phids = mpull($products, 'getRepositoryPHID');
+
+    if ($repo_phids) {
+      $repos = id(new PhabricatorRepositoryQuery())
+        ->setViewer($viewer)
+        ->withPHIDs($repo_phids)
+        ->execute();
+      $repos = mpull($repos, null, 'getPHID');
+    } else {
+      $repos = array();
+    }
+
+    $requests = array();
+    if ($branches) {
+      $requests = id(new ReleephRequestQuery())
+        ->setViewer($viewer)
+        ->withBranchIDs(mpull($branches, 'getID'))
+        ->withStatus(ReleephRequestQuery::STATUS_OPEN)
+        ->execute();
+      $requests = mgroup($requests, 'getBranchID');
+    }
+
+    $list = id(new PHUIObjectItemListView())
+      ->setUser($viewer);
+    foreach ($branches as $branch) {
+      $diffusion_href = null;
+      $repo = idx($repos, $branch->getProduct()->getRepositoryPHID());
+      if ($repo) {
+        $drequest = DiffusionRequest::newFromDictionary(
+          array(
+            'user' => $viewer,
+            'repository' => $repo,
+          ));
+
+        $diffusion_href = $drequest->generateURI(
+          array(
+            'action' => 'branch',
+            'branch' => $branch->getName(),
+          ));
+      }
+
+      $branch_link = $branch->getName();
+      if ($diffusion_href) {
+        $branch_link = phutil_tag(
+          'a',
+          array(
+            'href' => $diffusion_href,
+          ),
+          $branch_link);
+      }
+
+      $item = id(new PHUIObjectItemView())
+        ->setHeader($branch->getDisplayName())
+        ->setHref($this->getApplicationURI('branch/'.$branch->getID().'/'))
+        ->addAttribute($branch_link);
+
+      if (!$branch->getIsActive()) {
+        $item->setDisabled(true);
+      }
+
+      $commit = $branch->getCutPointCommit();
+      if ($commit) {
+        $item->addIcon(
+          'none',
+          phabricator_datetime($commit->getEpoch(), $viewer));
+      }
+
+      $open_count = count(idx($requests, $branch->getID(), array()));
+      if ($open_count) {
+        $item->setStatusIcon('fa-code-fork orange');
+        $item->addIcon(
+          'fa-code-fork',
+          pht(
+            '%s Open Pull Request(s)',
+            new PhutilNumber($open_count)));
+      }
+
+      $list->addItem($item);
+    }
+
+    return id(new PhabricatorApplicationSearchResultView())
+      ->setObjectList($list);
+  }
 }

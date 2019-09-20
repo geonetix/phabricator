@@ -1,44 +1,89 @@
 <?php
 
 final class PhabricatorOAuthClientAuthorizationQuery
-extends PhabricatorOffsetPagedQuery {
+  extends PhabricatorCursorPagedPolicyAwareQuery {
+
+  private $phids;
   private $userPHIDs;
+  private $clientPHIDs;
+
+  public function withPHIDs(array $phids) {
+    $this->phids = $phids;
+    return $this;
+  }
 
   public function withUserPHIDs(array $phids) {
     $this->userPHIDs = $phids;
     return $this;
   }
-  private function getUserPHIDs() {
-    return $this->userPHIDs;
+
+  public function withClientPHIDs(array $phids) {
+    $this->clientPHIDs = $phids;
+    return $this;
   }
 
-  public function execute() {
-    $table  = new PhabricatorOAuthClientAuthorization();
-    $conn_r = $table->establishConnection('r');
-
-    $where_clause = $this->buildWhereClause($conn_r);
-    $limit_clause = $this->buildLimitClause($conn_r);
-
-    $data = queryfx_all(
-      $conn_r,
-      'SELECT * FROM %T auth %Q %Q',
-      $table->getTableName(),
-      $where_clause,
-      $limit_clause);
-
-    return $table->loadAllFromArray($data);
+  public function newResultObject() {
+    return new PhabricatorOAuthClientAuthorization();
   }
 
-  private function buildWhereClause($conn_r) {
-    $where = array();
+  protected function loadPage() {
+    return $this->loadStandardPage($this->newResultObject());
+  }
 
-    if ($this->getUserPHIDs()) {
-      $where[] = qsprintf(
-        $conn_r,
-        'userPHID IN (%Ls)',
-        $this->getUserPHIDs());
+  protected function willFilterPage(array $authorizations) {
+    $client_phids = mpull($authorizations, 'getClientPHID');
+
+    $clients = id(new PhabricatorOAuthServerClientQuery())
+      ->setViewer($this->getViewer())
+      ->setParentQuery($this)
+      ->withPHIDs($client_phids)
+      ->execute();
+    $clients = mpull($clients, null, 'getPHID');
+
+    foreach ($authorizations as $key => $authorization) {
+      $client = idx($clients, $authorization->getClientPHID());
+
+      if (!$client) {
+        $this->didRejectResult($authorization);
+        unset($authorizations[$key]);
+        continue;
+      }
+
+      $authorization->attachClient($client);
     }
 
-    return $this->formatWhereClause($where);
+    return $authorizations;
   }
+
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
+
+    if ($this->phids !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'phid IN (%Ls)',
+        $this->phids);
+    }
+
+    if ($this->userPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'userPHID IN (%Ls)',
+        $this->userPHIDs);
+    }
+
+    if ($this->clientPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'clientPHID IN (%Ls)',
+        $this->clientPHIDs);
+    }
+
+    return $where;
+  }
+
+  public function getQueryApplicationClass() {
+    return 'PhabricatorOAuthServerApplication';
+  }
+
 }

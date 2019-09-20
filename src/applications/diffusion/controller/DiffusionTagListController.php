@@ -6,41 +6,56 @@ final class DiffusionTagListController extends DiffusionController {
     return true;
   }
 
-  public function processRequest() {
-    $drequest = $this->getDiffusionRequest();
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $response = $this->loadDiffusionContext();
+    if ($response) {
+      return $response;
+    }
+    require_celerity_resource('diffusion-css');
 
+    $viewer = $this->getViewer();
+    $drequest = $this->getDiffusionRequest();
     $repository = $drequest->getRepository();
 
-    $pager = new AphrontPagerView();
-    $pager->setURI($request->getRequestURI(), 'offset');
-    $pager->setOffset($request->getInt('offset'));
+    $pager = id(new PHUIPagerView())
+      ->readFromRequest($request);
 
     $params = array(
       'limit' => $pager->getPageSize() + 1,
-      'offset' => $pager->getOffset());
-    if ($drequest->getRawCommit()) {
+      'offset' => $pager->getOffset(),
+    );
+
+    if (strlen($drequest->getSymbolicCommit())) {
       $is_commit = true;
-      $params['commit'] = $drequest->getRawCommit();
+      $params['commit'] = $drequest->getSymbolicCommit();
     } else {
       $is_commit = false;
     }
 
-    $tags = array();
-    try {
-      $conduit_result = $this->callConduitWithDiffusionRequest(
-        'diffusion.tagsquery',
-        $params);
-      $tags = DiffusionRepositoryTag::newFromConduit($conduit_result);
-    } catch (ConduitException $ex) {
-      if ($ex->getMessage() != 'ERR-UNSUPPORTED-VCS') {
-        throw $ex;
-      }
+    switch ($repository->getVersionControlSystem()) {
+      case PhabricatorRepositoryType::REPOSITORY_TYPE_SVN:
+        $tags = array();
+        break;
+      default:
+        $conduit_result = $this->callConduitWithDiffusionRequest(
+          'diffusion.tagsquery',
+          $params);
+        $tags = DiffusionRepositoryTag::newFromConduit($conduit_result);
+        break;
     }
     $tags = $pager->sliceResults($tags);
 
     $content = null;
+
+    $header = id(new PHUIHeaderView())
+      ->setHeader(pht('Tags'))
+      ->setHeaderIcon('fa-tags');
+
+    if (!$repository->isSVN()) {
+      $branch_tag = $this->renderBranchTag($drequest);
+      $header->addTag($branch_tag);
+    }
+
     if (!$tags) {
       $content = $this->renderStatusMessage(
         pht('No Tags'),
@@ -55,41 +70,46 @@ final class DiffusionTagListController extends DiffusionController {
         ->needCommitData(true)
         ->execute();
 
-      $view = id(new DiffusionTagListView())
+      $tag_list = id(new DiffusionTagListView())
         ->setTags($tags)
         ->setUser($viewer)
         ->setCommits($commits)
         ->setDiffusionRequest($drequest);
 
-      $phids = $view->getRequiredHandlePHIDs();
+      $phids = $tag_list->getRequiredHandlePHIDs();
       $handles = $this->loadViewerHandles($phids);
-      $view->setHandles($handles);
+      $tag_list->setHandles($handles);
 
-      $panel = id(new AphrontPanelView())
-        ->setNoBackground(true)
-        ->appendChild($view)
-        ->appendChild($pager);
-
-      $content = $panel;
+      $content = id(new PHUIObjectBoxView())
+        ->setHeaderText($repository->getDisplayName())
+        ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+        ->setTable($tag_list)
+        ->setPager($pager);
     }
 
     $crumbs = $this->buildCrumbs(
       array(
         'tags' => true,
-        'commit' => $drequest->getRawCommit(),
+        'commit' => $drequest->getSymbolicCommit(),
       ));
+    $crumbs->setBorder(true);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $content,
-      ),
-      array(
-        'title' => array(
+    $tabs = $this->buildTabsView('tags');
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setTabs($tabs)
+      ->setFooter($content);
+
+    return $this->newPage()
+      ->setTitle(
+        array(
           pht('Tags'),
-          $repository->getCallsign().' Repository',
-        ),
-      ));
+          $repository->getDisplayName(),
+        ))
+      ->setCrumbs($crumbs)
+      ->appendChild($view)
+      ->addClass('diffusion-history-view');
   }
 
 }

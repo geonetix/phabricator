@@ -1,11 +1,24 @@
 <?php
 
-final class PHUIWorkpanelView extends AphrontView {
+final class PHUIWorkpanelView extends AphrontTagView {
 
   private $cards = array();
   private $header;
-  private $headerAction;
+  private $subheader = null;
   private $footerAction;
+  private $headerActions = array();
+  private $headerTag;
+  private $headerIcon;
+  private $href;
+
+  public function setHeaderIcon($icon) {
+    $this->headerIcon = $icon;
+    return $this;
+  }
+
+  public function getHeaderIcon() {
+    return $this->headerIcon;
+  }
 
   public function setCards(PHUIObjectItemListView $cards) {
     $this->cards[] = $cards;
@@ -17,9 +30,8 @@ final class PHUIWorkpanelView extends AphrontView {
     return $this;
   }
 
-  public function setHeaderAction($header_action) {
-    // TODO: This doesn't do anything?
-    $this->headerAction = $header_action;
+  public function setSubheader($subheader) {
+    $this->subheader = $subheader;
     return $this;
   }
 
@@ -28,7 +40,32 @@ final class PHUIWorkpanelView extends AphrontView {
     return $this;
   }
 
-  public function render() {
+  public function addHeaderAction(PHUIIconView $action) {
+    $this->headerActions[] = $action;
+    return $this;
+  }
+
+  public function setHeaderTag(PHUITagView $tag) {
+    $this->headerTag = $tag;
+    return $this;
+  }
+
+  public function setHref($href) {
+    $this->href = $href;
+    return $this;
+  }
+
+  public function getHref() {
+    return $this->href;
+  }
+
+  protected function getTagAttributes() {
+    return array(
+      'class' => 'phui-workpanel-view',
+    );
+  }
+
+  protected function getTagContent() {
     require_celerity_resource('phui-workpanel-view-css');
 
     $footer = '';
@@ -37,38 +74,51 @@ final class PHUIWorkpanelView extends AphrontView {
       $footer = phutil_tag(
         'ul',
           array(
-            'class' => 'phui-workpanel-footer-action mst ps'
+            'class' => 'phui-workpanel-footer-action mst ps',
           ),
           $footer_tag);
     }
 
-    $header = id(new PhabricatorActionHeaderView())
-      ->setHeaderTitle($this->header)
-      ->setHeaderColor(PhabricatorActionHeaderView::HEADER_GREY);
+    $header = id(new PHUIHeaderView())
+      ->setHeader($this->header)
+      ->setSubheader($this->subheader);
+
+    foreach ($this->headerActions as $action) {
+      $header->addActionItem($action);
+    }
+
+    if ($this->headerTag) {
+      $header->addActionItem($this->headerTag);
+    }
+
+    if ($this->headerIcon) {
+      $header->setHeaderIcon($this->headerIcon);
+    }
+
+    $href = $this->getHref();
+    if ($href !== null) {
+      $header->setHref($href);
+    }
 
     $body = phutil_tag(
       'div',
         array(
-          'class' => 'phui-workpanel-body'
+          'class' => 'phui-workpanel-body-content',
         ),
       $this->cards);
 
-    $view = phutil_tag(
-      'div',
-      array(
-        'class' => 'phui-workpanel-view-inner',
-      ),
-      array(
-        $header,
-        $body,
-        $footer,
-      ));
+    $body = phutil_tag_div('phui-workpanel-body', $body);
 
-    return phutil_tag(
-      'div',
+    $view = id(new PHUIBoxView())
+      ->setColor(PHUIBoxView::GREY)
+      ->addClass('phui-workpanel-view-inner')
+      ->appendChild(
         array(
-          'class' => 'phui-workpanel-view'
-        ),
-        $view);
+          $header,
+          $body,
+          $footer,
+        ));
+
+    return $view;
   }
 }

@@ -1,19 +1,18 @@
 <?php
 
 final class PhabricatorUserTransaction
-  extends PhabricatorApplicationTransaction {
+  extends PhabricatorModularTransaction {
 
   public function getApplicationName() {
     return 'user';
   }
 
   public function getApplicationTransactionType() {
-    return PhabricatorPeoplePHIDTypeUser::TYPECONST;
+    return PhabricatorPeopleUserPHIDType::TYPECONST;
   }
 
-  public function getApplicationTransactionCommentObject() {
-    return null;
+  public function getBaseTransactionClass() {
+    return 'PhabricatorUserTransactionType';
   }
 
 }
-

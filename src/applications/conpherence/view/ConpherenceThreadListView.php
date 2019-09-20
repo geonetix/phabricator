@@ -2,26 +2,14 @@
 
 final class ConpherenceThreadListView extends AphrontView {
 
+  const SEE_ALL_LIMIT = 16;
+
   private $baseURI;
   private $threads;
-  private $scrollUpParticipant;
-  private $scrollDownParticipant;
 
   public function setThreads(array $threads) {
     assert_instances_of($threads, 'ConpherenceThread');
     $this->threads = $threads;
-    return $this;
-  }
-
-  public function setScrollUpParticipant(
-    ConpherenceParticipant $participant) {
-    $this->scrollUpParticipant = $participant;
-    return $this;
-  }
-
-  public function setScrollDownParticipant(
-    ConpherenceParticipant $participant) {
-    $this->scrollDownParticipant = $participant;
     return $this;
   }
 
@@ -37,132 +25,148 @@ final class ConpherenceThreadListView extends AphrontView {
       ->addClass('conpherence-menu')
       ->setID('conpherence-menu');
 
-    $this->addThreadsToMenu($menu, $this->threads);
+    $header = $this->buildHeaderItemView();
+    $menu->addMenuItem($header);
+
+    // Blank State NUX
+    if (empty($this->threads)) {
+      $join_item = id(new PHUIListItemView())
+        ->setType(PHUIListItemView::TYPE_LINK)
+        ->setHref('/conpherence/search/')
+        ->setName(pht('Join a Room'));
+      $menu->addMenuItem($join_item);
+
+      $create_item = id(new PHUIListItemView())
+        ->setType(PHUIListItemView::TYPE_LINK)
+        ->setHref('/conpherence/new/')
+        ->setWorkflow(true)
+        ->setName(pht('Create a Room'));
+      $menu->addMenuItem($create_item);
+    }
+
+    $rooms = $this->buildRoomItems($this->threads);
+    foreach ($rooms as $room) {
+      $menu->addMenuItem($room);
+    }
+
+    $menu = phutil_tag_div('phabricator-side-menu', $menu);
+    $menu = phutil_tag_div('phui-basic-nav', $menu);
 
     return $menu;
   }
 
-  public function renderSingleThread(ConpherenceThread $thread) {
-    return $this->renderThread($thread);
-  }
+  private function renderThreadItem(
+    ConpherenceThread $thread) {
 
-  public function renderThreadsHTML() {
-    $thread_html = array();
-
-    if ($this->scrollUpParticipant->getID()) {
-      $thread_html[] = $this->getScrollMenuItem(
-        $this->scrollUpParticipant,
-        'up');
-    }
-
-    foreach ($this->threads as $thread) {
-      $thread_html[] = $this->renderSingleThread($thread);
-    }
-
-    if ($this->scrollDownParticipant->getID()) {
-      $thread_html[] = $this->getScrollMenuItem(
-        $this->scrollDownParticipant,
-        'down');
-    }
-
-    return phutil_implode_html('', $thread_html);
-  }
-
-  private function renderThreadItem(ConpherenceThread $thread) {
-    return id(new PHUIListItemView())
-      ->setType(PHUIListItemView::TYPE_CUSTOM)
-      ->setName($this->renderThread($thread));
-  }
-
-  private function renderThread(ConpherenceThread $thread) {
     $user = $this->getUser();
-
-    $uri = $this->baseURI.$thread->getID().'/';
     $data = $thread->getDisplayData($user);
-    $title = $data['title'];
-    $subtitle = $data['subtitle'];
-    $unread_count = $data['unread_count'];
-    $epoch = $data['epoch'];
-    $image = $data['image'];
     $dom_id = $thread->getPHID().'-nav-item';
 
-    return id(new ConpherenceMenuItemView())
-      ->setUser($user)
-      ->setTitle($title)
-      ->setSubtitle($subtitle)
-      ->setHref($uri)
-      ->setEpoch($epoch)
-      ->setImageURI($image)
-      ->setUnreadCount($unread_count)
+    return id(new PHUIListItemView())
+      ->setName($data['title'])
+      ->setHref('/'.$thread->getMonogram())
+      ->setProfileImage($data['image'])
+      ->setCount($data['unread_count'])
+      ->setType(PHUIListItemView::TYPE_CUSTOM)
       ->setID($thread->getPHID().'-nav-item')
       ->addSigil('conpherence-menu-click')
       ->setMetadata(
         array(
-          'title' => $data['js_title'],
+          'title' => $data['title'],
           'id' => $dom_id,
           'threadID' => $thread->getID(),
+          'theme' => $data['theme'],
           ));
   }
 
-  private function addThreadsToMenu(
-    PHUIListView $menu,
-    array $conpherences) {
+  private function buildRoomItems(array $threads) {
 
-    if ($this->scrollUpParticipant->getID()) {
-      $item = $this->getScrollMenuItem($this->scrollUpParticipant, 'up');
-      $menu->addMenuItem($item);
+    $items = array();
+    $show_threads = $threads;
+    $all_threads = false;
+    if (count($threads) > self::SEE_ALL_LIMIT) {
+      $show_threads = array_slice($threads, 0, self::SEE_ALL_LIMIT);
+      $all_threads = true;
     }
 
-    foreach ($conpherences as $conpherence) {
-      $item = $this->renderThreadItem($conpherence);
-      $menu->addMenuItem($item);
+    foreach ($show_threads as $thread) {
+      $items[] = $this->renderThreadItem($thread);
     }
 
-    if (empty($conpherences)) {
-      $menu->addMenuItem($this->getNoConpherencesMenuItem());
+    // Send them to application search here
+    if ($all_threads) {
+      $items[] = id(new PHUIListItemView())
+        ->setType(PHUIListItemView::TYPE_LINK)
+        ->setHref('/conpherence/search/query/participant/')
+        ->setIcon('fa-external-link')
+        ->setName(pht('See All Joined'));
     }
 
-    if ($this->scrollDownParticipant->getID()) {
-      $item = $this->getScrollMenuItem($this->scrollDownParticipant, 'down');
-      $menu->addMenuItem($item);
-    }
-
-    return $menu;
+    return $items;
   }
 
-  public function getScrollMenuItem(
-    ConpherenceParticipant $participant,
-    $direction) {
+  private function buildHeaderItemView() {
+    $rooms = phutil_tag(
+      'a',
+      array(
+        'class' => 'room-list-href',
+        'href' => '/conpherence/search/',
+      ),
+      pht('Rooms'));
 
-    if ($direction == 'up') {
-      $name = pht('Load Newer Threads');
-    } else {
-      $name = pht('Load Older Threads');
-    }
+    $new_icon = id(new PHUIIconView())
+      ->setIcon('fa-plus-square')
+      ->addSigil('has-tooltip')
+      ->setHref('/conpherence/edit/')
+      ->setWorkflow(true)
+      ->setMetaData(array(
+        'tip' => pht('New Room'),
+      ));
+
+    $search_icon = id(new PHUIIconView())
+      ->setIcon('fa-search')
+      ->addSigil('has-tooltip')
+      ->setHref('/conpherence/search/')
+      ->setMetaData(array(
+        'tip' => pht('Search Rooms'),
+      ));
+
+    $icons = phutil_tag(
+      'span',
+      array(
+        'class' => 'room-list-icons',
+      ),
+      array(
+        $new_icon,
+        $search_icon,
+      ));
+
+    $new_icon = id(new PHUIIconView())
+      ->setIcon('fa-plus-square')
+      ->setHref('/conpherence/new/')
+      ->setWorkflow(true);
+
+    $custom = phutil_tag_div('grouped', array($rooms, $icons));
+
     $item = id(new PHUIListItemView())
-      ->addSigil('conpherence-menu-scroller')
-      ->setName($name)
-      ->setHref($this->baseURI)
-      ->setType(PHUIListItemView::TYPE_BUTTON)
-      ->setMetadata(array(
-        'participant_id' => $participant->getID(),
-        'conpherence_phid' => $participant->getConpherencePHID(),
-        'date_touched' => $participant->getDateTouched(),
-        'direction' => $direction));
+      ->setType(PHUIListItemView::TYPE_CUSTOM)
+      ->setName($custom)
+      ->addClass('conpherence-room-list-header');
     return $item;
   }
 
-  private function getNoConpherencesMenuItem() {
+  private function getNoRoomsMenuItem() {
     $message = phutil_tag(
       'div',
       array(
-        'class' => 'no-conpherences-menu-item'
+        'class' => 'no-conpherences-menu-item',
       ),
-      pht('No conpherences.'));
+      pht('No Rooms'));
 
     return id(new PHUIListItemView())
       ->setType(PHUIListItemView::TYPE_CUSTOM)
       ->setName($message);
   }
+
 
 }

@@ -17,8 +17,6 @@
  *
  * @param string            Unparsed URI.
  * @return  @{class:JX.URI} JX.URI instance.
- *
- * @group uri
  */
 JX.$U = function(uri) {
   return new JX.URI(uri);
@@ -38,8 +36,6 @@ JX.$U = function(uri) {
  *
  *   uri.setFragment('clowntown');
  *   uri.toString() // http://www.example.com/asdf.php?a=b&c=d#clowntown
- *
- * @group uri
  */
 JX.install('URI', {
   statics : {
@@ -180,6 +176,14 @@ JX.install('URI', {
 
     getDomain : function() {
       return this._domain;
+    },
+
+    getRelativeURI: function() {
+      return JX.$U(this.toString())
+        .setProtocol(null)
+        .setPort(null)
+        .setDomain(null)
+        .toString();
     },
 
     toString : function() {

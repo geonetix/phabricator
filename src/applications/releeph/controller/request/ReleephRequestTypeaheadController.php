@@ -3,9 +3,7 @@
 final class ReleephRequestTypeaheadController
   extends PhabricatorTypeaheadDatasourceController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-
+  public function handleRequest(AphrontRequest $request) {
     $query    = $request->getStr('q');
     $repo_id  = $request->getInt('repo');
     $since    = $request->getInt('since');
@@ -56,7 +54,7 @@ final class ReleephRequestTypeaheadController
         $full_commit_id,
         $short_commit_id,
         $row['authorName'],
-        phabricator_format_relative_time($now - $row['epoch']),
+        phutil_format_relative_time($now - $row['epoch']),
         $first_line,
       );
     }

@@ -2,31 +2,11 @@
 
 final class PhabricatorAuditListView extends AphrontView {
 
-  private $audits;
-  private $handles;
-  private $authorityPHIDs = array();
+  private $commits = array();
+  private $header;
+  private $showDrafts;
   private $noDataString;
-  private $commits;
-  private $showCommits = true;
-
   private $highlightedAudits;
-
-  public function setAudits(array $audits) {
-    assert_instances_of($audits, 'PhabricatorRepositoryAuditRequest');
-    $this->audits = $audits;
-    return $this;
-  }
-
-  public function setHandles(array $handles) {
-    assert_instances_of($handles, 'PhabricatorObjectHandle');
-    $this->handles = $handles;
-    return $this;
-  }
-
-  public function setAuthorityPHIDs(array $phids) {
-    $this->authorityPHIDs = $phids;
-    return $this;
-  }
 
   public function setNoDataString($no_data_string) {
     $this->noDataString = $no_data_string;
@@ -37,116 +17,149 @@ final class PhabricatorAuditListView extends AphrontView {
     return $this->noDataString;
   }
 
+  public function setHeader($header) {
+    $this->header = $header;
+    return $this;
+  }
+
+  public function getHeader() {
+    return $this->header;
+  }
+
+  public function setShowDrafts($show_drafts) {
+    $this->showDrafts = $show_drafts;
+    return $this;
+  }
+
+  public function getShowDrafts() {
+    return $this->showDrafts;
+  }
+
+  /**
+   * These commits should have both commit data and audit requests attached.
+   */
   public function setCommits(array $commits) {
     assert_instances_of($commits, 'PhabricatorRepositoryCommit');
     $this->commits = mpull($commits, null, 'getPHID');
     return $this;
   }
 
-  public function setShowCommits($show_commits) {
-    $this->showCommits = $show_commits;
-    return $this;
-  }
-
-  public function getRequiredHandlePHIDs() {
-    $phids = array();
-    foreach ($this->audits as $audit) {
-      $phids[$audit->getCommitPHID()] = true;
-      $phids[$audit->getAuditorPHID()] = true;
-    }
-    return array_keys($phids);
-  }
-
-  private function getHandle($phid) {
-    $handle = idx($this->handles, $phid);
-    if (!$handle) {
-      throw new Exception("No handle for '{$phid}'!");
-    }
-    return $handle;
+  public function getCommits() {
+    return $this->commits;
   }
 
   private function getCommitDescription($phid) {
     if ($this->commits === null) {
-      return null;
+      return pht('(Unknown Commit)');
     }
 
     $commit = idx($this->commits, $phid);
     if (!$commit) {
-      return null;
+      return pht('(Unknown Commit)');
     }
 
-    return $commit->getCommitData()->getSummary();
-  }
-
-  public function getHighlightedAudits() {
-    if ($this->highlightedAudits === null) {
-      $this->highlightedAudits = array();
-
-      $user = $this->user;
-      $authority = array_fill_keys($this->authorityPHIDs, true);
-
-      foreach ($this->audits as $audit) {
-        $has_authority = !empty($authority[$audit->getAuditorPHID()]);
-        if ($has_authority) {
-          $commit_phid = $audit->getCommitPHID();
-          $commit_author = $this->commits[$commit_phid]->getAuthorPHID();
-
-          // You don't have authority over package and project audits on your
-          // own commits.
-
-          $auditor_is_user = ($audit->getAuditorPHID() == $user->getPHID());
-          $user_is_author = ($commit_author == $user->getPHID());
-
-          if ($auditor_is_user || !$user_is_author) {
-            $this->highlightedAudits[$audit->getID()] = $audit;
-          }
-        }
-      }
+    $summary = $commit->getCommitData()->getSummary();
+    if (strlen($summary)) {
+      return $summary;
     }
 
-    return $this->highlightedAudits;
+    // No summary, so either this is still importing or just has an empty
+    // commit message.
+
+    if (!$commit->isImported()) {
+      return pht('(Importing Commit...)');
+    } else {
+      return pht('(Untitled Commit)');
+    }
   }
 
   public function render() {
+    $list = $this->buildList();
+    $list->setFlush(true);
+    return $list->render();
+  }
+
+  public function buildList() {
+    $viewer = $this->getViewer();
     $rowc = array();
 
-    $list = new PHUIObjectItemListView();
-    $list->setCards(true);
-    $list->setFlush(true);
-    foreach ($this->audits as $audit) {
-      $commit_phid = $audit->getCommitPHID();
-      $committed = null;
+    $phids = array();
+    foreach ($this->getCommits() as $commit) {
+      $phids[] = $commit->getPHID();
 
-      $commit_name = $this->getHandle($commit_phid)->getName();
-      $commit_link = $this->getHandle($commit_phid)->getURI();
-      $commit_desc = $this->getCommitDescription($commit_phid);
-      $commit = idx($this->commits, $commit_phid);
-      if ($commit && $this->user) {
-        $committed = phabricator_datetime($commit->getEpoch(), $this->user);
+      foreach ($commit->getAudits() as $audit) {
+        $phids[] = $audit->getAuditorPHID();
       }
 
-      $reasons = $audit->getAuditReasons();
-      $reasons = phutil_implode_html(', ', $reasons);
+      $author_phid = $commit->getAuthorPHID();
+      if ($author_phid) {
+        $phids[] = $author_phid;
+      }
+    }
 
-      $status_code = $audit->getAuditStatus();
-      $status_text =
-        PhabricatorAuditStatusConstants::getStatusName($status_code);
-      $status_color =
-        PhabricatorAuditStatusConstants::getStatusColor($status_code);
+    $handles = $viewer->loadHandles($phids);
 
-      $auditor_handle = $this->getHandle($audit->getAuditorPHID());
+    $show_drafts = $this->getShowDrafts();
+
+    $draft_icon = id(new PHUIIconView())
+      ->setIcon('fa-comment yellow')
+      ->addSigil('has-tooltip')
+      ->setMetadata(
+        array(
+          'tip' => pht('Unsubmitted Comments'),
+        ));
+
+    $list = new PHUIObjectItemListView();
+    foreach ($this->commits as $commit) {
+      $commit_phid = $commit->getPHID();
+      $commit_handle = $handles[$commit_phid];
+      $committed = null;
+
+      $commit_name = $commit_handle->getName();
+      $commit_link = $commit_handle->getURI();
+      $commit_desc = $this->getCommitDescription($commit_phid);
+      $committed = phabricator_datetime($commit->getEpoch(), $viewer);
+
+      $status = $commit->getAuditStatusObject();
+
+      $status_text = $status->getName();
+      $status_color = $status->getColor();
+      $status_icon = $status->getIcon();
+
+      $author_phid = $commit->getAuthorPHID();
+      if ($author_phid) {
+        $author_name = $handles[$author_phid]->renderLink();
+      } else {
+        $author_name = $commit->getCommitData()->getAuthorName();
+      }
+
       $item = id(new PHUIObjectItemView())
-          ->setObjectName($commit_name)
-          ->setHeader($commit_desc)
-          ->setHref($commit_link)
-          ->setBarColor($status_color)
-          ->addAttribute($status_text)
-          ->addAttribute($reasons)
-          ->addIcon('none', $committed)
-          ->addByline(pht('Auditor: %s', $auditor_handle->renderLink()));
+        ->setObjectName($commit_name)
+        ->setHeader($commit_desc)
+        ->setHref($commit_link)
+        ->setDisabled($commit->isUnreachable())
+        ->addByline(pht('Author: %s', $author_name))
+        ->addIcon('none', $committed);
 
-      if (array_key_exists($audit->getID(), $this->getHighlightedAudits())) {
-        $item->setEffect('highlighted');
+      if ($show_drafts) {
+        if ($commit->getHasDraft($viewer)) {
+          $item->addAttribute($draft_icon);
+        }
+      }
+
+      $audits = $commit->getAudits();
+      $auditor_phids = mpull($audits, 'getAuditorPHID');
+      if ($auditor_phids) {
+        $auditor_list = $handles->newSublist($auditor_phids)
+          ->renderList()
+          ->setAsInline(true);
+      } else {
+        $auditor_list = phutil_tag('em', array(), pht('None'));
+      }
+      $item->addAttribute(pht('Auditors: %s', $auditor_list));
+
+      if ($status_color) {
+        $item->setStatusIcon($status_icon.' '.$status_color, $status_text);
       }
 
       $list->addItem($item);
@@ -156,7 +169,11 @@ final class PhabricatorAuditListView extends AphrontView {
       $list->setNoDataString($this->noDataString);
     }
 
-    return $list->render();
+    if ($this->header) {
+      $list->setHeader($this->header);
+    }
+
+    return $list;
   }
 
 }

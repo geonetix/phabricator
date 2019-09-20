@@ -59,9 +59,82 @@ final class DiffusionSubversionWireProtocolTestCase
           ),
         ),
       ));
+
+    // This is testing that multiple spaces are parsed correctly. See T13140
+    // for discussion.
+    $this->assertSameSubversionMessages(
+      '( get-file true  false ) ',
+      //               ^-- Note extra space!
+      array(
+        array(
+          array(
+            'type' => 'word',
+            'value' => 'get-file',
+          ),
+          array(
+            'type' => 'word',
+            'value' => 'true',
+          ),
+          array(
+            'type' => 'word',
+            'value' => 'false',
+          ),
+        ),
+      ),
+      '( get-file true false ) ');
+
+    $this->assertSameSubversionMessages(
+      '( duck 5:quack    moo  ) ',
+      array(
+        array(
+          array(
+            'type' => 'word',
+            'value' => 'duck',
+          ),
+          array(
+            'type' => 'string',
+            'value' => 'quack',
+          ),
+          array(
+            'type' => 'word',
+            'value' => 'moo',
+          ),
+        ),
+      ),
+      '( duck 5:quack moo ) ');
+
   }
 
-  private function assertSameSubversionMessages($string, array $structs) {
+  public function testSubversionWireProtocolPartialFrame() {
+    $proto = new DiffusionSubversionWireProtocol();
+
+    // This is primarily a test that we don't hang when we write() a frame
+    // which straddles a string boundary.
+    $msg1 = $proto->writeData('( duck 5:qu');
+    $msg2 = $proto->writeData('ack ) ');
+
+    $this->assertEqual(array(), ipull($msg1, 'structure'));
+    $this->assertEqual(
+      array(
+        array(
+          array(
+            'type' => 'word',
+            'value' => 'duck',
+          ),
+          array(
+            'type' => 'string',
+            'value' => 'quack',
+          ),
+        ),
+      ),
+      ipull($msg2, 'structure'));
+  }
+
+  private function assertSameSubversionMessages(
+    $string,
+    array $structs,
+    $serial_string = null) {
+
     $proto = new DiffusionSubversionWireProtocol();
 
     // Verify that the wire message parses into the structs.
@@ -75,6 +148,13 @@ final class DiffusionSubversionWireProtocolTestCase
       $serial[] = $proto->serializeStruct($struct);
     }
     $serial = implode('', $serial);
-    $this->assertEqual($string, $serial, 'serialize<'.$string.'>');
+
+    if ($serial_string === null) {
+      $expect_serial = $string;
+    } else {
+      $expect_serial = $serial_string;
+    }
+
+    $this->assertEqual($expect_serial, $serial, 'serialize<'.$string.'>');
   }
 }

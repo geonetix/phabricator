@@ -7,24 +7,17 @@ require_once $root.'/scripts/__init_script__.php';
 PhabricatorDaemonManagementWorkflow::requireExtensions();
 
 $args = new PhutilArgumentParser($argv);
-$args->setTagline('manage daemons');
+$args->setTagline(pht('manage daemons'));
 $args->setSynopsis(<<<EOSYNOPSIS
 **phd** __command__ [__options__]
-    Manage Phabricator daeons.
+    Manage Phabricator daemons.
 
 EOSYNOPSIS
   );
 $args->parseStandardArguments();
-$workflows = array(
-  new PhabricatorDaemonManagementListWorkflow(),
-  new PhabricatorDaemonManagementStatusWorkflow(),
-  new PhabricatorDaemonManagementStartWorkflow(),
-  new PhabricatorDaemonManagementStopWorkflow(),
-  new PhabricatorDaemonManagementRestartWorkflow(),
-  new PhabricatorDaemonManagementLaunchWorkflow(),
-  new PhabricatorDaemonManagementDebugWorkflow(),
-  new PhabricatorDaemonManagementLogWorkflow(),
-  new PhutilHelpArgumentWorkflow(),
-);
 
+$workflows = id(new PhutilClassMapQuery())
+  ->setAncestorClass('PhabricatorDaemonManagementWorkflow')
+  ->execute();
+$workflows[] = new PhutilHelpArgumentWorkflow();
 $args->parseWorkflows($workflows);

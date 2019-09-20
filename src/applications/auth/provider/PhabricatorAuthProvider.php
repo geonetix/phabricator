@@ -1,6 +1,6 @@
 <?php
 
-abstract class PhabricatorAuthProvider {
+abstract class PhabricatorAuthProvider extends Phobject {
 
   private $providerConfig;
 
@@ -15,8 +15,7 @@ abstract class PhabricatorAuthProvider {
 
   public function getProviderConfig() {
     if ($this->providerConfig === null) {
-      throw new Exception(
-        "Call attachProviderConfig() before getProviderConfig()!");
+      throw new PhutilInvalidStateException('attachProviderConfig');
     }
     return $this->providerConfig;
   }
@@ -56,16 +55,9 @@ abstract class PhabricatorAuthProvider {
   }
 
   public static function getAllBaseProviders() {
-    static $providers;
-
-    if ($providers === null) {
-      $objects = id(new PhutilSymbolLoader())
-        ->setAncestorClass(__CLASS__)
-        ->loadObjects();
-      $providers = $objects;
-    }
-
-    return $providers;
+    return id(new PhutilClassMapQuery())
+      ->setAncestorClass(__CLASS__)
+      ->execute();
   }
 
   public static function getAllProviders() {
@@ -93,8 +85,7 @@ abstract class PhabricatorAuthProvider {
           throw new Exception(
             pht(
               "Two authentication providers use the same provider key ".
-              "('%s'). Each provider must be identified by a unique ".
-              "key.",
+              "('%s'). Each provider must be identified by a unique key.",
               $key));
         }
         $providers[$key] = $object;
@@ -130,6 +121,10 @@ abstract class PhabricatorAuthProvider {
   }
 
   public function shouldAllowRegistration() {
+    if (!$this->shouldAllowLogin()) {
+      return false;
+    }
+
     return $this->getProviderConfig()->getShouldAllowRegistration();
   }
 
@@ -141,16 +136,32 @@ abstract class PhabricatorAuthProvider {
     return $this->getProviderConfig()->getShouldAllowUnlink();
   }
 
-  public function buildLoginForm(
-    PhabricatorAuthStartController $controller) {
+  public function shouldTrustEmails() {
+    return $this->shouldAllowEmailTrustConfiguration() &&
+           $this->getProviderConfig()->getShouldTrustEmails();
+  }
+
+  /**
+   * Should we allow the adapter to be marked as "trusted". This is true for
+   * all adapters except those that allow the user to type in emails (see
+   * @{class:PhabricatorPasswordAuthProvider}).
+   */
+  public function shouldAllowEmailTrustConfiguration() {
+    return true;
+  }
+
+  public function buildLoginForm(PhabricatorAuthStartController $controller) {
     return $this->renderLoginForm($controller->getRequest(), $mode = 'start');
+  }
+
+  public function buildInviteForm(PhabricatorAuthStartController $controller) {
+    return $this->renderLoginForm($controller->getRequest(), $mode = 'invite');
   }
 
   abstract public function processLoginRequest(
     PhabricatorAuthLoginController $controller);
 
-  public function buildLinkForm(
-    PhabricatorAuthLinkController $controller) {
+  public function buildLinkForm($controller) {
     return $this->renderLoginForm($controller->getRequest(), $mode = 'link');
   }
 
@@ -163,10 +174,8 @@ abstract class PhabricatorAuthProvider {
     return $this->renderLoginForm($controller->getRequest(), $mode = 'refresh');
   }
 
-  protected function renderLoginForm(
-    AphrontRequest $request,
-    $mode) {
-    throw new Exception("Not implemented!");
+  protected function renderLoginForm(AphrontRequest $request, $mode) {
+    throw new PhutilMethodNotImplementedException();
   }
 
   public function createProviders() {
@@ -183,8 +192,7 @@ abstract class PhabricatorAuthProvider {
 
   protected function loadOrCreateAccount($account_id) {
     if (!strlen($account_id)) {
-      throw new Exception(
-        "loadOrCreateAccount(...): empty account ID!");
+      throw new Exception(pht('Empty account ID!'));
     }
 
     $adapter = $this->getAdapter();
@@ -192,14 +200,18 @@ abstract class PhabricatorAuthProvider {
 
     if (!strlen($adapter->getAdapterType())) {
       throw new Exception(
-        "AuthAdapter (of class '{$adapter_class}') has an invalid ".
-        "implementation: no adapter type.");
+        pht(
+          "AuthAdapter (of class '%s') has an invalid implementation: ".
+          "no adapter type.",
+          $adapter_class));
     }
 
     if (!strlen($adapter->getAdapterDomain())) {
       throw new Exception(
-        "AuthAdapter (of class '{$adapter_class}') has an invalid ".
-        "implementation: no adapter domain.");
+        pht(
+          "AuthAdapter (of class '%s') has an invalid implementation: ".
+          "no adapter domain.",
+          $adapter_class));
     }
 
     $account = id(new PhabricatorExternalAccount())->loadOneWhere(
@@ -208,9 +220,7 @@ abstract class PhabricatorAuthProvider {
       $adapter->getAdapterDomain(),
       $account_id);
     if (!$account) {
-      $account = id(new PhabricatorExternalAccount())
-        ->setAccountType($adapter->getAdapterType())
-        ->setAccountDomain($adapter->getAdapterDomain())
+      $account = $this->newExternalAccount()
         ->setAccountID($account_id);
     }
 
@@ -235,12 +245,19 @@ abstract class PhabricatorAuthProvider {
             $image_uri,
             array(
               'name' => $name,
+              'viewPolicy' => PhabricatorPolicies::POLICY_NOONE,
             ));
+          if ($image_file->isViewableImage()) {
+            $image_file
+              ->setViewPolicy(PhabricatorPolicies::getMostOpenPolicy())
+              ->setCanCDN(true)
+              ->save();
+            $account->setProfileImagePHID($image_file->getPHID());
+          } else {
+            $image_file->delete();
+          }
         unset($unguarded);
 
-        if ($image_file) {
-          $account->setProfileImagePHID($image_file->getPHID());
-        }
       } catch (Exception $ex) {
         // Log this but proceed, it's not especially important that we
         // be able to pull profile images.
@@ -251,16 +268,15 @@ abstract class PhabricatorAuthProvider {
     $this->willSaveAccount($account);
 
     $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
-      $account->save();
+    $account->save();
     unset($unguarded);
 
     return $account;
   }
 
   public function getLoginURI() {
-    $app = PhabricatorApplication::getByClass('PhabricatorApplicationAuth');
-    $uri = $app->getApplicationURI('/login/'.$this->getProviderKey().'/');
-    return PhabricatorEnv::getURI($uri);
+    $app = PhabricatorApplication::getByClass('PhabricatorAuthApplication');
+    return $app->getApplicationURI('/login/'.$this->getProviderKey().'/');
   }
 
   public function getSettingsURI() {
@@ -268,7 +284,7 @@ abstract class PhabricatorAuthProvider {
   }
 
   public function getStartURI() {
-    $app = PhabricatorApplication::getByClass('PhabricatorApplicationAuth');
+    $app = PhabricatorApplication::getByClass('PhabricatorAuthApplication');
     $uri = $app->getApplicationURI('/start/');
     return $uri;
   }
@@ -281,8 +297,18 @@ abstract class PhabricatorAuthProvider {
     return false;
   }
 
-  public function getDefaultExternalAccount() {
-    throw new Exception("Not implemented!");
+  public function newDefaultExternalAccount() {
+    return $this->newExternalAccount();
+  }
+
+  protected function newExternalAccount() {
+    $config = $this->getProviderConfig();
+    $adapter = $this->getAdapter();
+
+    return id(new PhabricatorExternalAccount())
+      ->setAccountType($adapter->getAdapterType())
+      ->setAccountDomain($adapter->getAdapterDomain())
+      ->setProviderConfigPHID($config->getPHID());
   }
 
   public function getLoginOrder() {
@@ -291,6 +317,12 @@ abstract class PhabricatorAuthProvider {
 
   protected function getLoginIcon() {
     return 'Generic';
+  }
+
+  public function newIconView() {
+    return id(new PHUIIconView())
+      ->setSpriteSheet(PHUIIconView::SPRITE_LOGIN)
+      ->setSpriteIcon($this->getLoginIcon());
   }
 
   public function isLoginFormAButton() {
@@ -326,6 +358,7 @@ abstract class PhabricatorAuthProvider {
     AphrontFormView $form,
     array $values,
     array $issues) {
+
     return;
   }
 
@@ -347,7 +380,6 @@ abstract class PhabricatorAuthProvider {
         $account_view));
   }
 
-
   /**
    * Return true to use a two-step configuration (setup, configure) instead of
    * the default single-step configuration. In practice, this means that
@@ -360,7 +392,6 @@ abstract class PhabricatorAuthProvider {
     return false;
   }
 
-
   /**
    * Render a standard login/register button element.
    *
@@ -372,7 +403,7 @@ abstract class PhabricatorAuthProvider {
    * @param   AphrontRequest  HTTP request.
    * @param   string          Request mode string.
    * @param   map             Additional parameters, see above.
-   * @return  wild            Login button.
+   * @return  wild            Log in button.
    */
   protected function renderStandardLoginButton(
     AphrontRequest $request,
@@ -394,10 +425,12 @@ abstract class PhabricatorAuthProvider {
       $button_text = pht('Link External Account');
     } else if ($mode == 'refresh') {
       $button_text = pht('Refresh Account Link');
+    } else if ($mode == 'invite') {
+      $button_text = pht('Register Account');
     } else if ($this->shouldAllowRegistration()) {
-      $button_text = pht('Login or Register');
+      $button_text = pht('Log In or Register');
     } else {
-      $button_text = pht('Login');
+      $button_text = pht('Log In');
     }
 
     $icon = id(new PHUIIconView())
@@ -413,12 +446,13 @@ abstract class PhabricatorAuthProvider {
 
     $uri = $attributes['uri'];
     $uri = new PhutilURI($uri);
-    $params = $uri->getQueryParams();
-    $uri->setQueryParams(array());
+    $params = $uri->getQueryParamsAsPairList();
+    $uri->removeAllQueryParams();
 
     $content = array($button);
 
-    foreach ($params as $key => $value) {
+    foreach ($params as $pair) {
+      list($key, $value) = $pair;
       $content[] = phutil_tag(
         'input',
         array(
@@ -426,6 +460,13 @@ abstract class PhabricatorAuthProvider {
           'name' => $key,
           'value' => $value,
         ));
+    }
+
+    $static_response = CelerityAPI::getStaticResourceResponse();
+    $static_response->addContentSecurityPolicyURI('form-action', (string)$uri);
+
+    foreach ($this->getContentSecurityPolicyFormActions() as $csp_uri) {
+      $static_response->addContentSecurityPolicyURI('form-action', $csp_uri);
     }
 
     return phabricator_form(
@@ -436,6 +477,58 @@ abstract class PhabricatorAuthProvider {
         'sigil'  => idx($attributes, 'sigil'),
       ),
       $content);
+  }
+
+  public function renderConfigurationFooter() {
+    return null;
+  }
+
+  public function getAuthCSRFCode(AphrontRequest $request) {
+    $phcid = $request->getCookie(PhabricatorCookies::COOKIE_CLIENTID);
+    if (!strlen($phcid)) {
+      throw new AphrontMalformedRequestException(
+        pht('Missing Client ID Cookie'),
+        pht(
+          'Your browser did not submit a "%s" cookie with client state '.
+          'information in the request. Check that cookies are enabled. '.
+          'If this problem persists, you may need to clear your cookies.',
+          PhabricatorCookies::COOKIE_CLIENTID),
+        true);
+    }
+
+    return PhabricatorHash::weakDigest($phcid);
+  }
+
+  protected function verifyAuthCSRFCode(AphrontRequest $request, $actual) {
+    $expect = $this->getAuthCSRFCode($request);
+
+    if (!strlen($actual)) {
+      throw new Exception(
+        pht(
+          'The authentication provider did not return a client state '.
+          'parameter in its response, but one was expected. If this '.
+          'problem persists, you may need to clear your cookies.'));
+    }
+
+    if (!phutil_hashes_are_identical($actual, $expect)) {
+      throw new Exception(
+        pht(
+          'The authentication provider did not return the correct client '.
+          'state parameter in its response. If this problem persists, you may '.
+          'need to clear your cookies.'));
+    }
+  }
+
+  public function supportsAutoLogin() {
+    return false;
+  }
+
+  public function getAutoLoginURI(AphrontRequest $request) {
+    throw new PhutilMethodNotImplementedException();
+  }
+
+  protected function getContentSecurityPolicyFormActions() {
+    return array();
   }
 
 }

@@ -3,44 +3,34 @@
 final class PhabricatorFilesManagementRebuildWorkflow
   extends PhabricatorFilesManagementWorkflow {
 
-  public function didConstruct() {
+  protected function didConstruct() {
+    $arguments = $this->newIteratorArguments();
+
+    $arguments[] = array(
+      'name' => 'dry-run',
+      'help' => pht('Show what would be updated.'),
+    );
+
+    $arguments[] = array(
+      'name' => 'rebuild-mime',
+      'help' => pht('Rebuild MIME information.'),
+    );
+
+    $arguments[] = array(
+      'name' => 'rebuild-dimensions',
+      'help' => pht('Rebuild image dimension information.'),
+    );
+
     $this
       ->setName('rebuild')
-      ->setSynopsis('Rebuild metadata of old files.')
-      ->setArguments(
-        array(
-          array(
-            'name'      => 'all',
-            'help'      => 'Update all files.',
-          ),
-          array(
-            'name'      => 'dry-run',
-            'help'      => 'Show what would be updated.',
-          ),
-          array(
-            'name'      => 'rebuild-mime',
-            'help'      => 'Rebuild MIME information.',
-          ),
-          array(
-            'name'      => 'rebuild-dimensions',
-            'help'      => 'Rebuild image dimension information.',
-          ),
-          array(
-            'name'      => 'names',
-            'wildcard'  => true,
-          ),
-        ));
+      ->setSynopsis(pht('Rebuild metadata of old files.'))
+      ->setArguments($arguments);
   }
 
   public function execute(PhutilArgumentParser $args) {
     $console = PhutilConsole::getConsole();
 
     $iterator = $this->buildIterator($args);
-    if (!$iterator) {
-      throw new PhutilArgumentUsageException(
-        "Either specify a list of files to update, or use `--all` ".
-        "to update all files.");
-    }
 
     $update = array(
       'mime'          => $args->getArg('rebuild-mime'),
@@ -68,22 +58,28 @@ final class PhabricatorFilesManagementRebuildWorkflow
 
         if ($new_type == $file->getMimeType()) {
           $console->writeOut(
-            "%s: Mime type not changed (%s).\n",
-            $fid,
-            $new_type);
+            "%s\n",
+            pht(
+              '%s: Mime type not changed (%s).',
+              $fid,
+              $new_type));
         } else {
           if ($is_dry_run) {
             $console->writeOut(
-              "%s: Would update Mime type: '%s' -> '%s'.\n",
-              $fid,
-              $file->getMimeType(),
-              $new_type);
+              "%s\n",
+              pht(
+                "%s: Would update Mime type: '%s' -> '%s'.",
+                $fid,
+                $file->getMimeType(),
+                $new_type));
           } else {
             $console->writeOut(
-              "%s: Updating Mime type: '%s' -> '%s'.\n",
-              $fid,
-              $file->getMimeType(),
-              $new_type);
+              "%s\n",
+              pht(
+                "%s: Updating Mime type: '%s' -> '%s'.",
+                $fid,
+                $file->getMimeType(),
+                $new_type));
             $file->setMimeType($new_type);
             $file->save();
           }
@@ -93,8 +89,8 @@ final class PhabricatorFilesManagementRebuildWorkflow
       if ($update['dimensions']) {
         if (!$file->isViewableImage()) {
           $console->writeOut(
-            "%s: Not an image file.\n",
-            $fid);
+            "%s\n",
+            pht('%s: Not an image file.', $fid));
           continue;
         }
 
@@ -103,27 +99,26 @@ final class PhabricatorFilesManagementRebuildWorkflow
         $image_height = idx($metadata, PhabricatorFile::METADATA_IMAGE_HEIGHT);
         if ($image_width && $image_height) {
           $console->writeOut(
-            "%s: Image dimensions already exist.\n",
-            $fid);
+            "%s\n",
+            pht('%s: Image dimensions already exist.', $fid));
           continue;
         }
 
         if ($is_dry_run) {
           $console->writeOut(
-            "%s: Would update file dimensions (dry run)\n",
-            $fid);
+            "%s\n",
+            pht('%s: Would update file dimensions (dry run)', $fid));
           continue;
         }
 
         $console->writeOut(
-          "%s: Updating metadata... ",
-          $fid);
+          pht('%s: Updating metadata... ', $fid));
 
         try {
           $file->updateDimensions();
-          $console->writeOut("done.\n");
+          $console->writeOut("%s\n", pht('Done.'));
         } catch (Exception $ex) {
-          $console->writeOut("failed!\n");
+          $console->writeOut("%s\n", pht('Failed!'));
           $console->writeErr("%s\n", (string)$ex);
           $failed[] = $file;
         }
@@ -131,7 +126,7 @@ final class PhabricatorFilesManagementRebuildWorkflow
     }
 
     if ($failed) {
-      $console->writeOut("**Failures!**\n");
+      $console->writeOut("**%s**\n", pht('Failures!'));
       $ids = array();
       foreach ($failed as $file) {
         $ids[] = 'F'.$file->getID();
@@ -140,7 +135,7 @@ final class PhabricatorFilesManagementRebuildWorkflow
 
       return 1;
     } else {
-      $console->writeOut("**Success!**\n");
+      $console->writeOut("**%s**\n", pht('Success!'));
       return 0;
     }
 

@@ -8,6 +8,9 @@ final class HarbormasterBuildQuery
   private $buildStatuses;
   private $buildablePHIDs;
   private $buildPlanPHIDs;
+  private $initiatorPHIDs;
+  private $needBuildTargets;
+  private $autobuilds;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -34,19 +37,27 @@ final class HarbormasterBuildQuery
     return $this;
   }
 
+  public function withInitiatorPHIDs(array $initiator_phids) {
+    $this->initiatorPHIDs = $initiator_phids;
+    return $this;
+  }
+
+  public function withAutobuilds($with_autobuilds) {
+    $this->autobuilds = $with_autobuilds;
+    return $this;
+  }
+
+  public function needBuildTargets($need_targets) {
+    $this->needBuildTargets = $need_targets;
+    return $this;
+  }
+
+  public function newResultObject() {
+    return new HarbormasterBuild();
+  }
+
   protected function loadPage() {
-    $table = new HarbormasterBuild();
-    $conn_r = $table->establishConnection('r');
-
-    $data = queryfx_all(
-      $conn_r,
-      'SELECT * FROM %T %Q %Q %Q',
-      $table->getTableName(),
-      $this->buildWhereClause($conn_r),
-      $this->buildOrderClause($conn_r),
-      $this->buildLimitClause($conn_r));
-
-    return $table->loadAllFromArray($data);
+    return $this->loadStandardPage($this->newResultObject());
   }
 
   protected function willFilterPage(array $page) {
@@ -92,54 +103,131 @@ final class HarbormasterBuildQuery
       $build->attachBuildPlan(idx($plans, $plan_phid));
     }
 
+    $build_phids = mpull($page, 'getPHID');
+    $commands = id(new HarbormasterBuildCommand())->loadAllWhere(
+      'targetPHID IN (%Ls) ORDER BY id ASC',
+      $build_phids);
+    $commands = mgroup($commands, 'getTargetPHID');
+    foreach ($page as $build) {
+      $unprocessed_commands = idx($commands, $build->getPHID(), array());
+      $build->attachUnprocessedCommands($unprocessed_commands);
+    }
+
+    if ($this->needBuildTargets) {
+      $targets = id(new HarbormasterBuildTargetQuery())
+        ->setViewer($this->getViewer())
+        ->setParentQuery($this)
+        ->withBuildPHIDs($build_phids)
+        ->execute();
+
+      // TODO: Some day, when targets have dependencies, we should toposort
+      // these. For now, just put them into chronological order.
+      $targets = array_reverse($targets);
+
+      $targets = mgroup($targets, 'getBuildPHID');
+      foreach ($page as $build) {
+        $build_targets = idx($targets, $build->getPHID(), array());
+
+        foreach ($build_targets as $phid => $target) {
+          if ($target->getBuildGeneration() !== $build->getBuildGeneration()) {
+            unset($build_targets[$phid]);
+          }
+        }
+
+        $build->attachBuildTargets($build_targets);
+      }
+    }
+
     return $page;
   }
 
-  private function buildWhereClause(AphrontDatabaseConnection $conn_r) {
-    $where = array();
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
 
-    if ($this->ids) {
+    if ($this->ids !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'id IN (%Ld)',
+        $conn,
+        'b.id IN (%Ld)',
         $this->ids);
     }
 
-    if ($this->phids) {
+    if ($this->phids !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'phid in (%Ls)',
+        $conn,
+        'b.phid in (%Ls)',
         $this->phids);
     }
 
-    if ($this->buildStatuses) {
+    if ($this->buildStatuses !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'buildStatus in (%Ls)',
+        $conn,
+        'b.buildStatus in (%Ls)',
         $this->buildStatuses);
     }
 
-    if ($this->buildablePHIDs) {
+    if ($this->buildablePHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'buildablePHID IN (%Ls)',
+        $conn,
+        'b.buildablePHID IN (%Ls)',
         $this->buildablePHIDs);
     }
 
-    if ($this->buildPlanPHIDs) {
+    if ($this->buildPlanPHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'buildPlanPHID IN (%Ls)',
+        $conn,
+        'b.buildPlanPHID IN (%Ls)',
         $this->buildPlanPHIDs);
     }
 
-    $where[] = $this->buildPagingClause($conn_r);
+    if ($this->initiatorPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'b.initiatorPHID IN (%Ls)',
+        $this->initiatorPHIDs);
+    }
 
-    return $this->formatWhereClause($where);
+    if ($this->autobuilds !== null) {
+      if ($this->autobuilds) {
+        $where[] = qsprintf(
+          $conn,
+          'p.planAutoKey IS NOT NULL');
+      } else {
+        $where[] = qsprintf(
+          $conn,
+          'p.planAutoKey IS NULL');
+      }
+    }
+
+    return $where;
+  }
+
+  protected function buildJoinClauseParts(AphrontDatabaseConnection $conn) {
+    $joins = parent::buildJoinClauseParts($conn);
+
+    if ($this->shouldJoinPlanTable()) {
+      $joins[] = qsprintf(
+        $conn,
+        'JOIN %T p ON b.buildPlanPHID = p.phid',
+        id(new HarbormasterBuildPlan())->getTableName());
+    }
+
+    return $joins;
+  }
+
+  private function shouldJoinPlanTable() {
+    if ($this->autobuilds !== null) {
+      return true;
+    }
+
+    return false;
   }
 
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationHarbormaster';
+    return 'PhabricatorHarbormasterApplication';
+  }
+
+  protected function getPrimaryTableAlias() {
+    return 'b';
   }
 
 }

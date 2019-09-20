@@ -37,38 +37,37 @@ final class PhabricatorSavedQueryQuery
     return $table->loadAllFromArray($data);
   }
 
-  private function buildWhereClause($conn_r) {
+  protected function buildWhereClause(AphrontDatabaseConnection $conn) {
     $where = array();
 
-    if ($this->ids) {
+    if ($this->ids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'id IN (%Ld)',
         $this->ids);
     }
 
-    if ($this->engineClassNames) {
+    if ($this->engineClassNames !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'engineClassName IN (%Ls)',
         $this->engineClassNames);
     }
 
-    if ($this->queryKeys) {
+    if ($this->queryKeys !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'queryKey IN (%Ls)',
         $this->queryKeys);
     }
 
-    $where[] = $this->buildPagingClause($conn_r);
+    $where[] = $this->buildPagingClause($conn);
 
-    return $this->formatWhereClause($where);
+    return $this->formatWhereClause($conn, $where);
   }
 
-
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationSearch';
+    return 'PhabricatorSearchApplication';
   }
 
 }

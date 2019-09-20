@@ -6,23 +6,19 @@ final class PhabricatorTimeTestCase extends PhabricatorTestCase {
     $t = 1370202281;
     $time = PhabricatorTime::pushTime($t, 'UTC');
 
-    $this->assertEqual(
-      true,
-      (PhabricatorTime::getNow() === $t));
+    $this->assertTrue(PhabricatorTime::getNow() === $t);
 
     unset($time);
 
-    $this->assertEqual(
-      false,
-      (PhabricatorTime::getNow() === $t));
+    $this->assertFalse(PhabricatorTime::getNow() === $t);
   }
 
   public function testParseLocalTime() {
     $u = new PhabricatorUser();
-    $u->setTimezoneIdentifier('UTC');
+    $u->overrideTimezoneIdentifier('UTC');
 
     $v = new PhabricatorUser();
-    $v->setTimezoneIdentifier('America/Los_Angeles');
+    $v->overrideTimezoneIdentifier('America/Los_Angeles');
 
     $t = 1370202281; // 2013-06-02 12:44:41 -0700
     $time = PhabricatorTime::pushTime($t, 'America/Los_Angeles');

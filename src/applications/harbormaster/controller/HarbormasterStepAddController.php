@@ -1,84 +1,109 @@
 <?php
 
 final class HarbormasterStepAddController
-  extends HarbormasterController {
+  extends HarbormasterPlanController {
 
-  private $id;
-
-  public function willProcessRequest(array $data) {
-    $this->id = $data['id'];
-  }
-
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
-
-    $this->requireApplicationCapability(
-      HarbormasterCapabilityManagePlans::CAPABILITY);
-
-    $id = $this->id;
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
 
     $plan = id(new HarbormasterBuildPlanQuery())
-        ->setViewer($viewer)
-        ->withIDs(array($id))
-        ->executeOne();
-    if ($plan === null) {
-      throw new Exception("Build plan not found!");
+      ->setViewer($viewer)
+      ->withIDs(array($request->getURIData('id')))
+      ->requireCapabilities(
+        array(
+          PhabricatorPolicyCapability::CAN_VIEW,
+          PhabricatorPolicyCapability::CAN_EDIT,
+        ))
+      ->executeOne();
+    if (!$plan) {
+      return new Aphront404Response();
     }
 
-    $implementations = BuildStepImplementation::getImplementations();
+    $plan_id = $plan->getID();
+    $cancel_uri = $this->getApplicationURI("plan/{$plan_id}/");
+    $plan_title = pht('Plan %d', $plan_id);
 
-    $cancel_uri = $this->getApplicationURI('plan/'.$plan->getID().'/');
+    $all = HarbormasterBuildStepImplementation::getImplementations();
+    $all = msort($all, 'getName');
 
-    if ($request->isDialogFormPost()) {
-      $class = $request->getStr('step-type');
-      if (!in_array($class, $implementations)) {
-        return $this->createDialog($implementations);
+    $all_groups = HarbormasterBuildStepGroup::getAllGroups();
+    foreach ($all as $impl) {
+      $group_key = $impl->getBuildStepGroupKey();
+      if (empty($all_groups[$group_key])) {
+        throw new Exception(
+          pht(
+            'Build step "%s" has step group key "%s", but no step group '.
+            'with that key exists.',
+            get_class($impl),
+            $group_key));
+      }
+    }
+
+    $groups = mgroup($all, 'getBuildStepGroupKey');
+    $boxes = array();
+
+    $enabled_groups = HarbormasterBuildStepGroup::getAllEnabledGroups();
+    foreach ($enabled_groups as $group) {
+      $list = id(new PHUIObjectItemListView())
+        ->setNoDataString(
+          pht('This group has no available build steps.'));
+
+      $steps = idx($groups, $group->getGroupKey(), array());
+
+      foreach ($steps as $key => $impl) {
+        if ($impl->shouldRequireAutotargeting()) {
+          unset($steps[$key]);
+          continue;
+        }
       }
 
-      $step = new HarbormasterBuildStep();
-      $step->setBuildPlanPHID($plan->getPHID());
-      $step->setClassName($class);
-      $step->setDetails(array());
-      $step->save();
+      if (!$steps && !$group->shouldShowIfEmpty()) {
+        continue;
+      }
 
-      $edit_uri = $this->getApplicationURI("step/edit/".$step->getID()."/");
+      foreach ($steps as $key => $impl) {
+        $class = get_class($impl);
 
-      return id(new AphrontRedirectResponse())->setURI($edit_uri);
+        $new_uri = $this->getApplicationURI("step/new/{$plan_id}/{$class}/");
+
+        $item = id(new PHUIObjectItemView())
+          ->setHeader($impl->getName())
+          ->setHref($new_uri)
+          ->addAttribute($impl->getGenericDescription());
+
+        $list->addItem($item);
+      }
+
+      $box = id(new PHUIObjectBoxView())
+        ->setHeaderText($group->getGroupName())
+        ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+        ->appendChild($list);
+
+      $boxes[] = $box;
     }
 
-    return $this->createDialog($implementations, $cancel_uri);
-  }
+    $crumbs = $this->buildApplicationCrumbs()
+      ->addTextCrumb($plan_title, $cancel_uri)
+      ->addTextCrumb(pht('Add Build Step'))
+      ->setBorder(true);
 
-  function createDialog(array $implementations, $cancel_uri) {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+    $title = array($plan_title, pht('Add Build Step'));
 
-    $control = id(new AphrontFormRadioButtonControl())
-      ->setName('step-type');
+    $header = id(new PHUIHeaderView())
+      ->setHeader(pht('Add Build Step'))
+      ->setHeaderIcon('fa-plus-square');
 
-    foreach ($implementations as $implementation_name) {
-      $implementation = new $implementation_name();
-      $control
-        ->addButton(
-          $implementation_name,
-          $implementation->getName(),
-          $implementation->getGenericDescription());
-    }
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter(array(
+        $boxes,
+      ));
 
-    $dialog = new AphrontDialogView();
-    $dialog->setTitle(pht('Add New Step'))
-            ->setUser($viewer)
-            ->addSubmitButton(pht('Add Build Step'))
-            ->addCancelButton($cancel_uri);
-    $dialog->appendChild(
-      phutil_tag(
-        'p',
-        array(),
-        pht(
-          'Select what type of build step you want to add: ')));
-    $dialog->appendChild($control);
-    return id(new AphrontDialogResponse())->setDialog($dialog);
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
+
   }
 
 }

@@ -1,134 +1,132 @@
 <?php
 
-final class PhabricatorPeopleProfileController
+abstract class PhabricatorPeopleProfileController
   extends PhabricatorPeopleController {
 
-  private $username;
+  private $user;
 
   public function shouldRequireAdmin() {
     return false;
   }
 
-  public function willProcessRequest(array $data) {
-    $this->username = idx($data, 'username');
+  public function setUser(PhabricatorUser $user) {
+    $this->user = $user;
+    return $this;
   }
 
-  public function processRequest() {
-    $viewer = $this->getRequest()->getUser();
+  public function getUser() {
+    return $this->user;
+  }
 
-    $user = id(new PhabricatorPeopleQuery())
-      ->setViewer($viewer)
-      ->withUsernames(array($this->username))
-      ->needProfileImage(true)
-      ->executeOne();
-    if (!$user) {
-      return new Aphront404Response();
+  protected function buildApplicationCrumbs() {
+    $crumbs = parent::buildApplicationCrumbs();
+
+    $user = $this->getUser();
+    if ($user) {
+      $crumbs->addTextCrumb(
+        $user->getUsername(),
+        urisprintf('/p/%s/', $user->getUsername()));
     }
 
-    require_celerity_resource('phabricator-profile-css');
+    return $crumbs;
+  }
+
+  public function buildProfileHeader() {
+    $user = $this->user;
+    $viewer = $this->getViewer();
 
     $profile = $user->loadUserProfile();
-    $username = phutil_escape_uri($user->getUserName());
+    $picture = $user->getProfileImageURI();
 
-    $picture = $user->loadProfileImageURI();
+    $profile_icon = PhabricatorPeopleIconSet::getIconIcon($profile->getIcon());
+    $profile_title = $profile->getDisplayTitle();
 
-    $header = id(new PHUIHeaderView())
-      ->setHeader($user->getUserName().' ('.$user->getRealName().')')
-      ->setSubheader($profile->getTitle())
-      ->setImage($picture);
 
-    $actions = id(new PhabricatorActionListView())
-      ->setObject($user)
-      ->setObjectURI($this->getRequest()->getRequestURI())
-      ->setUser($viewer);
+    $tag = id(new PHUITagView())
+      ->setType(PHUITagView::TYPE_SHADE);
 
-    $can_edit = ($user->getPHID() == $viewer->getPHID());
-
-    $actions->addAction(
-      id(new PhabricatorActionView())
-        ->setIcon('edit')
-        ->setName(pht('Edit Profile'))
-        ->setHref($this->getApplicationURI('editprofile/'.$user->getID().'/'))
-        ->setDisabled(!$can_edit)
-        ->setWorkflow(!$can_edit));
-
-    $actions->addAction(
-      id(new PhabricatorActionView())
-        ->setIcon('image')
-        ->setName(pht('Edit Profile Picture'))
-        ->setHref($this->getApplicationURI('picture/'.$user->getID().'/'))
-        ->setDisabled(!$can_edit)
-        ->setWorkflow(!$can_edit));
-
-    if ($viewer->getIsAdmin()) {
-      $actions->addAction(
-        id(new PhabricatorActionView())
-          ->setIcon('blame')
-          ->setName(pht('Administrate User'))
-          ->setHref($this->getApplicationURI('edit/'.$user->getID().'/')));
+    $tags = array();
+    if ($user->getIsAdmin()) {
+      $tags[] = id(clone $tag)
+        ->setName(pht('Administrator'))
+        ->setColor('blue');
     }
 
-    $properties = $this->buildPropertyView($user, $actions);
+    // "Disabled" gets a stronger status tag below.
 
-    $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName($user->getUsername()));
-    $feed = $this->renderUserFeed($user);
+    if (!$user->getIsApproved()) {
+      $tags[] = id(clone $tag)
+        ->setName('Not Approved')
+        ->setColor('yellow');
+    }
 
-    $object_box = id(new PHUIObjectBoxView())
-      ->setHeader($header)
-      ->addPropertyList($properties);
+    if ($user->getIsSystemAgent()) {
+      $tags[] = id(clone $tag)
+        ->setName(pht('Bot'))
+        ->setColor('orange');
+    }
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $object_box,
-        $feed,
-      ),
-      array(
-        'title' => $user->getUsername(),
-        'device' => true,
-      ));
-  }
+    if ($user->getIsMailingList()) {
+      $tags[] = id(clone $tag)
+        ->setName(pht('Mailing List'))
+        ->setColor('orange');
+    }
 
-  private function buildPropertyView(
-    PhabricatorUser $user,
-    PhabricatorActionListView $actions) {
+    if (!$user->getIsEmailVerified()) {
+      $tags[] = id(clone $tag)
+        ->setName(pht('Email Not Verified'))
+        ->setColor('violet');
+    }
 
-    $viewer = $this->getRequest()->getUser();
-    $view = id(new PHUIPropertyListView())
-      ->setUser($viewer)
-      ->setObject($user)
-      ->setActionList($actions);
+    $header = id(new PHUIHeaderView())
+      ->setHeader($user->getFullName())
+      ->setImage($picture)
+      ->setProfileHeader(true)
+      ->addClass('people-profile-header');
 
-    $field_list = PhabricatorCustomField::getObjectFields(
+    foreach ($tags as $tag) {
+      $header->addTag($tag);
+    }
+
+    require_celerity_resource('project-view-css');
+
+    if ($user->getIsDisabled()) {
+      $header->setStatus('fa-ban', 'red', pht('Disabled'));
+    } else {
+      $header->setStatus($profile_icon, 'bluegrey', $profile_title);
+    }
+
+    $can_edit = PhabricatorPolicyFilter::hasCapability(
+      $viewer,
       $user,
-      PhabricatorCustomField::ROLE_VIEW);
-    $field_list->appendFieldsToPropertyList($user, $viewer, $view);
+      PhabricatorPolicyCapability::CAN_EDIT);
 
-    return $view;
+    if ($can_edit) {
+      $id = $user->getID();
+      $header->setImageEditURL($this->getApplicationURI("picture/{$id}/"));
+    }
+
+    return $header;
   }
 
-  private function renderUserFeed(PhabricatorUser $user) {
-    $viewer = $this->getRequest()->getUser();
+  final protected function newNavigation(
+    PhabricatorUser $user,
+    $item_identifier) {
 
-    $query = new PhabricatorFeedQuery();
-    $query->setFilterPHIDs(
-      array(
-        $user->getPHID(),
-      ));
-    $query->setLimit(100);
-    $query->setViewer($viewer);
-    $stories = $query->execute();
+    $viewer = $this->getViewer();
 
-    $builder = new PhabricatorFeedBuilder($stories);
-    $builder->setUser($viewer);
-    $builder->setShowHovercards(true);
-    $view = $builder->buildView();
+    $engine = id(new PhabricatorPeopleProfileMenuEngine())
+      ->setViewer($viewer)
+      ->setController($this)
+      ->setProfileObject($user);
 
-    return phutil_tag_div(
-      'profile-feed profile-wrap-responsive',
-      $view->render());
+    $view_list = $engine->newProfileMenuItemViewList();
+
+    $view_list->setSelectedViewWithItemIdentifier($item_identifier);
+
+    $navigation = $view_list->newNavigationView();
+
+    return $navigation;
   }
+
 }

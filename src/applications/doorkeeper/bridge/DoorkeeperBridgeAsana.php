@@ -27,7 +27,7 @@ final class DoorkeeperBridgeAsana extends DoorkeeperBridge {
     $id_map = mpull($refs, 'getObjectID', 'getObjectKey');
     $viewer = $this->getViewer();
 
-    $provider = PhabricatorAuthProviderOAuthAsana::getAsanaProvider();
+    $provider = PhabricatorAsanaAuthProvider::getAsanaProvider();
     if (!$provider) {
       return;
     }
@@ -37,10 +37,15 @@ final class DoorkeeperBridgeAsana extends DoorkeeperBridge {
       ->withUserPHIDs(array($viewer->getPHID()))
       ->withAccountTypes(array($provider->getProviderType()))
       ->withAccountDomains(array($provider->getProviderDomain()))
+      ->requireCapabilities(
+        array(
+          PhabricatorPolicyCapability::CAN_VIEW,
+          PhabricatorPolicyCapability::CAN_EDIT,
+        ))
       ->execute();
 
     if (!$accounts) {
-      return;
+      return $this->didFailOnMissingLink();
     }
 
     // TODO: If the user has several linked Asana accounts, we just pick the
@@ -57,6 +62,11 @@ final class DoorkeeperBridgeAsana extends DoorkeeperBridge {
     $template = id(new PhutilAsanaFuture())
       ->setAccessToken($token);
 
+    $timeout = $this->getTimeout();
+    if ($timeout !== null) {
+      $template->setTimeout($timeout);
+    }
+
     $futures = array();
     foreach ($id_map as $key => $id) {
       $futures[$key] = id(clone $template)
@@ -65,7 +75,7 @@ final class DoorkeeperBridgeAsana extends DoorkeeperBridge {
 
     $results = array();
     $failed = array();
-    foreach (Futures($futures) as $key => $future) {
+    foreach (new FutureIterator($futures) as $key => $future) {
       try {
         $results[$key] = $future->resolve();
       } catch (Exception $ex) {
@@ -108,10 +118,7 @@ final class DoorkeeperBridgeAsana extends DoorkeeperBridge {
       }
 
       $this->fillObjectFromData($obj, $result);
-
-      $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
-        $obj->save();
-      unset($unguarded);
+      $this->saveExternalObject($ref, $obj);
     }
   }
 

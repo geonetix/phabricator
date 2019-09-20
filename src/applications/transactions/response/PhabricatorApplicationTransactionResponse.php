@@ -5,21 +5,13 @@ final class PhabricatorApplicationTransactionResponse
 
   private $viewer;
   private $transactions;
-  private $anchorOffset;
   private $isPreview;
-  private $isDetailView;
+  private $previewContent;
+  private $object;
+  private $viewData = array();
 
   protected function buildProxy() {
     return new AphrontAjaxResponse();
-  }
-
-  public function setAnchorOffset($anchor_offset) {
-    $this->anchorOffset = $anchor_offset;
-    return $this;
-  }
-
-  public function getAnchorOffset() {
-    return $this->anchorOffset;
   }
 
   public function setTransactions($transactions) {
@@ -31,6 +23,15 @@ final class PhabricatorApplicationTransactionResponse
 
   public function getTransactions() {
     return $this->transactions;
+  }
+
+  public function setObject($object) {
+    $this->object = $object;
+    return $this;
+  }
+
+  public function getObject() {
+    return $this->object;
   }
 
   public function setViewer(PhabricatorUser $viewer) {
@@ -47,28 +48,37 @@ final class PhabricatorApplicationTransactionResponse
     return $this;
   }
 
-  public function setIsDetailView($is_detail_view) {
-    $this->isDetailView = $is_detail_view;
+  public function setPreviewContent($preview_content) {
+    $this->previewContent = $preview_content;
     return $this;
   }
 
+  public function getPreviewContent() {
+    return $this->previewContent;
+  }
+
+  public function setViewData(array $view_data) {
+    $this->viewData = $view_data;
+    return $this;
+  }
+
+  public function getViewData() {
+    return $this->viewData;
+  }
+
   public function reduceProxyResponse() {
-    if ($this->getTransactions()) {
-      $view = head($this->getTransactions())
-        ->getApplicationTransactionViewObject();
-    } else {
-      $view = new PhabricatorApplicationTransactionView();
-    }
+    $object = $this->getObject();
+    $viewer = $this->getViewer();
+    $xactions = $this->getTransactions();
 
-    $view
-      ->setUser($this->getViewer())
-      ->setTransactions($this->getTransactions())
-      ->setIsPreview($this->isPreview)
-      ->setIsDetailView($this->isDetailView);
+    $timeline_engine = PhabricatorTimelineEngine::newForObject($object)
+      ->setViewer($viewer)
+      ->setTransactions($xactions)
+      ->setViewData($this->viewData);
 
-    if ($this->getAnchorOffset()) {
-      $view->setAnchorOffset($this->getAnchorOffset());
-    }
+    $view = $timeline_engine->buildTimelineView();
+
+    $view->setIsPreview($this->isPreview);
 
     if ($this->isPreview) {
       $xactions = mpull($view->buildEvents(), 'render');
@@ -76,9 +86,24 @@ final class PhabricatorApplicationTransactionResponse
       $xactions = mpull($view->buildEvents(), 'render', 'getTransactionPHID');
     }
 
+    // Force whatever the underlying views built to render into HTML for
+    // the Javascript.
+    foreach ($xactions as $key => $xaction) {
+      $xactions[$key] = hsprintf('%s', $xaction);
+    }
+
+    $aural = phutil_tag(
+      'h3',
+      array(
+        'class' => 'aural-only',
+      ),
+      pht('Comment Preview'));
+
     $content = array(
+      'header' => hsprintf('%s', $aural),
       'xactions' => $xactions,
-      'spacer'   => PhabricatorTimelineView::renderSpacer(),
+      'spacer' => PHUITimelineView::renderSpacer(),
+      'previewContent' => hsprintf('%s', $this->getPreviewContent()),
     );
 
     return $this->getProxy()->setContent($content);

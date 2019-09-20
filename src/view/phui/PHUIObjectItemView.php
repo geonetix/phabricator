@@ -11,17 +11,29 @@ final class PHUIObjectItemView extends AphrontTagView {
   private $barColor;
   private $object;
   private $effect;
-  private $footIcons = array();
+  private $statusIcon;
   private $handleIcons = array();
   private $bylines = array();
   private $grippable;
   private $actions = array();
   private $headIcons = array();
   private $disabled;
+  private $imageURI;
+  private $imageHref;
+  private $imageIcon;
+  private $titleText;
+  private $badge;
+  private $countdownNum;
+  private $countdownNoun;
+  private $sideColumn;
+  private $coverImage;
+  private $description;
+  private $clickable;
 
-  const AGE_FRESH = 'fresh';
-  const AGE_STALE = 'stale';
-  const AGE_OLD   = 'old';
+  private $selectableName;
+  private $selectableValue;
+  private $isSelected;
+  private $isForbidden;
 
   public function setDisabled($disabled) {
     $this->disabled = $disabled;
@@ -88,6 +100,26 @@ final class PHUIObjectItemView extends AphrontTagView {
     return $this;
   }
 
+  public function setBadge(PHUIBadgeMiniView $badge) {
+    $this->badge = $badge;
+    return $this;
+  }
+
+  public function setCountdown($num, $noun) {
+    $this->countdownNum = $num;
+    $this->countdownNoun = $noun;
+    return $this;
+  }
+
+  public function setTitleText($title_text) {
+    $this->titleText = $title_text;
+    return $this;
+  }
+
+  public function getTitleText() {
+    return $this->titleText;
+  }
+
   public function getHeader() {
     return $this->header;
   }
@@ -97,43 +129,75 @@ final class PHUIObjectItemView extends AphrontTagView {
     return $this;
   }
 
-  public function setEpoch($epoch, $age = self::AGE_FRESH) {
-    $date = phabricator_datetime($epoch, $this->getUser());
+  public function setImageURI($image_uri) {
+    $this->imageURI = $image_uri;
+    return $this;
+  }
 
-    $days = floor((time() - $epoch) / 60 / 60 / 24);
+  public function setImageHref($image_href) {
+    $this->imageHref = $image_href;
+    return $this;
+  }
 
-    switch ($age) {
-      case self::AGE_FRESH:
-        $this->addIcon('none', $date);
-        break;
-      case self::AGE_STALE:
-        require_celerity_resource('sprite-status-css');
-        $attr = array(
-          'tip' => pht('Stale (%s day(s))', new PhutilNumber($days)),
-          'class' => 'icon-age-stale',
-          'sheet' => PHUIIconView::SPRITE_STATUS,
-        );
-        $this->addIcon('time-yellow', $date, $attr);
-        break;
-      case self::AGE_OLD:
-        require_celerity_resource('sprite-status-css');
-        $attr = array(
-          'tip' =>  pht('Old (%s day(s))', new PhutilNumber($days)),
-          'class' => 'icon-age-old',
-          'sheet' => PHUIIconView::SPRITE_STATUS,
-        );
-        $this->addIcon('time-red', $date, $attr);
-        break;
-      default:
-        throw new Exception("Unknown age '{$age}'!");
+  public function getImageURI() {
+    return $this->imageURI;
+  }
+
+  public function setImageIcon($image_icon) {
+    if (!$image_icon instanceof PHUIIconView) {
+      $image_icon = id(new PHUIIconView())
+        ->setIcon($image_icon);
     }
+    $this->imageIcon = $image_icon;
+    return $this;
+  }
 
+  public function getImageIcon() {
+    return $this->imageIcon;
+  }
+
+  public function setCoverImage($image) {
+    $this->coverImage = $image;
+    return $this;
+  }
+
+  public function setDescription($description) {
+    $this->description = $description;
+    return $this;
+  }
+
+  public function setSelectable(
+    $name,
+    $value,
+    $is_selected,
+    $is_forbidden = false) {
+
+    $this->selectableName = $name;
+    $this->selectableValue = $value;
+    $this->isSelected = $is_selected;
+    $this->isForbidden = $is_forbidden;
+
+    return $this;
+  }
+
+  public function setClickable($clickable) {
+    $this->clickable = $clickable;
+    return $this;
+  }
+
+  public function getClickable() {
+    return $this->clickable;
+  }
+
+  public function setEpoch($epoch) {
+    $date = phabricator_datetime($epoch, $this->getUser());
+    $this->addIcon('none', $date);
     return $this;
   }
 
   public function addAction(PHUIListItemView $action) {
     if (count($this->actions) >= 3) {
-      throw new Exception("Limit 3 actions per item.");
+      throw new Exception(pht('Limit 3 actions per item.'));
     }
     $this->actions[] = $action;
     return $this;
@@ -148,8 +212,20 @@ final class PHUIObjectItemView extends AphrontTagView {
     return $this;
   }
 
-  public function addFootIcon($icon, $label = null) {
-    $this->footIcons[] = array(
+  /**
+   * This method has been deprecated, use @{method:setImageIcon} instead.
+   *
+   * @deprecated
+   */
+  public function setIcon($icon) {
+    phlog(
+      pht('Deprecated call to setIcon(), use setImageIcon() instead.'));
+
+    return $this->setImageIcon($icon);
+  }
+
+  public function setStatusIcon($icon, $label = null) {
+    $this->statusIcon = array(
       'icon' => $icon,
       'label' => $label,
     );
@@ -182,105 +258,180 @@ final class PHUIObjectItemView extends AphrontTagView {
     return $this;
   }
 
+  public function setSideColumn($column) {
+    $this->sideColumn = $column;
+    return $this;
+  }
+
   protected function getTagName() {
     return 'li';
   }
 
   protected function getTagAttributes() {
+    $sigils = array();
+
     $item_classes = array();
-    $item_classes[] = 'phui-object-item';
+    $item_classes[] = 'phui-oi';
 
     if ($this->icons) {
-      $item_classes[] = 'phui-object-item-with-icons';
+      $item_classes[] = 'phui-oi-with-icons';
     }
 
     if ($this->attributes) {
-      $item_classes[] = 'phui-object-item-with-attrs';
+      $item_classes[] = 'phui-oi-with-attrs';
     }
 
     if ($this->handleIcons) {
-      $item_classes[] = 'phui-object-item-with-handle-icons';
+      $item_classes[] = 'phui-oi-with-handle-icons';
     }
 
     if ($this->barColor) {
-      $item_classes[] = 'phui-object-item-bar-color-'.$this->barColor;
-    }
-
-    if ($this->footIcons) {
-      $item_classes[] = 'phui-object-item-with-foot-icons';
-    }
-
-    if ($this->bylines) {
-      $item_classes[] = 'phui-object-item-with-bylines';
+      $item_classes[] = 'phui-oi-bar-color-'.$this->barColor;
+    } else {
+      $item_classes[] = 'phui-oi-no-bar';
     }
 
     if ($this->actions) {
       $n = count($this->actions);
-      $item_classes[] = 'phui-object-item-with-actions';
-      $item_classes[] = 'phui-object-item-with-'.$n.'-actions';
+      $item_classes[] = 'phui-oi-with-actions';
+      $item_classes[] = 'phui-oi-with-'.$n.'-actions';
     }
 
     if ($this->disabled) {
-      $item_classes[] = 'phui-object-item-disabled';
+      $item_classes[] = 'phui-oi-disabled';
+    } else {
+      $item_classes[] = 'phui-oi-enabled';
     }
 
     switch ($this->effect) {
       case 'highlighted':
-        $item_classes[] = 'phui-object-item-highlighted';
+        $item_classes[] = 'phui-oi-highlighted';
         break;
       case 'selected':
-        $item_classes[] = 'phui-object-item-selected';
+        $item_classes[] = 'phui-oi-selected';
+        break;
+      case 'visited':
+        $item_classes[] = 'phui-oi-visited';
         break;
       case null:
         break;
       default:
-        throw new Exception(pht("Invalid effect!"));
+        throw new Exception(pht('Invalid effect!'));
     }
 
-    if ($this->getGrippable()) {
-      $item_classes[] = 'phui-object-item-grippable';
+    if ($this->isForbidden) {
+      $item_classes[] = 'phui-oi-forbidden';
+    } else if ($this->isSelected) {
+      $item_classes[] = 'phui-oi-selected';
+    }
+
+    if ($this->selectableName !== null && !$this->isForbidden) {
+      $item_classes[] = 'phui-oi-selectable';
+      $sigils[] = 'phui-oi-selectable';
+
+      Javelin::initBehavior('phui-selectable-list');
+    }
+
+    $is_grippable = $this->getGrippable();
+    if ($is_grippable !== null) {
+      $item_classes[] = 'phui-oi-has-grip';
+      if ($is_grippable) {
+        $item_classes[] = 'phui-oi-grippable';
+      } else {
+        $item_classes[] = 'phui-oi-ungrippable';
+      }
+    }
+
+    if ($this->getImageURI()) {
+      $item_classes[] = 'phui-oi-with-image';
+    }
+
+    if ($this->getImageIcon()) {
+      $item_classes[] = 'phui-oi-with-image-icon';
+    }
+
+    if ($this->getClickable()) {
+      Javelin::initBehavior('linked-container');
+
+      $item_classes[] = 'phui-oi-linked-container';
+      $sigils[] = 'linked-container';
     }
 
     return array(
       'class' => $item_classes,
+      'sigil' => $sigils,
     );
   }
 
-  public function getTagContent() {
-    $content_classes = array();
-    $content_classes[] = 'phui-object-item-content';
+  protected function getTagContent() {
+    $viewer = $this->getUser();
 
-    $header_name = null;
+    $content_classes = array();
+    $content_classes[] = 'phui-oi-content';
+
+    $header_name = array();
+
+    if ($viewer) {
+      $header_name[] = id(new PHUISpacesNamespaceContextView())
+        ->setUser($viewer)
+        ->setObject($this->object);
+    }
+
     if ($this->objectName) {
-      $header_name = array(
+      $header_name[] = array(
         phutil_tag(
           'span',
           array(
-            'class' => 'phui-object-item-objname',
+            'class' => 'phui-oi-objname',
           ),
           $this->objectName),
         ' ',
       );
     }
 
+    $title_text = null;
+    if ($this->titleText) {
+      $title_text = $this->titleText;
+    } else if ($this->href) {
+      $title_text = $this->header;
+    }
+
     $header_link = phutil_tag(
       $this->href ? 'a' : 'div',
       array(
         'href' => $this->href,
-        'class' => 'phui-object-item-link',
+        'class' => 'phui-oi-link',
+        'title' => $title_text,
       ),
       $this->header);
 
-    $header = javelin_tag(
+    $description_tag = null;
+    if ($this->description) {
+      $decription_id = celerity_generate_unique_node_id();
+      $description_tag = id(new PHUITagView())
+        ->setIcon('fa-ellipsis-h')
+        ->addClass('phui-oi-description-tag')
+        ->setType(PHUITagView::TYPE_SHADE)
+        ->setColor(PHUITagView::COLOR_GREY)
+        ->addSigil('jx-toggle-class')
+        ->setSlimShady(true)
+        ->setMetaData(array(
+          'map' => array(
+            $decription_id => 'phui-oi-description-reveal',
+          ),
+        ));
+    }
+
+    $header = phutil_tag(
       'div',
       array(
-        'class' => 'phui-object-item-name',
-        'sigil' => 'slippery',
+        'class' => 'phui-oi-name',
       ),
       array(
         $this->headIcons,
         $header_name,
         $header_link,
+        $description_tag,
       ));
 
     $icons = array();
@@ -288,50 +439,29 @@ final class PHUIObjectItemView extends AphrontTagView {
       $icon_list = array();
       foreach ($this->icons as $spec) {
         $icon = $spec['icon'];
+        $icon = id(new PHUIIconView())
+          ->setIcon($icon)
+          ->addClass('phui-oi-icon-image');
 
-        $sigil = null;
-        $meta = null;
         if (isset($spec['attributes']['tip'])) {
           $sigil = 'has-tooltip';
           $meta = array(
             'tip' => $spec['attributes']['tip'],
             'align' => 'W',
           );
+          $icon->addSigil($sigil);
+          $icon->setMetadata($meta);
         }
-
-        $sheet = idx($spec['attributes'], 'sheet', 'icons');
-
-        $icon = javelin_tag(
-          'span',
-          array(
-            'class' => 'phui-object-item-icon-image '.
-                       'sprite-'.$sheet.' '.$sheet.'-'.$icon,
-            'sigil' => $sigil,
-            'meta'  => $meta,
-          ),
-          '');
 
         $label = phutil_tag(
           'span',
           array(
-            'class' => 'phui-object-item-icon-label',
+            'class' => 'phui-oi-icon-label',
           ),
           $spec['label']);
 
-        if (isset($spec['attributes']['href'])) {
-          $icon_href = phutil_tag(
-            'a',
-            array('href' => $spec['attributes']['href']),
-            array($label, $icon));
-        } else {
-          $icon_href = array($label, $icon);
-        }
-
         $classes = array();
-        $classes[] = 'phui-object-item-icon';
-        if ($spec['icon'] == 'none') {
-          $classes[] = 'phui-object-item-icon-none';
-        }
+        $classes[] = 'phui-oi-icon';
         if (isset($spec['attributes']['class'])) {
           $classes[] = $spec['attributes']['class'];
         }
@@ -341,26 +471,31 @@ final class PHUIObjectItemView extends AphrontTagView {
           array(
             'class' => implode(' ', $classes),
           ),
-          $icon_href);
+          array(
+            $icon,
+            $label,
+          ));
       }
 
       $icons[] = phutil_tag(
         'ul',
         array(
-          'class' => 'phui-object-item-icons',
+          'class' => 'phui-oi-icons',
         ),
         $icon_list);
     }
 
+    $handle_bar = null;
     if ($this->handleIcons) {
       $handle_bar = array();
-      foreach ($this->handleIcons as $icon) {
-        $handle_bar[] = $this->renderHandleIcon($icon['icon'], $icon['label']);
+      foreach ($this->handleIcons as $handleicon) {
+        $handle_bar[] =
+          $this->renderHandleIcon($handleicon['icon'], $handleicon['label']);
       }
-      $icons[] = phutil_tag(
-        'div',
+      $handle_bar = phutil_tag(
+        'li',
         array(
-          'class' => 'phui-object-item-handle-icons',
+          'class' => 'phui-oi-handle-icons',
         ),
         $handle_bar);
     }
@@ -371,14 +506,14 @@ final class PHUIObjectItemView extends AphrontTagView {
         $bylines[] = phutil_tag(
           'div',
           array(
-            'class' => 'phui-object-item-byline',
+            'class' => 'phui-oi-byline',
           ),
           $byline);
       }
       $bylines = phutil_tag(
         'div',
         array(
-          'class' => 'phui-object-item-bylines',
+          'class' => 'phui-oi-bylines',
         ),
         $bylines);
     }
@@ -388,9 +523,19 @@ final class PHUIObjectItemView extends AphrontTagView {
       $subhead = phutil_tag(
         'div',
         array(
-          'class' => 'phui-object-item-subhead',
+          'class' => 'phui-oi-subhead',
         ),
         $this->subhead);
+    }
+
+    if ($this->description) {
+      $subhead = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-subhead phui-oi-description',
+          'id' => $decription_id,
+        ),
+        $this->description);
     }
 
     if ($icons) {
@@ -403,12 +548,12 @@ final class PHUIObjectItemView extends AphrontTagView {
     }
 
     $attrs = null;
-    if ($this->attributes) {
+    if ($this->attributes || $handle_bar) {
       $attrs = array();
       $spacer = phutil_tag(
         'span',
         array(
-          'class' => 'phui-object-item-attribute-spacer',
+          'class' => 'phui-oi-attribute-spacer',
         ),
         "\xC2\xB7");
       $first = true;
@@ -416,7 +561,7 @@ final class PHUIObjectItemView extends AphrontTagView {
         $attrs[] = phutil_tag(
           'li',
           array(
-            'class' => 'phui-object-item-attribute',
+            'class' => 'phui-oi-attribute',
           ),
           array(
             ($first ? null : $spacer),
@@ -428,31 +573,26 @@ final class PHUIObjectItemView extends AphrontTagView {
       $attrs = phutil_tag(
         'ul',
         array(
-          'class' => 'phui-object-item-attributes',
+          'class' => 'phui-oi-attributes',
         ),
-        $attrs);
+        array(
+          $handle_bar,
+          $attrs,
+        ));
     }
 
-    $foot = null;
-    if ($this->footIcons) {
-      $foot_bar = array();
-      foreach ($this->footIcons as $icon) {
-        $foot_bar[] = $this->renderFootIcon($icon['icon'], $icon['label']);
-      }
-      $foot = phutil_tag(
-        'div',
-        array(
-          'class' => 'phui-object-item-foot-icons',
-        ),
-        $foot_bar);
+    $status = null;
+    if ($this->statusIcon) {
+      $icon = $this->statusIcon;
+      $status = $this->renderStatusIcon($icon['icon'], $icon['label']);
     }
 
     $grippable = null;
-    if ($this->getGrippable()) {
+    if ($this->getGrippable() !== null) {
       $grippable = phutil_tag(
         'div',
         array(
-          'class' => 'phui-object-item-grip',
+          'class' => 'phui-oi-grip',
         ),
         '');
     }
@@ -466,20 +606,154 @@ final class PHUIObjectItemView extends AphrontTagView {
         $subhead,
         $attrs,
         $this->renderChildren(),
-        $foot,
       ));
+
+    $image = null;
+    if ($this->getImageURI()) {
+      $image = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-image',
+          'style' => 'background-image: url('.$this->getImageURI().')',
+        ),
+        '');
+    } else if ($this->getImageIcon()) {
+      $image = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-image-icon',
+        ),
+        $this->getImageIcon());
+    }
+
+    if ($image && (strlen($this->href) || strlen($this->imageHref))) {
+      $image_href = ($this->imageHref) ? $this->imageHref : $this->href;
+      $image = phutil_tag(
+        'a',
+        array(
+          'href' => $image_href,
+        ),
+        $image);
+    }
+
+    /* Build a fake table */
+    $column0 = null;
+    if ($status) {
+      $column0 = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-col0',
+        ),
+        $status);
+    }
+
+    if ($this->badge) {
+      $column0 = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-col0 phui-oi-badge',
+        ),
+        $this->badge);
+    }
+
+    if ($this->countdownNum) {
+      $countdown = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-countdown-number',
+        ),
+        array(
+          phutil_tag_div('', $this->countdownNum),
+          phutil_tag_div('', $this->countdownNoun),
+        ));
+      $column0 = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-col0 phui-oi-countdown',
+        ),
+        $countdown);
+    }
+
+    if ($this->selectableName !== null) {
+      if (!$this->isForbidden) {
+        $checkbox = phutil_tag(
+          'input',
+          array(
+            'type' => 'checkbox',
+            'name' => $this->selectableName,
+            'value' => $this->selectableValue,
+            'checked' => ($this->isSelected ? 'checked' : null),
+          ));
+      } else {
+        $checkbox = null;
+      }
+
+      $column0 = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-col0 phui-oi-checkbox',
+        ),
+        $checkbox);
+    }
+
+    $column1 = phutil_tag(
+      'div',
+      array(
+        'class' => 'phui-oi-col1',
+      ),
+      array(
+        $header,
+        $content,
+      ));
+
+    $column2 = null;
+    if ($icons || $bylines) {
+      $column2 = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-col2',
+        ),
+        array(
+          $icons,
+          $bylines,
+        ));
+    }
+
+    /* Fixed width, right column container. */
+    $column3 = null;
+    if ($this->sideColumn) {
+      $column3 = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-col2 phui-oi-side-column',
+        ),
+        array(
+          $this->sideColumn,
+        ));
+    }
+
+    $table = phutil_tag(
+      'div',
+      array(
+        'class' => 'phui-oi-table',
+      ),
+      phutil_tag_div(
+        'phui-oi-table-row',
+        array(
+          $column0,
+          $column1,
+          $column2,
+          $column3,
+        )));
 
     $box = phutil_tag(
       'div',
       array(
-        'class' => 'phui-object-item-content-box',
+        'class' => 'phui-oi-content-box',
       ),
       array(
         $grippable,
-        $header,
-        $icons,
-        $bylines,
-        $content,
+        $table,
       ));
 
     $actions = array();
@@ -493,44 +767,68 @@ final class PHUIObjectItemView extends AphrontTagView {
       $actions = phutil_tag(
         'ul',
         array(
-          'class' => 'phui-object-item-actions',
+          'class' => 'phui-oi-actions',
         ),
         $actions);
     }
 
-    return phutil_tag(
+    $frame_content = phutil_tag(
       'div',
       array(
-        'class' => 'phui-object-item-frame',
+        'class' => 'phui-oi-frame-content',
       ),
       array(
         $actions,
+        $image,
         $box,
       ));
+
+    $frame_cover = null;
+    if ($this->coverImage) {
+      $cover_image = phutil_tag(
+        'img',
+        array(
+          'src' => $this->coverImage,
+          'class' => 'phui-oi-cover-image',
+        ));
+
+      $frame_cover = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-frame-cover',
+        ),
+        $cover_image);
+    }
+
+    $frame = phutil_tag(
+      'div',
+      array(
+        'class' => 'phui-oi-frame',
+      ),
+      array(
+        $frame_cover,
+        $frame_content,
+      ));
+
+    return $frame;
   }
 
-  private function renderFootIcon($icon, $label) {
-    require_celerity_resource('sprite-icons-css');
+  private function renderStatusIcon($icon, $label) {
+    Javelin::initBehavior('phabricator-tooltips');
 
-    $icon = phutil_tag(
-      'span',
-      array(
-        'class' => 'sprite-icons icons-'.$icon,
-      ),
-      '');
+    $icon = id(new PHUIIconView())
+      ->setIcon($icon);
 
-    $label = phutil_tag(
-      'span',
-      array(
-      ),
-      $label);
+    $options = array(
+      'class' => 'phui-oi-status-icon',
+    );
 
-    return phutil_tag(
-      'span',
-      array(
-        'class' => 'phui-object-item-foot-icon',
-      ),
-      array($icon, $label));
+    if (strlen($label)) {
+      $options['sigil'] = 'has-tooltip';
+      $options['meta']  = array('tip' => $label, 'size' => 300);
+    }
+
+    return javelin_tag('div', $options, $icon);
   }
 
 
@@ -538,21 +836,16 @@ final class PHUIObjectItemView extends AphrontTagView {
     Javelin::initBehavior('phabricator-tooltips');
 
     $options = array(
-      'class' => 'phui-object-item-handle-icon',
+      'class' => 'phui-oi-handle-icon',
       'style' => 'background-image: url('.$handle->getImageURI().')',
     );
 
     if (strlen($label)) {
       $options['sigil'] = 'has-tooltip';
-      $options['meta']  = array('tip' => $label);
+      $options['meta']  = array('tip' => $label, 'align' => 'E');
     }
 
-    return javelin_tag(
-      'span',
-      $options,
-      '');
+    return javelin_tag('span', $options, '');
   }
-
-
 
 }

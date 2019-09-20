@@ -1,8 +1,5 @@
 <?php
 
-/**
- * @group aphront
- */
 final class AphrontAjaxResponse extends AphrontResponse {
 
   private $content;
@@ -35,21 +32,21 @@ final class AphrontAjaxResponse extends AphrontResponse {
   }
 
   public function buildResponseString() {
+    $request = $this->getRequest();
     $console = $this->getConsole();
     if ($console) {
       // NOTE: We're stripping query parameters here both for readability and
       // to mitigate BREACH and similar attacks. The parameters are available
       // in the "Request" tab, so this should not impact usability. See T3684.
-      $uri = $this->getRequest()->getRequestURI();
-      $uri = new PhutilURI($uri);
-      $uri->setQueryParams(array());
+      $path = $request->getPath();
 
       Javelin::initBehavior(
         'dark-console',
         array(
-          'uri'     => (string)$uri,
-          'key'     => $console->getKey($this->getRequest()),
-          'color'   => $console->getColor(),
+          'uri'       => $path,
+          'key'       => $console->getKey($request),
+          'color'     => $console->getColor(),
+          'quicksand' => $request->isQuicksand(),
         ));
     }
 
@@ -61,6 +58,18 @@ final class AphrontAjaxResponse extends AphrontResponse {
     $this->encodeJSONForHTTPResponse($content);
 
     $response = CelerityAPI::getStaticResourceResponse();
+
+    if ($request) {
+      $viewer = $request->getViewer();
+      if ($viewer) {
+        $postprocessor_key = $viewer->getUserSetting(
+          PhabricatorAccessibilitySetting::SETTINGKEY);
+        if (strlen($postprocessor_key)) {
+          $response->setPostprocessorKey($postprocessor_key);
+        }
+      }
+    }
+
     $object = $response->buildAjaxResponse(
       $content['payload'],
       $this->error);

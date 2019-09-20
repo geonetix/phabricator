@@ -1,28 +1,15 @@
 <?php
 
-abstract class DiffusionRawDiffQuery extends DiffusionQuery {
+abstract class DiffusionRawDiffQuery
+  extends DiffusionFileFutureQuery {
 
-  private $request;
-  private $timeout;
   private $linesOfContext = 65535;
+  private $anchorCommit;
   private $againstCommit;
 
   final public static function newFromDiffusionRequest(
     DiffusionRequest $request) {
     return parent::newQueryObject(__CLASS__, $request);
-  }
-
-  final public function loadRawDiff() {
-    return $this->executeQuery();
-  }
-
-  final public function setTimeout($timeout) {
-    $this->timeout = $timeout;
-    return $this;
-  }
-
-  final public function getTimeout() {
-    return $this->timeout;
   }
 
   final public function setLinesOfContext($lines_of_context) {
@@ -41,6 +28,19 @@ abstract class DiffusionRawDiffQuery extends DiffusionQuery {
 
   final public function getAgainstCommit() {
     return $this->againstCommit;
+  }
+
+  public function setAnchorCommit($anchor_commit) {
+    $this->anchorCommit = $anchor_commit;
+    return $this;
+  }
+
+  public function getAnchorCommit() {
+    if ($this->anchorCommit) {
+      return $this->anchorCommit;
+    }
+
+    return $this->getRequest()->getStableCommit();
   }
 
 }

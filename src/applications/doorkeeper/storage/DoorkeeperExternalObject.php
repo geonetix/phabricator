@@ -13,18 +13,41 @@ final class DoorkeeperExternalObject extends DoorkeeperDAO
   protected $properties = array();
   protected $viewPolicy;
 
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID => true,
       self::CONFIG_SERIALIZATION => array(
         'properties' => self::SERIALIZATION_JSON,
+      ),
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'objectKey' => 'bytes12',
+        'applicationType' => 'text32',
+        'applicationDomain' => 'text32',
+        'objectType' => 'text32',
+        'objectID' => 'text64',
+        'objectURI' => 'text128?',
+        'importerPHID' => 'phid?',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_object' => array(
+          'columns' => array('objectKey'),
+          'unique' => true,
+        ),
+        'key_full' => array(
+          'columns' => array(
+            'applicationType',
+            'applicationDomain',
+            'objectType',
+            'objectID',
+          ),
+        ),
       ),
     ) + parent::getConfiguration();
   }
 
   public function generatePHID() {
     return PhabricatorPHID::generateNewPHID(
-      PhabricatorPHIDConstants::PHID_TYPE_XOBJ);
+      DoorkeeperExternalObjectPHIDType::TYPECONST);
   }
 
   public function getProperty($key, $default = null) {
@@ -60,6 +83,27 @@ final class DoorkeeperExternalObject extends DoorkeeperDAO
     return parent::save();
   }
 
+  public function setDisplayName($display_name) {
+    return $this->setProperty('xobj.name.display', $display_name);
+  }
+
+  public function getDisplayName() {
+    return $this->getProperty('xobj.name.display', pht('External Object'));
+  }
+
+  public function setDisplayFullName($full_name) {
+    return $this->setProperty('xobj.name.display-full', $full_name);
+  }
+
+  public function getDisplayFullName() {
+    $full_name = $this->getProperty('xobj.name.display-full');
+
+    if ($full_name !== null) {
+      return $full_name;
+    }
+
+    return $this->getDisplayName();
+  }
 
 /* -(  PhabricatorPolicyInterface  )----------------------------------------- */
 
@@ -75,10 +119,6 @@ final class DoorkeeperExternalObject extends DoorkeeperDAO
 
   public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
     return false;
-  }
-
-  public function describeAutomaticCapability($capability) {
-    return null;
   }
 
 }

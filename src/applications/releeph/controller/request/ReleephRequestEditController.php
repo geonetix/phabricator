@@ -1,79 +1,80 @@
 <?php
 
-final class ReleephRequestEditController extends ReleephProjectController {
+final class ReleephRequestEditController extends ReleephBranchController {
 
-  private $id;
+  public function handleRequest(AphrontRequest $request) {
+    $action = $request->getURIData('action');
+    $request_id = $request->getURIData('requestID');
+    $branch_id = $request->getURIData('branchID');
+    $viewer = $request->getViewer();
 
-  public function willProcessRequest(array $data) {
-    $this->id = idx($data, 'requestID');
-    parent::willProcessRequest($data);
-  }
-
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
-
-    $releeph_project = $this->getReleephProject();
-    $releeph_branch = $this->getReleephBranch();
-
-    $request_identifier = $request->getStr('requestIdentifierRaw');
-    $e_request_identifier = true;
-
-    // Load the RQ we're editing, or create a new one
-    if ($this->id) {
-      $rq = id(new ReleephRequestQuery())
-        ->setViewer($user)
-        ->withIDs(array($this->id))
+    if ($request_id) {
+      $pull = id(new ReleephRequestQuery())
+        ->setViewer($viewer)
+        ->withIDs(array($request_id))
         ->requireCapabilities(
           array(
             PhabricatorPolicyCapability::CAN_VIEW,
             PhabricatorPolicyCapability::CAN_EDIT,
           ))
         ->executeOne();
+      if (!$pull) {
+        return new Aphront404Response();
+      }
+
+      $branch = $pull->getBranch();
+
       $is_edit = true;
     } else {
+      $branch = id(new ReleephBranchQuery())
+        ->setViewer($viewer)
+        ->withIDs(array($branch_id))
+        ->executeOne();
+      if (!$branch) {
+        return new Aphront404Response();
+      }
+
+      $pull = id(new ReleephRequest())
+        ->setRequestUserPHID($viewer->getPHID())
+        ->setBranchID($branch->getID())
+        ->setInBranch(0)
+        ->attachBranch($branch);
+
       $is_edit = false;
-      $rq = id(new ReleephRequest())
-        ->setRequestUserPHID($user->getPHID())
-        ->setBranchID($releeph_branch->getID())
-        ->setInBranch(0);
     }
+    $this->setBranch($branch);
+
+    $product = $branch->getProduct();
+
+    $request_identifier = $request->getStr('requestIdentifierRaw');
+    $e_request_identifier = true;
 
     // Load all the ReleephFieldSpecifications
-    $selector = $this->getReleephProject()->getReleephFieldSelector();
+    $selector = $branch->getProduct()->getReleephFieldSelector();
     $fields = $selector->getFieldSpecifications();
     foreach ($fields as $field) {
       $field
-        ->setReleephProject($releeph_project)
-        ->setReleephBranch($releeph_branch)
-        ->setReleephRequest($rq);
+        ->setReleephProject($product)
+        ->setReleephBranch($branch)
+        ->setReleephRequest($pull);
     }
 
     $field_list = PhabricatorCustomField::getObjectFields(
-      $rq,
+      $pull,
       PhabricatorCustomField::ROLE_EDIT);
     foreach ($field_list->getFields() as $field) {
       $field
-        ->setReleephProject($releeph_project)
-        ->setReleephBranch($releeph_branch)
-        ->setReleephRequest($rq);
+        ->setReleephProject($product)
+        ->setReleephBranch($branch)
+        ->setReleephRequest($pull);
     }
-    $field_list->readFieldsFromStorage($rq);
+    $field_list->readFieldsFromStorage($pull);
 
 
-    // <aidehua> epriestley: Is it common to pass around a referer URL to
-    // return from whence one came? [...]
-    // <epriestley> If you only have two places, maybe consider some parameter
-    // rather than the full URL.
-    switch ($request->getStr('origin')) {
-      case 'request':
-        $origin_uri = '/RQ'.$rq->getID();
-        break;
-
-      case 'branch':
-      default:
-        $origin_uri = $releeph_branch->getURI();
-        break;
+    if ($branch_id) {
+      $cancel_uri = $this->getApplicationURI('branch/'.$branch_id.'/');
+    } else {
+      $cancel_uri = '/'.$pull->getMonogram();
     }
 
     // Make edits
@@ -86,40 +87,41 @@ final class ReleephRequestEditController extends ReleephProjectController {
         if ($request_identifier ===
           ReleephRequestTypeaheadControl::PLACEHOLDER) {
 
-          $errors[] = "No commit ID was provided.";
-          $e_request_identifier = 'Required';
+          $errors[] = pht('No commit ID was provided.');
+          $e_request_identifier = pht('Required');
         } else {
           $pr_commit = null;
           $finder = id(new ReleephCommitFinder())
-            ->setUser($user)
-            ->setReleephProject($releeph_project);
+            ->setUser($viewer)
+            ->setReleephProject($product);
           try {
             $pr_commit = $finder->fromPartial($request_identifier);
           } catch (Exception $e) {
-            $e_request_identifier = 'Invalid';
-            $errors[] =
-              "Request {$request_identifier} is probably not a valid commit";
+            $e_request_identifier = pht('Invalid');
+            $errors[] = pht(
+              'Request %s is probably not a valid commit.',
+              $request_identifier);
             $errors[] = $e->getMessage();
           }
 
-          $pr_commit_data = null;
           if (!$errors) {
-            $pr_commit_data = $pr_commit->loadCommitData();
-            if (!$pr_commit_data) {
-              $e_request_identifier = 'Not parsed yet';
-              $errors[] = "The requested commit hasn't been parsed yet.";
+            $object_phid = $finder->getRequestedObjectPHID();
+            if (!$object_phid) {
+              $object_phid = $pr_commit->getPHID();
             }
+
+            $pull->setRequestedObjectPHID($object_phid);
           }
         }
 
         if (!$errors) {
           $existing = id(new ReleephRequest())
             ->loadOneWhere('requestCommitPHID = %s AND branchID = %d',
-                $pr_commit->getPHID(), $releeph_branch->getID());
+                $pr_commit->getPHID(), $branch->getID());
           if ($existing) {
             return id(new AphrontRedirectResponse())
               ->setURI('/releeph/request/edit/'.$existing->getID().
-                       '?existing=1');
+                '?existing=1');
           }
 
           $xactions[] = id(new ReleephRequestTransaction())
@@ -130,10 +132,10 @@ final class ReleephRequestEditController extends ReleephProjectController {
             ->setTransactionType(ReleephRequestTransaction::TYPE_USER_INTENT)
             // To help hide these implicit intents...
             ->setMetadataValue('isRQCreate', true)
-            ->setMetadataValue('userPHID', $user->getPHID())
+            ->setMetadataValue('userPHID', $viewer->getPHID())
             ->setMetadataValue(
               'isAuthoritative',
-              $releeph_project->isAuthoritative($user))
+              $product->isAuthoritative($viewer))
             ->setNewValue(ReleephRequest::INTENT_WANT);
         }
       }
@@ -164,21 +166,32 @@ final class ReleephRequestEditController extends ReleephProjectController {
 
       if (!$errors) {
         $editor = id(new ReleephRequestTransactionalEditor())
-          ->setActor($user)
+          ->setActor($viewer)
           ->setContinueOnNoEffect(true)
           ->setContentSourceFromRequest($request);
-        $editor->applyTransactions($rq, $xactions);
-        return id(new AphrontRedirectResponse())->setURI($origin_uri);
+        $editor->applyTransactions($pull, $xactions);
+        return id(new AphrontRedirectResponse())->setURI($cancel_uri);
       }
     }
 
-    $releeph_branch->populateReleephRequestHandles($user, array($rq));
-    $handles = $rq->getHandles();
+    $handle_phids = array(
+      $pull->getRequestUserPHID(),
+      $pull->getRequestCommitPHID(),
+    );
+    $handle_phids = array_filter($handle_phids);
+    if ($handle_phids) {
+      $handles = id(new PhabricatorHandleQuery())
+        ->setViewer($viewer)
+        ->withPHIDs($handle_phids)
+        ->execute();
+    } else {
+      $handles = array();
+    }
 
     $age_string = '';
     if ($is_edit) {
-      $age_string = phabricator_format_relative_time(
-        time() - $rq->getDateCreated()) . ' ago';
+      $age_string = phutil_format_relative_time(
+        time() - $pull->getDateCreated()).' ago';
     }
 
     // Warn the user if we've been redirected here because we tried to
@@ -186,50 +199,40 @@ final class ReleephRequestEditController extends ReleephProjectController {
     $notice_view = null;
     if ($request->getInt('existing')) {
       $notice_messages = array(
-        'You are editing an existing pick request!',
-        hsprintf(
-          "Requested %s by %s",
+        pht('You are editing an existing pick request!'),
+        pht(
+          'Requested %s by %s',
           $age_string,
-          $handles[$rq->getRequestUserPHID()]->renderLink())
+          $handles[$pull->getRequestUserPHID()]->renderLink()),
       );
-      $notice_view = id(new AphrontErrorView())
-        ->setSeverity(AphrontErrorView::SEVERITY_NOTICE)
+      $notice_view = id(new PHUIInfoView())
+        ->setSeverity(PHUIInfoView::SEVERITY_NOTICE)
         ->setErrors($notice_messages);
     }
 
-    /**
-     * Build the rest of the page
-     */
-    $error_view = null;
-    if ($errors) {
-      $error_view = new AphrontErrorView();
-      $error_view->setErrors($errors);
-      $error_view->setTitle('Form Errors');
-    }
-
     $form = id(new AphrontFormView())
-      ->setUser($user);
+      ->setUser($viewer);
 
     if ($is_edit) {
       $form
         ->appendChild(
           id(new AphrontFormMarkupControl())
-            ->setLabel('Original Commit')
+            ->setLabel(pht('Original Commit'))
             ->setValue(
-              $handles[$rq->getRequestCommitPHID()]->renderLink()))
+              $handles[$pull->getRequestCommitPHID()]->renderLink()))
         ->appendChild(
           id(new AphrontFormMarkupControl())
-            ->setLabel('Requestor')
+            ->setLabel(pht('Requestor'))
             ->setValue(hsprintf(
               '%s %s',
-              $handles[$rq->getRequestUserPHID()]->renderLink(),
+              $handles[$pull->getRequestUserPHID()]->renderLink(),
               $age_string)));
     } else {
       $origin = null;
       $diff_rev_id = $request->getStr('D');
       if ($diff_rev_id) {
         $diff_rev = id(new DifferentialRevisionQuery())
-          ->setViewer($user)
+          ->setViewer($viewer)
           ->withIDs(array($diff_rev_id))
           ->executeOne();
         $origin = '/D'.$diff_rev->getID();
@@ -241,26 +244,27 @@ final class ReleephRequestEditController extends ReleephProjectController {
           ->addHiddenInput('requestIdentifierRaw', 'D'.$diff_rev_id)
           ->appendChild(
             id(new AphrontFormStaticControl())
-              ->setLabel('Diff')
+              ->setLabel(pht('Diff'))
               ->setValue($title));
       } else {
-        $origin = $releeph_branch->getURI();
-        $repo = $releeph_project->loadPhabricatorRepository();
+        $origin = $branch->getURI();
+        $repo = $product->getRepository();
         $branch_cut_point = id(new PhabricatorRepositoryCommit())
           ->loadOneWhere(
               'phid = %s',
-              $releeph_branch->getCutPointCommitPHID());
+              $branch->getCutPointCommitPHID());
         $form->appendChild(
           id(new ReleephRequestTypeaheadControl())
             ->setName('requestIdentifierRaw')
-            ->setLabel('Commit ID')
+            ->setLabel(pht('Commit ID'))
             ->setRepo($repo)
             ->setValue($request_identifier)
             ->setError($e_request_identifier)
             ->setStartTime($branch_cut_point->getEpoch())
             ->setCaption(
-              'Start typing to autocomplete on commit title, '.
-              'or give a Phabricator commit identifier like rFOO1234'));
+              pht(
+                'Start typing to autocomplete on commit title, '.
+                'or give a Phabricator commit identifier like rFOO1234.')));
       }
     }
 
@@ -269,39 +273,48 @@ final class ReleephRequestEditController extends ReleephProjectController {
     $crumbs = $this->buildApplicationCrumbs();
 
     if ($is_edit) {
-      $title = pht('Edit Releeph Request');
+      $title = pht('Edit Pull Request');
       $submit_name = pht('Save');
+      $header_icon = 'fa-pencil';
 
-      $crumbs->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName('RQ'.$rq->getID())
-          ->setHref('/RQ'.$rq->getID()));
-      $crumbs->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName(pht('Edit')));
-
+      $crumbs->addTextCrumb($pull->getMonogram(), '/'.$pull->getMonogram());
+      $crumbs->addTextCrumb(pht('Edit'));
     } else {
-      $title = pht('Create Releeph Request');
-      $submit_name = pht('Create');
-      $crumbs->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName(pht('New Request')));
+      $title = pht('Create Pull Request');
+      $submit_name = pht('Create Pull Request');
+      $header_icon = 'fa-plus-square';
+
+      $crumbs->addTextCrumb(pht('New Pull Request'));
     }
 
     $form->appendChild(
       id(new AphrontFormSubmitControl())
-        ->addCancelButton($origin_uri, 'Cancel')
+        ->addCancelButton($cancel_uri, pht('Cancel'))
         ->setValue($submit_name));
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Request'))
+      ->setFormErrors($errors)
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->appendChild($form);
+
+    $crumbs->setBorder(true);
+
+    $header = id(new PHUIHeaderView())
+      ->setHeader($title)
+      ->setHeaderIcon($header_icon);
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter(array(
         $notice_view,
-        $error_view,
-        $form,
-      ),
-      array(
-        'title' => $title,
+        $box,
       ));
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
+
   }
 }

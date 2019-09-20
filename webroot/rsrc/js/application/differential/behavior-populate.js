@@ -1,121 +1,87 @@
 /**
  * @provides javelin-behavior-differential-populate
  * @requires javelin-behavior
- *           javelin-workflow
- *           javelin-util
  *           javelin-dom
  *           javelin-stratcom
- *           javelin-behavior-device
- *           javelin-vector
  *           phabricator-tooltip
+ *           phabricator-diff-changeset-list
+ *           phabricator-diff-changeset
+ * @javelin
  */
 
-JX.behavior('differential-populate', function(config) {
+JX.behavior('differential-populate', function(config, statics) {
 
-  function onresponse(target_id, response) {
-    // As we populate the diff, we try to hold the document scroll position
-    // steady, so that, e.g., users who want to leave a comment on a diff with a
-    // large number of changes don't constantly have the text area scrolled off
-    // the bottom of the screen until the entire diff loads.
-    //
-    // There are two three major cases here:
-    //
-    //  - If we're near the top of the document, never scroll.
-    //  - If we're near the bottom of the document, always scroll.
-    //  - Otherwise, scroll if the changes were above the midline of the
-    //    viewport.
-    var target = JX.$(target_id);
-
-    var old_pos = JX.Vector.getScroll();
-    var old_view = JX.Vector.getViewport();
-    var old_dim = JX.Vector.getDocument();
-
-    // Number of pixels away from the top or bottom of the document which
-    // count as "nearby".
-    var sticky = 480;
-
-    var near_top = (old_pos.y <= sticky);
-    var near_bot = ((old_pos.y + old_view.y) >= (old_dim.y - sticky));
-
-    var target_pos = JX.Vector.getPos(target);
-    var target_dim = JX.Vector.getDim(target);
-    var target_mid = (target_pos.y + (target_dim.y / 2));
-
-    var view_mid = (old_pos.y + (old_view.y / 2));
-    var above_mid = (target_mid < view_mid);
-
-    JX.DOM.replace(target, JX.$H(response.changeset));
-
-    if (!near_top) {
-      if (near_bot || above_mid) {
-        // Figure out how much taller the document got.
-        var delta = (JX.Vector.getDocument().y - old_dim.y);
-
-        window.scrollTo(old_pos.x, old_pos.y + delta);
-      }
+  // When we perform a Quicksand navigation, deactivate the changeset lists on
+  // the current page and activate the changeset lists on the new page.
+  var onredraw = function(page_id) {
+    // If the current page is already active, we don't need to do anything.
+    if (statics.pageID === page_id) {
+      return;
     }
 
-    if (response.coverage) {
-      for (var k in response.coverage) {
-        try {
-          JX.DOM.replace(JX.$(k), JX.$H(response.coverage[k]));
-        } catch (ignored) {
-          // Not terribly important.
-        }
-      }
+    var ii;
+
+    // Put the old lists to sleep.
+    var old_lists = get_lists(statics.pageID);
+    for (ii = 0; ii < old_lists.length; ii++) {
+      old_lists[ii].sleep();
     }
+    statics.pageID = null;
+
+    // Awaken the new lists, if they exist.
+    if (statics.pages.hasOwnProperty(page_id)) {
+      var new_lists = get_lists(page_id);
+      for (ii = 0; ii < new_lists.length; ii++) {
+        new_lists[ii].wake();
+      }
+
+      statics.pageID = page_id;
+    }
+  };
+
+  // Get changeset lists on the current page.
+  var get_lists = function(page_id) {
+    if (page_id === null) {
+      return [];
+    }
+
+    return statics.pages[page_id] || [];
+  };
+
+  if (!statics.installed) {
+    statics.installed = true;
+    statics.pages = {};
+    statics.pageID = null;
+
+    JX.Stratcom.listen('quicksand-redraw', null, function(e) {
+      onredraw(e.getData().newResponseID);
+    });
   }
 
-  // NOTE: If you load the page at one device resolution and then resize to
-  // a different one we don't re-render the diffs, because it's a complicated
-  // mess and you could lose inline comments, cursor positions, etc.
-  var renderer = (JX.Device.getDevice() == 'desktop') ? '2up' : '1up';
+  var changeset_list = new JX.DiffChangesetList()
+    .setTranslations(JX.phtize(config.pht))
+    .setInlineURI(config.inlineURI)
+    .setInlineListURI(config.inlineListURI)
+    .setIsStandalone(config.isStandalone);
 
-  // TODO: Once 1up works better, figure out when to show it.
-  renderer = '2up';
+  // Install and activate the current page.
+  var page_id = JX.Quicksand.getCurrentPageID();
+  statics.pages[page_id] = [changeset_list];
+  onredraw(page_id);
 
-  for (var k in config.registry) {
-    var data = {
-      ref : config.registry[k],
-      whitespace: config.whitespace,
-      renderer: renderer
-    };
 
-    new JX.Workflow(config.uri, data)
-      .setHandler(JX.bind(null, onresponse, k))
-      .start();
+
+  for (var ii = 0; ii < config.changesetViewIDs.length; ii++) {
+    var id = config.changesetViewIDs[ii];
+    var node = JX.$(id);
+    var changeset = changeset_list.newChangesetForNode(node);
+    if (changeset.shouldAutoload()) {
+      changeset.setStabilize(true).load();
+    }
   }
 
   var highlighted = null;
   var highlight_class = null;
-
-  JX.Stratcom.listen(
-    'click',
-    'differential-load',
-    function(e) {
-      var meta = e.getNodeData('differential-load');
-      var diff;
-      try {
-        diff = JX.$(meta.id);
-      } catch (ex) {
-        // Already loaded.
-      }
-      if (diff) {
-        JX.DOM.setContent(
-          diff,
-          JX.$H('<div class="differential-loading">Loading...</div>'));
-        var data = {
-          ref : meta.ref,
-          whitespace : config.whitespace
-        };
-        new JX.Workflow(config.uri, data)
-          .setHandler(JX.bind(null, onresponse, meta.id))
-          .start();
-      }
-      if (meta.kill) {
-        e.kill();
-      }
-    });
 
   JX.Stratcom.listen(
     ['mouseover', 'mouseout'],
@@ -171,7 +137,6 @@ JX.behavior('differential-populate', function(config) {
       }
 
     });
-
 
 
 });

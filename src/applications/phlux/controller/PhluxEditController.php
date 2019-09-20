@@ -2,35 +2,29 @@
 
 final class PhluxEditController extends PhluxController {
 
-  private $key;
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
+    $key = $request->getURIData('key');
 
-  public function willProcessRequest(array $data) {
-    $this->key = idx($data, 'key');
-  }
-
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
-
-    $is_new = ($this->key === null);
+    $is_new = ($key === null);
     if ($is_new) {
       $var = new PhluxVariable();
       $var->setViewPolicy(PhabricatorPolicies::POLICY_USER);
       $var->setEditPolicy(PhabricatorPolicies::POLICY_USER);
     } else {
       $var = id(new PhluxVariableQuery())
-        ->setViewer($user)
+        ->setViewer($viewer)
         ->requireCapabilities(
           array(
             PhabricatorPolicyCapability::CAN_VIEW,
             PhabricatorPolicyCapability::CAN_EDIT,
           ))
-        ->withKeys(array($this->key))
+        ->withKeys(array($key))
         ->executeOne();
       if (!$var) {
         return new Aphront404Response();
       }
-      $view_uri = $this->getApplicationURI('/view/'.$this->key.'/');
+      $view_uri = $this->getApplicationURI('/view/'.$key.'/');
     }
 
     $e_key = ($is_new ? true : null);
@@ -48,7 +42,7 @@ final class PhluxEditController extends PhluxController {
         if (!strlen($key)) {
           $errors[] = pht('Variable key is required.');
           $e_key = pht('Required');
-        } else if (!preg_match('/^[a-z0-9.-]+$/', $key)) {
+        } else if (!preg_match('/^[a-z0-9.-]+\z/', $key)) {
           $errors[] = pht(
             'Variable key "%s" must contain only lowercase letters, digits, '.
             'period, and hyphen.',
@@ -67,7 +61,7 @@ final class PhluxEditController extends PhluxController {
 
       if (!$errors) {
         $editor = id(new PhluxVariableEditor())
-          ->setActor($user)
+          ->setActor($viewer)
           ->setContinueOnNoEffect(true)
           ->setContentSourceFromRequest($request);
 
@@ -92,7 +86,7 @@ final class PhluxEditController extends PhluxController {
           $editor->applyTransactions($var, $xactions);
           $view_uri = $this->getApplicationURI('/view/'.$key.'/');
           return id(new AphrontRedirectResponse())->setURI($view_uri);
-        } catch (AphrontQueryDuplicateKeyException $ex) {
+        } catch (AphrontDuplicateKeyQueryException $ex) {
           $e_key = pht('Not Unique');
           $errors[] = pht('Variable key must be unique.');
         }
@@ -109,18 +103,13 @@ final class PhluxEditController extends PhluxController {
       }
     }
 
-    if ($errors) {
-      $errors = id(new AphrontErrorView())
-        ->setErrors($errors);
-    }
-
     $policies = id(new PhabricatorPolicyQuery())
-      ->setViewer($user)
+      ->setViewer($viewer)
       ->setObject($var)
       ->execute();
 
     $form = id(new AphrontFormView())
-      ->setUser($user)
+      ->setUser($viewer)
       ->appendChild(
         id(new AphrontFormTextControl())
           ->setValue($var->getVariableKey())
@@ -164,32 +153,28 @@ final class PhluxEditController extends PhluxController {
 
     if ($is_new) {
       $title = pht('Create Variable');
-      $crumbs->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName($title)
-          ->setHref($request->getRequestURI()));
+      $crumbs->addTextCrumb($title, $request->getRequestURI());
     } else {
-      $title = pht('Edit %s', $this->key);
-      $crumbs->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName($title)
-          ->setHref($request->getRequestURI()));
+      $title = pht('Edit Variable: %s', $key);
+      $crumbs->addTextCrumb($title, $request->getRequestURI());
     }
+    $crumbs->setBorder(true);
 
-    $form_box = id(new PHUIObjectBoxView())
+    $box = id(new PHUIObjectBoxView())
       ->setHeaderText($title)
-      ->setFormError($errors)
+      ->setFormErrors($errors)
+      ->setBackground(PHUIObjectBoxView::WHITE_CONFIG)
       ->setForm($form);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $form_box,
-      ),
-      array(
-        'title' => $title,
-        'device' => true,
+    $view = id(new PHUITwoColumnView())
+      ->setFooter(array(
+        $box,
       ));
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
   }
 
 }

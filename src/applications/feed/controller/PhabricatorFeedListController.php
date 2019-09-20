@@ -1,38 +1,27 @@
 <?php
 
-final class PhabricatorFeedListController extends PhabricatorFeedController
-  implements PhabricatorApplicationSearchResultsControllerInterface {
-
-  private $queryKey;
+final class PhabricatorFeedListController
+  extends PhabricatorFeedController {
 
   public function shouldAllowPublic() {
     return true;
   }
 
-  public function willProcessRequest(array $data) {
-    $this->queryKey = idx($data, 'queryKey');
-  }
+  public function handleRequest(AphrontRequest $request) {
+    $navigation = array();
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $controller = id(new PhabricatorApplicationSearchController($request))
-      ->setQueryKey($this->queryKey)
-      ->setSearchEngine(new PhabricatorFeedSearchEngine())
-      ->setNavigation($this->buildSideNavView());
+    $navigation[] = id(new PHUIListItemView())
+      ->setType(PHUIListItemView::TYPE_LABEL)
+      ->setName(pht('Transactions'));
 
-    return $this->delegateToController($controller);
-  }
+    $navigation[] = id(new PHUIListItemView())
+      ->setName(pht('Transaction Logs'))
+      ->setHref($this->getApplicationURI('transactions/'));
 
-  public function renderResultsList(
-    array $feed,
-    PhabricatorSavedQuery $query) {
-
-    $builder = new PhabricatorFeedBuilder($feed);
-    $builder->setShowHovercards(true);
-    $builder->setUser($this->getRequest()->getUser());
-    $view = $builder->buildView();
-
-    return phutil_tag_div('phabricator-feed-frame', $view);
+    return id(new PhabricatorFeedSearchEngine())
+      ->setController($this)
+      ->setNavigationItems($navigation)
+      ->buildResponse();
   }
 
 }

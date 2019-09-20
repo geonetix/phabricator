@@ -13,92 +13,115 @@ abstract class PhabricatorRepositoryCommitParserWorker
 
     $commit_id = idx($this->getTaskData(), 'commitID');
     if (!$commit_id) {
-      return false;
+      throw new PhabricatorWorkerPermanentFailureException(
+        pht('No "%s" in task data.', 'commitID'));
     }
 
-    $commit = id(new PhabricatorRepositoryCommit())->load($commit_id);
-
+    $commit = id(new DiffusionCommitQuery())
+      ->setViewer(PhabricatorUser::getOmnipotentUser())
+      ->withIDs(array($commit_id))
+      ->executeOne();
     if (!$commit) {
-      // TODO: Communicate permanent failure?
-      return false;
+      throw new PhabricatorWorkerPermanentFailureException(
+        pht('Commit "%s" does not exist.', $commit_id));
     }
 
-    return $this->commit = $commit;
+    if ($commit->isUnreachable()) {
+      throw new PhabricatorWorkerPermanentFailureException(
+        pht(
+          'Commit "%s" (with internal ID "%s") is no longer reachable from '.
+          'any branch, tag, or ref in this repository, so it will not be '.
+          'imported. This usually means that the branch the commit was on '.
+          'was deleted or overwritten.',
+          $commit->getMonogram(),
+          $commit_id));
+    }
+
+    $this->commit = $commit;
+
+    return $commit;
   }
 
-  final public function doWork() {
-    if (!$this->loadCommit()) {
-      return;
-    }
-
-    $repository = id(new PhabricatorRepositoryQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
-      ->withIDs(array($this->commit->getRepositoryID()))
-      ->executeOne();
-    if (!$repository) {
-      return;
-    }
+  final protected function doWork() {
+    $commit = $this->loadCommit();
+    $repository = $commit->getRepository();
 
     $this->repository = $repository;
 
-    return $this->parseCommit($repository, $this->commit);
+    $this->parseCommit($repository, $this->commit);
   }
 
   final protected function shouldQueueFollowupTasks() {
     return !idx($this->getTaskData(), 'only');
   }
 
+  protected function getImportStepFlag() {
+    return null;
+  }
+
+  final protected function shouldSkipImportStep() {
+    // If this step has already been performed and this is a "natural" task
+    // which was queued by the normal daemons, decline to do the work again.
+    // This mitigates races if commits are rapidly deleted and revived.
+    $flag = $this->getImportStepFlag();
+    if (!$flag) {
+      // This step doesn't have an associated flag.
+      return false;
+    }
+
+    $commit = $this->commit;
+    if (!$commit->isPartiallyImported($flag)) {
+      // This commit doesn't have the flag set yet.
+      return false;
+    }
+
+
+    if (!$this->shouldQueueFollowupTasks()) {
+      // This task was queued by administrative tools, so do the work even
+      // if it duplicates existing work.
+      return false;
+    }
+
+    $this->log(
+      "%s\n",
+      pht(
+        'Skipping import step; this step was previously completed for '.
+        'this commit.'));
+
+    return true;
+  }
+
   abstract protected function parseCommit(
     PhabricatorRepository $repository,
     PhabricatorRepositoryCommit $commit);
 
-  /**
-   * This method is kind of awkward here but both the SVN message and
-   * change parsers use it.
-   */
-  protected function getSVNLogXMLObject($uri, $revision, $verbose = false) {
+  protected function loadCommitHint(PhabricatorRepositoryCommit $commit) {
+    $viewer = PhabricatorUser::getOmnipotentUser();
 
-    if ($verbose) {
-      $verbose = '--verbose';
-    }
+    $repository = $commit->getRepository();
 
-    list($xml) = $this->repository->execxRemoteCommand(
-      "log --xml {$verbose} --limit 1 %s@%d",
-      $uri,
-      $revision);
-
-    // Subversion may send us back commit messages which won't parse because
-    // they have non UTF-8 garbage in them. Slam them into valid UTF-8.
-    $xml = phutil_utf8ize($xml);
-
-    return new SimpleXMLElement($xml);
+    return id(new DiffusionCommitHintQuery())
+      ->setViewer($viewer)
+      ->withRepositoryPHIDs(array($repository->getPHID()))
+      ->withOldCommitIdentifiers(array($commit->getCommitIdentifier()))
+      ->executeOne();
   }
 
-  protected function isBadCommit($full_commit_name) {
-    $repository = new PhabricatorRepository();
+  public function renderForDisplay(PhabricatorUser $viewer) {
+    $suffix = parent::renderForDisplay($viewer);
 
-    $bad_commit = queryfx_one(
-      $repository->establishConnection('w'),
-      'SELECT * FROM %T WHERE fullCommitName = %s',
-      PhabricatorRepository::TABLE_BADCOMMIT,
-      $full_commit_name);
-
-    return (bool)$bad_commit;
-  }
-
-  public function renderForDisplay() {
-    $suffix = parent::renderForDisplay();
-    $commit = $this->loadCommit();
+    $commit = id(new DiffusionCommitQuery())
+      ->setViewer($viewer)
+      ->withIDs(array(idx($this->getTaskData(), 'commitID')))
+      ->executeOne();
     if (!$commit) {
       return $suffix;
     }
 
-    // TODO: (T603) This method should probably take a viewer.
+    $link = DiffusionView::linkCommit(
+      $commit->getRepository(),
+      $commit->getCommitIdentifier());
 
-    $repository = id(new PhabricatorRepository())
-      ->load($commit->getRepositoryID());
-    $link = DiffusionView::linkCommit($repository,
-                                      $commit->getCommitIdentifier());
-    return hsprintf('%s%s', $link, $suffix);
+    return array($link, $suffix);
   }
 }

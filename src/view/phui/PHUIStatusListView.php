@@ -6,13 +6,14 @@ final class PHUIStatusListView extends AphrontTagView {
 
   public function addItem(PHUIStatusItemView $item) {
     $this->items[] = $item;
+    return $this;
   }
 
   protected function canAppendChild() {
     return false;
   }
 
-  public function getTagName() {
+  protected function getTagName() {
     return 'table';
   }
 

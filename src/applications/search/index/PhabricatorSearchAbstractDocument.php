@@ -1,9 +1,6 @@
 <?php
 
-/**
- * @group search
- */
-final class PhabricatorSearchAbstractDocument {
+final class PhabricatorSearchAbstractDocument extends Phobject {
 
   private $phid;
   private $documentType;
@@ -12,17 +9,6 @@ final class PhabricatorSearchAbstractDocument {
   private $documentModified;
   private $fields = array();
   private $relationships = array();
-
-  public static function getSupportedTypes() {
-    return array(
-      DifferentialPHIDTypeRevision::TYPECONST => 'Differential Revisions',
-      PhabricatorRepositoryPHIDTypeCommit::TYPECONST => 'Repository Commits',
-      ManiphestPHIDTypeTask::TYPECONST => 'Maniphest Tasks',
-      PhrictionPHIDTypeDocument::TYPECONST => 'Phriction Documents',
-      PhabricatorPeoplePHIDTypeUser::TYPECONST => 'Phabricator Users',
-      PonderPHIDTypeQuestion::TYPECONST => 'Ponder Questions',
-    );
-  }
 
   public function setPHID($phid) {
     $this->phid = $phid;
@@ -36,7 +22,7 @@ final class PhabricatorSearchAbstractDocument {
 
   public function setDocumentTitle($title) {
     $this->documentTitle = $title;
-    $this->addField(PhabricatorSearchField::FIELD_TITLE, $title);
+    $this->addField(PhabricatorSearchDocumentFieldType::FIELD_TITLE, $title);
     return $this;
   }
 

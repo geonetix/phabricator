@@ -1,6 +1,6 @@
 <?php
 
-abstract class PhabricatorConfigOptionType {
+abstract class PhabricatorConfigOptionType extends Phobject {
 
   public function validateOption(PhabricatorConfigOption $option, $value) {
     return;
@@ -20,8 +20,25 @@ abstract class PhabricatorConfigOptionType {
 
   public function getDisplayValue(
     PhabricatorConfigOption $option,
-    PhabricatorConfigEntry $entry) {
-    return $entry->getValue();
+    PhabricatorConfigEntry $entry,
+    $value) {
+
+    if (is_array($value)) {
+      return PhabricatorConfigJSON::prettyPrintJSON($value);
+    } else {
+      return $value;
+    }
+
+  }
+
+  public function renderControls(
+    PhabricatorConfigOption $option,
+    $display_value,
+    $e_value) {
+
+    $control = $this->renderControl($option, $display_value, $e_value);
+
+    return array($control);
   }
 
   public function renderControl(

@@ -1,69 +1,48 @@
 <?php
 
-/**
- * @group phriction
- */
 final class PhrictionHistoryController
   extends PhrictionController {
 
-  private $slug;
-
-  public function willProcessRequest(array $data) {
-    $this->slug = $data['slug'];
+  public function shouldAllowPublic() {
+    return true;
   }
 
-  public function processRequest() {
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $slug = $request->getURIData('slug');
 
-    $request = $this->getRequest();
-    $user = $request->getUser();
-
-    $document = id(new PhrictionDocument())->loadOneWhere(
-      'slug = %s',
-      PhabricatorSlug::normalize($this->slug));
-
+    $document = id(new PhrictionDocumentQuery())
+      ->setViewer($viewer)
+      ->withSlugs(array(PhabricatorSlug::normalize($slug)))
+      ->needContent(true)
+      ->executeOne();
     if (!$document) {
       return new Aphront404Response();
     }
 
-    $current = id(new PhrictionContent())->load($document->getContentID());
+    $current = $document->getContent();
 
-    $pager = new AphrontPagerView();
-    $pager->setOffset($request->getInt('page'));
-    $pager->setURI($request->getRequestURI(), 'page');
+    $pager = id(new AphrontCursorPagerView())
+      ->readFromRequest($request);
 
-    $history = id(new PhrictionContent())->loadAllWhere(
-      'documentID = %d ORDER BY version DESC LIMIT %d, %d',
-      $document->getID(),
-      $pager->getOffset(),
-      $pager->getPageSize() + 1);
-    $history = $pager->sliceResults($history);
+    $history = id(new PhrictionContentQuery())
+      ->setViewer($viewer)
+      ->withDocumentPHIDs(array($document->getPHID()))
+      ->executeWithCursorPager($pager);
 
     $author_phids = mpull($history, 'getAuthorPHID');
-    $handles = $this->loadViewerHandles($author_phids);
+    $handles = $viewer->loadHandles($author_phids);
+
+    $max_version = (int)$document->getMaxVersion();
+    $current_version = $document->getContent()->getVersion();
 
     $list = new PHUIObjectItemListView();
-
+    $list->setFlush(true);
     foreach ($history as $content) {
-
-      $author = $handles[$content->getAuthorPHID()]->renderLink();
       $slug_uri = PhrictionDocument::getSlugURI($document->getSlug());
       $version = $content->getVersion();
 
-      $diff_uri = new PhutilURI('/phriction/diff/'.$document->getID().'/');
-
-      $vs_previous = null;
-      if ($content->getVersion() != 1) {
-        $vs_previous = $diff_uri
-          ->alter('l', $content->getVersion() - 1)
-          ->alter('r', $content->getVersion());
-      }
-
-      $vs_head = null;
-      if ($content->getID() != $document->getContentID()) {
-        $vs_head = $diff_uri
-          ->alter('l', $content->getVersion())
-          ->alter('r', $current->getVersion());
-      }
+      $base_uri = new PhutilURI('/phriction/diff/'.$document->getID().'/');
 
       $change_type = PhrictionChangeType::getChangeTypeLabel(
         $content->getChangeType());
@@ -72,63 +51,92 @@ final class PhrictionHistoryController
           $color = 'red';
           break;
         case PhrictionChangeType::CHANGE_EDIT:
-          $color = 'blue';
+          $color = 'lightbluetext';
           break;
         case PhrictionChangeType::CHANGE_MOVE_HERE:
-            $color = 'yellow';
+          $color = 'yellow';
           break;
         case PhrictionChangeType::CHANGE_MOVE_AWAY:
-            $color = 'orange';
+          $color = 'orange';
           break;
         case PhrictionChangeType::CHANGE_STUB:
           $color = 'green';
           break;
         default:
-          throw new Exception("Unknown change type!");
+          $color = 'indigo';
           break;
       }
 
+      $version_uri = $slug_uri.'?v='.$version;
+
       $item = id(new PHUIObjectItemView())
-        ->setHeader(pht('%s by %s', $change_type, $author))
-        ->setBarColor($color)
-        ->addAttribute(
-          phutil_tag(
-            'a',
-            array(
-              'href' => $slug_uri.'?v='.$version,
-            ),
-            pht('Version %s', $version)))
-        ->addAttribute(pht('%s %s',
-          phabricator_date($content->getDateCreated(), $user),
-          phabricator_time($content->getDateCreated(), $user)));
+        ->setHref($version_uri);
 
-      if ($content->getDescription()) {
-        $item->addAttribute($content->getDescription());
-      }
-
-      if ($vs_previous) {
-        $item->addIcon(
-          'arrow_left',
-          pht('Show Change'),
-          array(
-            'href' => $vs_previous,
-          ));
+      if ($version > $current_version) {
+        $icon = 'fa-spinner';
+        $color = 'pink';
+        $header = pht('Draft %d', $version);
       } else {
-        $item->addIcon('arrow_left-grey',
-          phutil_tag('em', array(), pht('No previous change')));
+        $icon = 'fa-file-o';
+        $header = pht('Version %d', $version);
       }
 
-      if ($vs_head) {
-        $item->addIcon(
-          'merge',
-          pht('Show Later Changes'),
-          array(
-            'href' => $vs_head,
-          ));
-      } else {
-        $item->addIcon('merge-grey',
-          phutil_tag('em', array(), pht('No later changes')));
+      if ($version == $current_version) {
+        $item->setEffect('selected');
       }
+
+      $item
+        ->setHeader($header)
+        ->setStatusIcon($icon.' '.$color);
+
+      $description = $content->getDescription();
+      if (strlen($description)) {
+        $item->addAttribute($description);
+      }
+
+      $item->addIcon(
+        null,
+        phabricator_datetime($content->getDateCreated(), $viewer));
+
+      $author_phid = $content->getAuthorPHID();
+      $item->addByline($viewer->renderHandle($author_phid));
+
+      $diff_uri = null;
+      if ($version > 1) {
+        $diff_uri = $base_uri
+          ->alter('l', $version - 1)
+          ->alter('r', $version);
+      } else {
+        $diff_uri = null;
+      }
+
+      if ($content->getVersion() != $max_version) {
+        $compare_uri = $base_uri
+          ->alter('l', $version)
+          ->alter('r', $max_version);
+      } else {
+        $compare_uri = null;
+      }
+
+      $button_bar = id(new PHUIButtonBarView())
+        ->addButton(
+          id(new PHUIButtonView())
+            ->setTag('a')
+            ->setColor('grey')
+            ->setIcon('fa-chevron-down')
+            ->setDisabled(!$diff_uri)
+            ->setHref($diff_uri)
+            ->setText(pht('Diff')))
+        ->addButton(
+          id(new PHUIButtonView())
+            ->setTag('a')
+            ->setColor('grey')
+            ->setIcon('fa-chevron-circle-up')
+           ->setDisabled(!$compare_uri)
+           ->setHref($compare_uri)
+            ->setText(pht('Compare')));
+
+      $item->setSideColumn($button_bar);
 
       $list->addItem($item);
     }
@@ -138,33 +146,43 @@ final class PhrictionHistoryController
     foreach ($crumb_views as $view) {
       $crumbs->addCrumb($view);
     }
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('History'))
-        ->setHref(
-          PhrictionDocument::getSlugURI($document->getSlug(), 'history')));
+    $crumbs->addTextCrumb(
+      pht('History'),
+      PhrictionDocument::getSlugURI($document->getSlug(), 'history'));
+    $crumbs->setBorder(true);
 
     $header = new PHUIHeaderView();
-    $header->setHeader(pht('Document History for %s',
-      phutil_tag(
+    $header->setHeader(phutil_tag(
         'a',
         array('href' => PhrictionDocument::getSlugURI($document->getSlug())),
-        head($history)->getTitle())));
+        head($history)->getTitle()));
+    $header->setSubheader(pht('Document History'));
 
     $obj_box = id(new PHUIObjectBoxView())
-      ->setHeader($header)
-      ->appendChild($list)
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->setObjectList($list);
+
+    $pager = id(new PHUIBoxView())
+      ->addClass('ml')
       ->appendChild($pager);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
+    $header = id(new PHUIHeaderView())
+      ->setHeader(pht('Document History: %s', head($history)->getTitle()))
+      ->setHeaderIcon('fa-history');
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter(array(
         $obj_box,
-      ),
-      array(
-        'title'     => pht('Document History'),
-        'device'    => true,
+        $pager,
       ));
+
+    $title = pht('Document History');
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
 
   }
 

@@ -2,7 +2,7 @@
 
 /**
  * Iterate over objects by update time in a stable way. This iterator only works
- * for "normal" Lisk objects: objects with an autoincrement ID and a
+ * for "normal" Lisk objects: objects with an auto-increment ID and a
  * dateModified column.
  */
 final class PhabricatorFactUpdateIterator extends PhutilBufferedIterator {
@@ -12,11 +12,8 @@ final class PhabricatorFactUpdateIterator extends PhutilBufferedIterator {
   private $position;
   private $ignoreUpdatesDuration = 15;
 
-  private $set;
-
   public function __construct(LiskDAO $object) {
-    $this->set = new LiskDAOSet();
-    $this->object = $object->putInSet($this->set);
+    $this->object = $object;
   }
 
   public function setPosition($position) {
@@ -41,8 +38,6 @@ final class PhabricatorFactUpdateIterator extends PhutilBufferedIterator {
   }
 
   protected function loadPage() {
-    $this->set->clearSet();
-
     if ($this->object->hasProperty('dateModified')) {
       if ($this->cursor) {
         list($after_epoch, $after_id) = explode(':', $this->cursor);

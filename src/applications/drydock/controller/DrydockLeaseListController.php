@@ -1,49 +1,36 @@
 <?php
 
-final class DrydockLeaseListController extends DrydockController {
+final class DrydockLeaseListController extends DrydockLeaseController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function shouldAllowPublic() {
+    return true;
+  }
 
-    $nav = $this->buildSideNav('lease');
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $query_key = $request->getURIData('queryKey');
 
-    $pager = new AphrontPagerView();
-    $pager->setURI(new PhutilURI('/drydock/lease/'), 'offset');
-    $pager->setOffset($request->getInt('offset'));
+    $engine = new DrydockLeaseSearchEngine();
 
-    $leases = id(new DrydockLeaseQuery())
-      ->needResources(true)
-      ->executeWithOffsetPager($pager);
+    $id = $request->getURIData('id');
+    if ($id) {
+      $resource = id(new DrydockResourceQuery())
+        ->setViewer($viewer)
+        ->withIDs(array($id))
+        ->executeOne();
+      if (!$resource) {
+        return new Aphront404Response();
+      }
+      $this->setResource($resource);
+      $engine->setResource($resource);
+    }
 
-    $title = pht('Leases');
+    $controller = id(new PhabricatorApplicationSearchController())
+      ->setQueryKey($query_key)
+      ->setSearchEngine($engine)
+      ->setNavigation($this->buildSideNavView());
 
-    $header = id(new PHUIHeaderView())
-      ->setHeader($title);
-
-    $lease_list = $this->buildLeaseListView($leases);
-
-    $nav->appendChild(
-      array(
-        $header,
-        $lease_list,
-        $pager,
-      ));
-
-    $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName($title)
-        ->setHref($request->getRequestURI()));
-    $nav->setCrumbs($crumbs);
-
-    return $this->buildApplicationPage(
-      $nav,
-      array(
-        'device'  => true,
-        'title'   => $title,
-      ));
-
+    return $this->delegateToController($controller);
   }
 
 }

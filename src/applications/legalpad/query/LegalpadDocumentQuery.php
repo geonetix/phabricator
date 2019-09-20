@@ -1,8 +1,5 @@
 <?php
 
-/**
- * @group legalpad
- */
 final class LegalpadDocumentQuery
   extends PhabricatorCursorPagedPolicyAwareQuery {
 
@@ -10,11 +7,15 @@ final class LegalpadDocumentQuery
   private $phids;
   private $creatorPHIDs;
   private $contributorPHIDs;
+  private $signerPHIDs;
   private $dateCreatedAfter;
   private $dateCreatedBefore;
+  private $signatureRequired;
 
   private $needDocumentBodies;
   private $needContributors;
+  private $needSignatures;
+  private $needViewerSignatures;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -36,6 +37,16 @@ final class LegalpadDocumentQuery
     return $this;
   }
 
+  public function withSignerPHIDs(array $phids) {
+    $this->signerPHIDs = $phids;
+    return $this;
+  }
+
+  public function withSignatureRequired($bool) {
+    $this->signatureRequired = $bool;
+    return $this;
+  }
+
   public function needDocumentBodies($need_bodies) {
     $this->needDocumentBodies = $need_bodies;
     return $this;
@@ -43,6 +54,11 @@ final class LegalpadDocumentQuery
 
   public function needContributors($need_contributors) {
     $this->needContributors = $need_contributors;
+    return $this;
+  }
+
+  public function needSignatures($need_signatures) {
+    $this->needSignatures = $need_signatures;
     return $this;
   }
 
@@ -56,22 +72,17 @@ final class LegalpadDocumentQuery
     return $this;
   }
 
+  public function needViewerSignatures($need) {
+    $this->needViewerSignatures = $need;
+    return $this;
+  }
+
+  public function newResultObject() {
+    return new LegalpadDocument();
+  }
+
   protected function loadPage() {
-    $table = new LegalpadDocument();
-    $conn_r = $table->establishConnection('r');
-
-    $data = queryfx_all(
-      $conn_r,
-      'SELECT d.* FROM %T d %Q %Q %Q %Q',
-      $table->getTableName(),
-      $this->buildJoinClause($conn_r),
-      $this->buildWhereClause($conn_r),
-      $this->buildOrderClause($conn_r),
-      $this->buildLimitClause($conn_r));
-
-    $documents = $table->loadAllFromArray($data);
-
-    return $documents;
+    return $this->loadStandardPage($this->newResultObject());
   }
 
   protected function willFilterPage(array $documents) {
@@ -83,70 +94,123 @@ final class LegalpadDocumentQuery
       $documents = $this->loadContributors($documents);
     }
 
+    if ($this->needSignatures) {
+      $documents = $this->loadSignatures($documents);
+    }
+
+    if ($this->needViewerSignatures) {
+      if ($documents) {
+        if ($this->getViewer()->getPHID()) {
+          $signatures = id(new LegalpadDocumentSignatureQuery())
+            ->setViewer($this->getViewer())
+            ->withSignerPHIDs(array($this->getViewer()->getPHID()))
+            ->withDocumentPHIDs(mpull($documents, 'getPHID'))
+            ->execute();
+          $signatures = mpull($signatures, null, 'getDocumentPHID');
+        } else {
+          $signatures = array();
+        }
+
+        foreach ($documents as $document) {
+          $signature = idx($signatures, $document->getPHID());
+          $document->attachUserSignature(
+            $this->getViewer()->getPHID(),
+            $signature);
+        }
+      }
+    }
+
     return $documents;
   }
 
-  private function buildJoinClause($conn_r) {
-    $joins = array();
+  protected function buildJoinClauseParts(AphrontDatabaseConnection $conn) {
+    $joins = parent::buildJoinClauseParts($conn);
 
-    if ($this->contributorPHIDs) {
+    if ($this->contributorPHIDs !== null) {
       $joins[] = qsprintf(
-        $conn_r,
-        'JOIN edge e ON e.src = d.phid');
+        $conn,
+        'JOIN edge contributor ON contributor.src = d.phid
+          AND contributor.type = %d',
+        PhabricatorObjectHasContributorEdgeType::EDGECONST);
     }
 
-    return implode(' ', $joins);
+    if ($this->signerPHIDs !== null) {
+      $joins[] = qsprintf(
+        $conn,
+        'JOIN %T signer ON signer.documentPHID = d.phid
+          AND signer.signerPHID IN (%Ls)',
+        id(new LegalpadDocumentSignature())->getTableName(),
+        $this->signerPHIDs);
+    }
+
+    return $joins;
   }
 
-  protected function buildWhereClause($conn_r) {
-    $where = array();
+  protected function shouldGroupQueryResultRows() {
+    if ($this->contributorPHIDs) {
+      return true;
+    }
 
-    $where[] = $this->buildPagingClause($conn_r);
+    if ($this->signerPHIDs) {
+      return true;
+    }
 
-    if ($this->ids) {
+    return parent::shouldGroupQueryResultRows();
+  }
+
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
+
+    if ($this->ids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'd.id IN (%Ld)',
         $this->ids);
     }
 
-    if ($this->phids) {
+    if ($this->phids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'd.phid IN (%Ls)',
         $this->phids);
     }
 
-    if ($this->creatorPHIDs) {
+    if ($this->creatorPHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'd.creatorPHID IN (%Ls)',
         $this->creatorPHIDs);
     }
 
-    if ($this->dateCreatedAfter) {
+    if ($this->dateCreatedAfter !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'd.dateCreated >= %d',
         $this->dateCreatedAfter);
     }
 
-    if ($this->dateCreatedBefore) {
+    if ($this->dateCreatedBefore !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'd.dateCreated <= %d',
         $this->dateCreatedBefore);
     }
 
-    if ($this->contributorPHIDs) {
+    if ($this->contributorPHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'e.type = %s AND e.dst IN (%Ls)',
-        PhabricatorEdgeConfig::TYPE_OBJECT_HAS_CONTRIBUTOR,
+        $conn,
+        'contributor.dst IN (%Ls)',
         $this->contributorPHIDs);
     }
 
-    return $this->formatWhereClause($where);
+    if ($this->signatureRequired !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'd.requireSignature = %d',
+        $this->signatureRequired);
+    }
+
+    return $where;
   }
 
   private function loadDocumentBodies(array $documents) {
@@ -166,7 +230,7 @@ final class LegalpadDocumentQuery
 
   private function loadContributors(array $documents) {
     $document_map = mpull($documents, null, 'getPHID');
-    $edge_type = PhabricatorEdgeConfig::TYPE_OBJECT_HAS_CONTRIBUTOR;
+    $edge_type = PhabricatorObjectHasContributorEdgeType::EDGECONST;
     $contributor_data = id(new PhabricatorEdgeQuery())
       ->withSourcePHIDs(array_keys($document_map))
       ->withEdgeTypes(array($edge_type))
@@ -181,8 +245,29 @@ final class LegalpadDocumentQuery
     return $documents;
   }
 
+  private function loadSignatures(array $documents) {
+    $document_map = mpull($documents, null, 'getPHID');
+
+    $signatures = id(new LegalpadDocumentSignatureQuery())
+      ->setViewer($this->getViewer())
+      ->withDocumentPHIDs(array_keys($document_map))
+      ->execute();
+    $signatures = mgroup($signatures, 'getDocumentPHID');
+
+    foreach ($documents as $document) {
+      $sigs = idx($signatures, $document->getPHID(), array());
+      $document->attachSignatures($sigs);
+    }
+
+    return $documents;
+  }
+
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationLegalpad';
+    return 'PhabricatorLegalpadApplication';
+  }
+
+  protected function getPrimaryTableAlias() {
+    return 'd';
   }
 
 }

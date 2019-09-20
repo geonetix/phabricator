@@ -1,8 +1,5 @@
 <?php
 
-/**
- * @group file
- */
 final class PhabricatorFileTransactionComment
   extends PhabricatorApplicationTransactionComment {
 
@@ -10,8 +7,4 @@ final class PhabricatorFileTransactionComment
     return new PhabricatorFileTransaction();
   }
 
-  public function shouldUseMarkupCache($field) {
-    // Only cache submitted comments.
-    return ($this->getTransactionPHID() != null);
-  }
 }

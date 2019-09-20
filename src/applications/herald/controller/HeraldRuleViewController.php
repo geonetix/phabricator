@@ -2,20 +2,19 @@
 
 final class HeraldRuleViewController extends HeraldController {
 
-  private $id;
-
-  public function willProcessRequest(array $data) {
-    $this->id = $data['id'];
+  public function shouldAllowPublic() {
+    return true;
   }
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $id = $request->getURIData('id');
 
     $rule = id(new HeraldRuleQuery())
       ->setViewer($viewer)
-      ->withIDs(array($this->id))
+      ->withIDs(array($id))
       ->needConditionsAndActions(true)
+      ->needValidateAuthors(true)
       ->executeOne();
     if (!$rule) {
       return new Aphront404Response();
@@ -24,102 +23,94 @@ final class HeraldRuleViewController extends HeraldController {
     $header = id(new PHUIHeaderView())
       ->setUser($viewer)
       ->setHeader($rule->getName())
-      ->setPolicyObject($rule);
+      ->setPolicyObject($rule)
+      ->setHeaderIcon('fa-bullhorn');
 
     if ($rule->getIsDisabled()) {
-      $header->setStatus(
-        'oh-open',
-        'red',
-        pht('Disabled'));
+      $header->setStatus('fa-ban', 'red', pht('Disabled'));
+    } else if (!$rule->hasValidAuthor()) {
+      $header->setStatus('fa-user', 'red', pht('Author Not Active'));
     } else {
-      $header->setStatus(
-        'oh-open',
-        null,
-        pht('Active'));
+      $header->setStatus('fa-check', 'bluegrey', pht('Active'));
     }
 
-    $actions = $this->buildActionView($rule);
-    $properties = $this->buildPropertyView($rule, $actions);
+    $curtain = $this->buildCurtain($rule);
+    $details = $this->buildPropertySectionView($rule);
+    $description = $this->buildDescriptionView($rule);
 
-    $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('Rule %d', $rule->getID())));
-
-    $object_box = id(new PHUIObjectBoxView())
-      ->setHeader($header)
-      ->addPropertyList($properties);
-
-    $timeline = $this->buildTimeline($rule);
-
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $object_box,
-        $timeline,
-      ),
-      array(
-        'title' => $rule->getName(),
-        'device' => true,
-      ));
-  }
-
-  private function buildActionView(HeraldRule $rule) {
-    $viewer = $this->getRequest()->getUser();
     $id = $rule->getID();
 
-    $view = id(new PhabricatorActionListView())
-      ->setUser($viewer)
-      ->setObject($rule)
-      ->setObjectURI($this->getApplicationURI("rule/{$id}/"));
+    $crumbs = $this->buildApplicationCrumbs();
+    $crumbs->addTextCrumb("H{$id}");
+    $crumbs->setBorder(true);
+
+    $timeline = $this->buildTransactionTimeline(
+      $rule,
+      new HeraldTransactionQuery());
+    $timeline->setShouldTerminate(true);
+
+    $title = $rule->getName();
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setCurtain($curtain)
+      ->setMainColumn($timeline)
+      ->addPropertySection(pht('Details'), $details)
+      ->addPropertySection(pht('Description'), $description);
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
+  }
+
+  private function buildCurtain(HeraldRule $rule) {
+    $viewer = $this->getViewer();
+
+    $id = $rule->getID();
 
     $can_edit = PhabricatorPolicyFilter::hasCapability(
       $viewer,
       $rule,
       PhabricatorPolicyCapability::CAN_EDIT);
 
-    $view->addAction(
+    $curtain = $this->newCurtainView($rule);
+
+    $curtain->addAction(
       id(new PhabricatorActionView())
         ->setName(pht('Edit Rule'))
         ->setHref($this->getApplicationURI("edit/{$id}/"))
-        ->setIcon('edit')
+        ->setIcon('fa-pencil')
         ->setDisabled(!$can_edit)
         ->setWorkflow(!$can_edit));
 
     if ($rule->getIsDisabled()) {
       $disable_uri = "disable/{$id}/enable/";
-      $disable_icon = 'enable';
+      $disable_icon = 'fa-check';
       $disable_name = pht('Enable Rule');
     } else {
       $disable_uri = "disable/{$id}/disable/";
-      $disable_icon = 'disable';
+      $disable_icon = 'fa-ban';
       $disable_name = pht('Disable Rule');
     }
 
-    $view->addAction(
+    $curtain->addAction(
       id(new PhabricatorActionView())
-        ->setName(pht('Disable Rule'))
         ->setHref($this->getApplicationURI($disable_uri))
         ->setIcon($disable_icon)
         ->setName($disable_name)
         ->setDisabled(!$can_edit)
         ->setWorkflow(true));
 
-    return $view;
+    return $curtain;
   }
 
-  private function buildPropertyView(
-    HeraldRule $rule,
-    PhabricatorActionListView $actions) {
+  private function buildPropertySectionView(
+    HeraldRule $rule) {
 
     $viewer = $this->getRequest()->getUser();
-
-    $this->loadHandles(HeraldAdapter::getHandlePHIDs($rule));
-
     $view = id(new PHUIPropertyListView())
-      ->setUser($viewer)
-      ->setObject($rule)
-      ->setActionList($actions);
+      ->setUser($viewer);
 
     $view->addProperty(
       pht('Rule Type'),
@@ -128,7 +119,7 @@ final class HeraldRuleViewController extends HeraldController {
     if ($rule->isPersonalRule()) {
       $view->addProperty(
         pht('Author'),
-        $this->getHandle($rule->getAuthorPHID())->renderLink());
+        $viewer->renderHandle($rule->getAuthorPHID()));
     }
 
     $adapter = HeraldAdapter::getAdapterForContentType($rule->getContentType());
@@ -139,46 +130,29 @@ final class HeraldRuleViewController extends HeraldController {
           HeraldAdapter::getEnabledAdapterMap($viewer),
           $rule->getContentType()));
 
-      $view->invokeWillRenderEvent();
-
-      $view->addSectionHeader(pht('Rule Description'));
-      $view->addTextContent(
-        phutil_tag(
-          'div',
-          array(
-            'style' => 'white-space: pre-wrap;',
-          ),
-          $adapter->renderRuleAsText($rule, $this->getLoadedHandles())));
+      if ($rule->isObjectRule()) {
+        $view->addProperty(
+          pht('Trigger Object'),
+          $viewer->renderHandle($rule->getTriggerObjectPHID()));
+      }
     }
 
     return $view;
   }
 
-  private function buildTimeline(HeraldRule $rule) {
+  private function buildDescriptionView(HeraldRule $rule) {
     $viewer = $this->getRequest()->getUser();
+    $view = id(new PHUIPropertyListView())
+      ->setUser($viewer);
 
-    $xactions = id(new HeraldTransactionQuery())
-      ->setViewer($viewer)
-      ->withObjectPHIDs(array($rule->getPHID()))
-      ->needComments(true)
-      ->execute();
-
-    $engine = id(new PhabricatorMarkupEngine())
-      ->setViewer($viewer);
-    foreach ($xactions as $xaction) {
-      if ($xaction->getComment()) {
-        $engine->addObject(
-          $xaction->getComment(),
-          PhabricatorApplicationTransactionComment::MARKUP_FIELD_COMMENT);
-      }
+    $adapter = HeraldAdapter::getAdapterForContentType($rule->getContentType());
+    if ($adapter) {
+      $handles = $viewer->loadHandles(HeraldAdapter::getHandlePHIDs($rule));
+      $rule_text = $adapter->renderRuleAsText($rule, $handles, $viewer);
+      $view->addTextContent($rule_text);
+      return $view;
     }
-    $engine->process();
-
-    return id(new PhabricatorApplicationTransactionView())
-      ->setUser($viewer)
-      ->setObjectPHID($rule->getPHID())
-      ->setTransactions($xactions)
-      ->setMarkupEngine($engine);
+    return null;
   }
 
 }

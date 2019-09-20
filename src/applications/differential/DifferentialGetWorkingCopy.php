@@ -4,7 +4,7 @@
  * Can't find a good place for this, so I'm putting it in the most notably
  * wrong place.
  */
-final class DifferentialGetWorkingCopy {
+final class DifferentialGetWorkingCopy extends Phobject {
 
   /**
    * Creates and/or cleans a workspace for the requested repo.
@@ -17,13 +17,19 @@ final class DifferentialGetWorkingCopy {
     $origin_path = $repo->getLocalPath();
 
     $path = rtrim($origin_path, '/');
-    $path = $path . '__workspace';
+    $path = $path.'__workspace';
 
     if (!Filesystem::pathExists($path)) {
       $repo->execxLocalCommand(
         'clone -- file://%s %s',
         $origin_path,
         $path);
+
+      if (!$repo->isHosted()) {
+        id(new ArcanistGitAPI($path))->execxLocal(
+          'remote set-url origin %s',
+          $repo->getRemoteURI());
+      }
     }
 
     $workspace = new ArcanistGitAPI($path);
@@ -47,7 +53,7 @@ final class DifferentialGetWorkingCopy {
     $origin_path = $repo->getLocalPath();
 
     $path = rtrim($origin_path, '/');
-    $path = $path . '__workspace';
+    $path = $path.'__workspace';
 
     if (!Filesystem::pathExists($path)) {
       $repo->execxLocalCommand(

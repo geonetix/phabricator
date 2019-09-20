@@ -2,36 +2,31 @@
  * @provides phabricator-search-results-css
  */
 
-.phabricator-search-result {
-  margin: 4px 0 16px;
+.phui-oi-link strong {
+  color: {$fire};
+  text-decoration: underline;
 }
 
-.device-phone .phabricator-search-result-box .phui-box {
-  margin: 20px 0;
+.phui-source-fragment {
+  color: {$darkgreytext};
 }
 
-.phabricator-search-result .result-image {
-  position: relative;
-  float: left;
-  width: 50px;
-  height: 50px;
-  margin-right: 10px;
+.phui-source-fragment strong {
+  background-color: {$gentle.highlight};
+  font-weight: 600;
+  color: {$blacktext};
+  letter-spacing: 0.02em;
 }
 
-.phabricator-search-result .result-type {
-  margin-top: 4px;
-  word-break: break-word;
+.phui-fulltext-tokens {
+  margin: 16px 8px;
+  font-weight: bold;
 }
 
-.phabricator-search-result .result-name {
-  font-size: 16px;
+.phui-fulltext-tokens .phui-tag-view {
+  margin: 0 2px;
 }
 
-.search-results-pager .aphront-pager-view {
-  text-align: center;
-}
-
-.phabricator-search-no-results {
-  color: {$lightgreytext};
-  font-size: 18px;
+.phui-fulltext-tokens .phui-tag-view.phui-tag-grey {
+  opacity: 0.5;
 }

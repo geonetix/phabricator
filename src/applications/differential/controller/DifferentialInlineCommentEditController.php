@@ -3,30 +3,54 @@
 final class DifferentialInlineCommentEditController
   extends PhabricatorInlineCommentController {
 
-  private $revisionID;
-
-  public function willProcessRequest(array $data) {
-    $this->revisionID = $data['id'];
+  private function getRevisionID() {
+    return $this->getRequest()->getURIData('id');
   }
 
-  protected function createComment() {
+  private function loadRevision() {
+    $viewer = $this->getViewer();
+    $revision_id = $this->getRevisionID();
 
-    // Verify revision and changeset correspond to actual objects.
-    $revision_id = $this->revisionID;
-    $changeset_id = $this->getChangesetID();
-
-    $viewer = $this->getRequest()->getUser();
     $revision = id(new DifferentialRevisionQuery())
       ->setViewer($viewer)
       ->withIDs(array($revision_id))
       ->executeOne();
-
-    if (!$revision) {
-      throw new Exception("Invalid revision ID!");
+   if (!$revision) {
+      throw new Exception(pht('Invalid revision ID "%s".', $revision_id));
     }
 
-    if (!id(new DifferentialChangeset())->load($changeset_id)) {
-      throw new Exception("Invalid changeset ID!");
+    return $revision;
+  }
+
+  protected function createComment() {
+    // Verify revision and changeset correspond to actual objects, and are
+    // connected to one another.
+    $changeset_id = $this->getChangesetID();
+    $viewer = $this->getViewer();
+
+    $revision = $this->loadRevision();
+
+    $changeset = id(new DifferentialChangesetQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($changeset_id))
+      ->executeOne();
+    if (!$changeset) {
+      throw new Exception(
+        pht(
+          'Invalid changeset ID "%s"!',
+          $changeset_id));
+    }
+
+    $diff = $changeset->getDiff();
+    if ($diff->getRevisionID() != $revision->getID()) {
+      throw new Exception(
+        pht(
+          'Changeset ID "%s" is part of diff ID "%s", but that diff '.
+          'is attached to revision "%s", not revision "%s".',
+          $changeset_id,
+          $diff->getID(),
+          $diff->getRevisionID(),
+          $revision->getID()));
     }
 
     return id(new DifferentialInlineComment())
@@ -36,41 +60,176 @@ final class DifferentialInlineCommentEditController
 
   protected function loadComment($id) {
     return id(new DifferentialInlineCommentQuery())
+      ->setViewer($this->getViewer())
       ->withIDs(array($id))
+      ->withDeletedDrafts(true)
+      ->needHidden(true)
+      ->executeOne();
+  }
+
+  protected function loadCommentByPHID($phid) {
+    return id(new DifferentialInlineCommentQuery())
+      ->setViewer($this->getViewer())
+      ->withPHIDs(array($phid))
+      ->withDeletedDrafts(true)
+      ->needHidden(true)
       ->executeOne();
   }
 
   protected function loadCommentForEdit($id) {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+    $viewer = $this->getViewer();
 
     $inline = $this->loadComment($id);
-    if (!$this->canEditInlineComment($user, $inline)) {
-      throw new Exception("That comment is not editable!");
+    if (!$this->canEditInlineComment($viewer, $inline)) {
+      throw new Exception(pht('That comment is not editable!'));
     }
     return $inline;
   }
 
+  protected function loadCommentForDone($id) {
+    $viewer = $this->getViewer();
+
+    $inline = $this->loadComment($id);
+    if (!$inline) {
+      throw new Exception(pht('Unable to load inline "%d".', $id));
+    }
+
+    $changeset = id(new DifferentialChangesetQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($inline->getChangesetID()))
+      ->executeOne();
+    if (!$changeset) {
+      throw new Exception(pht('Unable to load changeset.'));
+    }
+
+    $diff = id(new DifferentialDiffQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($changeset->getDiffID()))
+      ->executeOne();
+    if (!$diff) {
+      throw new Exception(pht('Unable to load diff.'));
+    }
+
+    $revision = id(new DifferentialRevisionQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($diff->getRevisionID()))
+      ->executeOne();
+    if (!$revision) {
+      throw new Exception(pht('Unable to load revision.'));
+    }
+
+    $viewer_phid = $viewer->getPHID();
+    $is_owner = ($viewer_phid == $revision->getAuthorPHID());
+    $is_author = ($viewer_phid == $inline->getAuthorPHID());
+    $is_draft = ($inline->isDraft());
+
+    if ($is_owner) {
+      // You own the revision, so you can mark the comment as "Done".
+    } else if ($is_author && $is_draft) {
+      // You made this comment and it's still a draft, so you can mark
+      // it as "Done".
+    } else {
+      throw new Exception(
+        pht(
+          'You are not the revision owner, and this is not a draft comment '.
+          'you authored.'));
+    }
+
+    return $inline;
+  }
+
   private function canEditInlineComment(
-    PhabricatorUser $user,
+    PhabricatorUser $viewer,
     DifferentialInlineComment $inline) {
 
     // Only the author may edit a comment.
-    if ($inline->getAuthorPHID() != $user->getPHID()) {
+    if ($inline->getAuthorPHID() != $viewer->getPHID()) {
       return false;
     }
 
-    // Saved comments may not be edited.
-    if ($inline->getCommentID()) {
+    // Saved comments may not be edited, for now, although the schema now
+    // supports it.
+    if (!$inline->isDraft()) {
       return false;
     }
 
     // Inline must be attached to the active revision.
-    if ($inline->getRevisionID() != $this->revisionID) {
+    if ($inline->getRevisionID() != $this->getRevisionID()) {
       return false;
     }
 
     return true;
+  }
+
+  protected function deleteComment(PhabricatorInlineCommentInterface $inline) {
+    $inline->openTransaction();
+      $inline->setIsDeleted(1)->save();
+      $this->syncDraft();
+    $inline->saveTransaction();
+  }
+
+  protected function undeleteComment(
+    PhabricatorInlineCommentInterface $inline) {
+    $inline->openTransaction();
+      $inline->setIsDeleted(0)->save();
+      $this->syncDraft();
+    $inline->saveTransaction();
+  }
+
+  protected function saveComment(PhabricatorInlineCommentInterface $inline) {
+    $inline->openTransaction();
+      $inline->save();
+      $this->syncDraft();
+    $inline->saveTransaction();
+  }
+
+  protected function loadObjectOwnerPHID(
+    PhabricatorInlineCommentInterface $inline) {
+    return $this->loadRevision()->getAuthorPHID();
+  }
+
+  protected function hideComments(array $ids) {
+    $viewer = $this->getViewer();
+    $table = new DifferentialHiddenComment();
+    $conn_w = $table->establishConnection('w');
+
+    $sql = array();
+    foreach ($ids as $id) {
+      $sql[] = qsprintf(
+        $conn_w,
+        '(%s, %d)',
+        $viewer->getPHID(),
+        $id);
+    }
+
+    queryfx(
+      $conn_w,
+      'INSERT IGNORE INTO %T (userPHID, commentID) VALUES %LQ',
+      $table->getTableName(),
+      $sql);
+  }
+
+  protected function showComments(array $ids) {
+    $viewer = $this->getViewer();
+    $table = new DifferentialHiddenComment();
+    $conn_w = $table->establishConnection('w');
+
+    queryfx(
+      $conn_w,
+      'DELETE FROM %T WHERE userPHID = %s AND commentID IN (%Ld)',
+      $table->getTableName(),
+      $viewer->getPHID(),
+      $ids);
+  }
+
+  private function syncDraft() {
+    $viewer = $this->getViewer();
+    $revision = $this->loadRevision();
+
+    $revision->newDraftEngine()
+      ->setObject($revision)
+      ->setViewer($viewer)
+      ->synchronize();
   }
 
 }

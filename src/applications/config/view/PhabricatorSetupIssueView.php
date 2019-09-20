@@ -13,6 +13,14 @@ final class PhabricatorSetupIssueView extends AphrontView {
     return $this->issue;
   }
 
+  public function renderInFlight() {
+    $issue = $this->getIssue();
+
+    return id(new PhabricatorInFlightErrorView())
+      ->setMessage($issue->getName())
+      ->render();
+  }
+
   public function render() {
     $issue = $this->getIssue();
 
@@ -26,7 +34,12 @@ final class PhabricatorSetupIssueView extends AphrontView {
 
     $configs = $issue->getPHPConfig();
     if ($configs) {
-      $description[] = $this->renderPHPConfig($configs);
+      $description[] = $this->renderPHPConfig($configs, $issue);
+    }
+
+    $configs = $issue->getMySQLConfig();
+    if ($configs) {
+      $description[] = $this->renderMySQLConfig($configs);
     }
 
     $configs = $issue->getPhabricatorConfig();
@@ -42,7 +55,7 @@ final class PhabricatorSetupIssueView extends AphrontView {
 
     $commands = $issue->getCommands();
     if ($commands) {
-      $run_these = pht("Run these %d command(s):", count($commands));
+      $run_these = pht('Run these %d command(s):', count($commands));
       $description[] = phutil_tag(
         'div',
         array(
@@ -57,11 +70,11 @@ final class PhabricatorSetupIssueView extends AphrontView {
     $extensions = $issue->getPHPExtensions();
     if ($extensions) {
       $install_these = pht(
-        "Install these %d PHP extension(s):", count($extensions));
+        'Install these %d PHP extension(s):', count($extensions));
 
       $install_info = pht(
-        "You can usually install a PHP extension using %s or %s. Common ".
-        "package names are %s or %s. Try commands like these:",
+        'You can usually install a PHP extension using %s or %s. Common '.
+        'package names are %s or %s. Try commands like these:',
         phutil_tag('tt', array(), 'apt-get'),
         phutil_tag('tt', array(), 'yum'),
         hsprintf('<tt>php-<em>%s</em></tt>', pht('extname')),
@@ -82,9 +95,10 @@ final class PhabricatorSetupIssueView extends AphrontView {
         "OS X, you might want to try Homebrew.");
 
       $restart_info = pht(
-        "After installing new PHP extensions, <strong>restart your webserver ".
-        "for the changes to take effect</strong>.",
-        hsprintf(''));
+        'After installing new PHP extensions, <strong>restart Phabricator '.
+        'for the changes to take effect</strong>. For help with restarting '.
+        'Phabricator, see %s in the documentation.',
+        $this->renderRestartLink());
 
       $description[] = phutil_tag(
         'div',
@@ -102,12 +116,70 @@ final class PhabricatorSetupIssueView extends AphrontView {
 
     }
 
-    $next = phutil_tag(
-      'div',
-      array(
-        'class' => 'setup-issue-next',
-      ),
-      pht('To continue, resolve this problem and reload the page.'));
+    $related_links = $issue->getLinks();
+    if ($related_links) {
+      $description[] = $this->renderRelatedLinks($related_links);
+    }
+
+    $actions = array();
+    if (!$issue->getIsFatal()) {
+      if ($issue->getIsIgnored()) {
+        $actions[] = javelin_tag(
+          'a',
+          array(
+            'href' => '/config/unignore/'.$issue->getIssueKey().'/',
+            'sigil' => 'workflow',
+            'class' => 'button button-grey',
+          ),
+          pht('Unignore Setup Issue'));
+      } else {
+        $actions[] = javelin_tag(
+          'a',
+          array(
+            'href' => '/config/ignore/'.$issue->getIssueKey().'/',
+            'sigil' => 'workflow',
+            'class' => 'button button-grey',
+          ),
+          pht('Ignore Setup Issue'));
+      }
+
+      $actions[] = javelin_tag(
+        'a',
+        array(
+          'href' => '/config/issue/'.$issue->getIssueKey().'/',
+          'class' => 'button button-grey',
+        ),
+        pht('Reload Page'));
+    }
+
+    if ($actions) {
+      $actions = phutil_tag(
+        'div',
+        array(
+          'class' => 'setup-issue-actions',
+        ),
+        $actions);
+    }
+
+    if ($issue->getIsIgnored()) {
+      $status = phutil_tag(
+        'div',
+        array(
+          'class' => 'setup-issue-status',
+        ),
+        pht(
+          'This issue is currently ignored, and does not show a global '.
+          'warning.'));
+      $next = null;
+    } else {
+      $status = null;
+      $next = phutil_tag(
+        'div',
+        array(
+          'class' => 'setup-issue-next',
+        ),
+        pht('To continue, resolve this problem and reload the page.'));
+    }
 
     $name = phutil_tag(
       'div',
@@ -116,15 +188,39 @@ final class PhabricatorSetupIssueView extends AphrontView {
       ),
       $issue->getName());
 
+    $head = phutil_tag(
+      'div',
+      array(
+        'class' => 'setup-issue-head',
+      ),
+      $name);
+
+    $body = phutil_tag(
+      'div',
+      array(
+        'class' => 'setup-issue-body',
+      ),
+      array(
+        $status,
+        $description,
+      ));
+
+    $tail = phutil_tag(
+      'div',
+      array(
+        'class' => 'setup-issue-tail',
+      ),
+      $actions);
+
     $issue = phutil_tag(
       'div',
       array(
         'class' => 'setup-issue',
       ),
       array(
-        $name,
-        $description,
-        $next,
+        $head,
+        $body,
+        $tail,
       ));
 
     $debug_info = phutil_tag(
@@ -141,6 +237,7 @@ final class PhabricatorSetupIssueView extends AphrontView {
       ),
       array(
         $issue,
+        $next,
         $debug_info,
       ));
   }
@@ -152,7 +249,7 @@ final class PhabricatorSetupIssueView extends AphrontView {
       'p',
       array(),
       pht(
-        "The current Phabricator configuration has these %d value(s):",
+        'The current Phabricator configuration has these %d value(s):',
         count($configs)));
 
     $options = PhabricatorApplicationConfigOptions::loadAllOptions();
@@ -180,8 +277,8 @@ final class PhabricatorSetupIssueView extends AphrontView {
         'p',
         array(),
         pht(
-          "To update these %d value(s), run these command(s) from the command ".
-          "line:",
+          'To update these %d value(s), run these command(s) from the command '.
+          'line:',
           count($configs)));
 
       $update = array();
@@ -195,29 +292,30 @@ final class PhabricatorSetupIssueView extends AphrontView {
       $update = array();
       foreach ($configs as $config) {
         if (idx($options, $config) && $options[$config]->getLocked()) {
-          continue;
+          $name = pht('View "%s"', $config);
+        } else {
+          $name = pht('Edit "%s"', $config);
         }
         $link = phutil_tag(
           'a',
           array(
             'href' => '/config/edit/'.$config.'/?issue='.$issue->getIssueKey(),
           ),
-          pht('Edit %s', $config));
+          $name);
         $update[] = phutil_tag('li', array(), $link);
       }
       if ($update) {
         $update = phutil_tag('ul', array(), $update);
         if (!$related) {
-
           $update_info = phutil_tag(
           'p',
           array(),
-          pht("You can update these %d value(s) here:", count($configs)));
+          pht('You can update these %d value(s) here:', count($configs)));
         } else {
           $update_info = phutil_tag(
           'p',
           array(),
-          pht("These %d configuration value(s) are related:", count($configs)));
+          pht('These %d configuration value(s) are related:', count($configs)));
         }
       } else {
         $update = null;
@@ -238,17 +336,19 @@ final class PhabricatorSetupIssueView extends AphrontView {
       ));
   }
 
-  private function renderPHPConfig(array $configs) {
+  private function renderPHPConfig(array $configs, $issue) {
     $table_info = phutil_tag(
       'p',
       array(),
       pht(
-        "The current PHP configuration has these %d value(s):",
+        'The current PHP configuration has these %d value(s):',
         count($configs)));
 
     $dict = array();
     foreach ($configs as $key) {
-      $dict[$key] = ini_get($key);
+      $dict[$key] = $issue->getPHPConfigOriginalValue(
+        $key,
+        ini_get($key));
     }
 
     $table = $this->renderValueTable($dict);
@@ -284,15 +384,15 @@ final class PhabricatorSetupIssueView extends AphrontView {
         'p',
         array(),
         pht(
-          "To update these %d value(s), edit your PHP configuration file.",
+          'To update these %d value(s), edit your PHP configuration file.',
           count($configs)));
     } else {
       $info[] = phutil_tag(
         'p',
         array(),
         pht(
-          "To update these %d value(s), edit your PHP configuration file, ".
-          "located here:",
+          'To update these %d value(s), edit your PHP configuration file, '.
+          'located here:',
           count($configs)));
       $info[] = phutil_tag(
         'pre',
@@ -305,30 +405,121 @@ final class PhabricatorSetupIssueView extends AphrontView {
         'p',
         array(),
         pht(
-          "PHP also loaded these configuration file(s):",
-          count($more_loc)));
+          'PHP also loaded these %s configuration file(s):',
+          phutil_count($more_loc)));
       $info[] = phutil_tag(
         'pre',
         array(),
         implode("\n", $more_loc));
     }
 
-    $info[] = phutil_tag(
-      'p',
-      array(),
-      pht(
-        'You can find more information about PHP configuration values in the '.
-        '<a href="%s">PHP Documentation</a>.',
-        'http://php.net/manual/ini.list.php',
-        hsprintf('')));
+    $show_standard = false;
+    $show_opcache = false;
+
+    foreach ($configs as $key) {
+      if (preg_match('/^opcache\./', $key)) {
+        $show_opcache = true;
+      } else {
+        $show_standard = true;
+      }
+    }
+
+    if ($show_standard) {
+      $info[] = phutil_tag(
+        'p',
+        array(),
+        pht(
+          'You can find more information about PHP configuration values '.
+          'in the %s.',
+          phutil_tag(
+            'a',
+            array(
+              'href' => 'http://php.net/manual/ini.list.php',
+              'target' => '_blank',
+            ),
+            pht('PHP Documentation'))));
+    }
+
+    if ($show_opcache) {
+      $info[] = phutil_tag(
+        'p',
+        array(),
+        pht(
+          'You can find more information about configuring OPcache in '.
+          'the %s.',
+          phutil_tag(
+            'a',
+            array(
+              'href' => 'http://php.net/manual/opcache.configuration.php',
+              'target' => '_blank',
+            ),
+            pht('PHP OPcache Documentation'))));
+    }
 
     $info[] = phutil_tag(
       'p',
       array(),
       pht(
-        "After editing the PHP configuration, <strong>restart your ".
-        "webserver for the changes to take effect</strong>.",
-        hsprintf('')));
+        'After editing the PHP configuration, <strong>restart Phabricator for '.
+        'the changes to take effect</strong>. For help with restarting '.
+        'Phabricator, see %s in the documentation.',
+        $this->renderRestartLink()));
+
+    return phutil_tag(
+      'div',
+      array(
+        'class' => 'setup-issue-config',
+      ),
+      array(
+        $table_info,
+        $table,
+        $info,
+      ));
+  }
+
+  private function renderMySQLConfig(array $config) {
+    $values = array();
+    $issue = $this->getIssue();
+    $ref = $issue->getDatabaseRef();
+    if ($ref) {
+      foreach ($config as $key) {
+        $value = $ref->loadRawMySQLConfigValue($key);
+        if ($value === null) {
+          $value = phutil_tag(
+            'em',
+            array(),
+            pht('(Not Supported)'));
+        }
+        $values[$key] = $value;
+      }
+    }
+
+    $table = $this->renderValueTable($values);
+
+    $doc_href = PhabricatorEnv::getDoclink('User Guide: Amazon RDS');
+    $doc_link = phutil_tag(
+      'a',
+      array(
+        'href' => $doc_href,
+        'target' => '_blank',
+      ),
+      pht('User Guide: Amazon RDS'));
+
+    $info = array();
+    $info[] = phutil_tag(
+      'p',
+      array(),
+      pht(
+        'If you are using Amazon RDS, some of the instructions above may '.
+        'not apply to you. See %s for discussion of Amazon RDS.',
+        $doc_link));
+
+    $table_info = phutil_tag(
+      'p',
+      array(),
+      pht(
+        'The current MySQL configuration has these %d value(s):',
+        count($config)));
 
     return phutil_tag(
       'div',
@@ -369,9 +560,55 @@ final class PhabricatorSetupIssueView extends AphrontView {
       return phutil_tag('em', array(), 'true');
     } else if ($value === '') {
       return phutil_tag('em', array(), 'empty string');
+    } else if ($value instanceof PhutilSafeHTML) {
+      return $value;
     } else {
       return PhabricatorConfigJSON::prettyPrintJSON($value);
     }
+  }
+
+  private function renderRelatedLinks(array $links) {
+    $link_info = phutil_tag(
+      'p',
+      array(),
+      pht(
+        '%d related link(s):',
+        count($links)));
+
+    $link_list = array();
+    foreach ($links as $link) {
+      $link_tag = phutil_tag(
+        'a',
+        array(
+          'target' => '_blank',
+          'href' => $link['href'],
+        ),
+        $link['name']);
+      $link_item = phutil_tag('li', array(), $link_tag);
+      $link_list[] = $link_item;
+    }
+    $link_list = phutil_tag('ul', array(), $link_list);
+
+    return phutil_tag(
+      'div',
+      array(
+        'class' => 'setup-issue-config',
+      ),
+      array(
+        $link_info,
+        $link_list,
+      ));
+  }
+
+  private function renderRestartLink() {
+    $doc_href = PhabricatorEnv::getDoclink('Restarting Phabricator');
+    return phutil_tag(
+      'a',
+      array(
+        'href' => $doc_href,
+        'target' => '_blank',
+      ),
+      pht('Restarting Phabricator'));
   }
 
 }

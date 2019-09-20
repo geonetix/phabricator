@@ -6,10 +6,8 @@ final class DifferentialChangesetViewController extends DifferentialController {
     return true;
   }
 
-  public function processRequest() {
-    $request = $this->getRequest();
-
-    $author_phid = $request->getUser()->getPHID();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
 
     $rendering_reference = $request->getStr('ref');
     $parts = explode('/', $rendering_reference);
@@ -23,25 +21,33 @@ final class DifferentialChangesetViewController extends DifferentialController {
     $id = (int)$id;
     $vs = (int)$vs;
 
-    $changeset = id(new DifferentialChangeset())->load($id);
+    $load_ids = array($id);
+    if ($vs && ($vs != -1)) {
+      $load_ids[] = $vs;
+    }
+
+    $changesets = id(new DifferentialChangesetQuery())
+      ->setViewer($viewer)
+      ->withIDs($load_ids)
+      ->needHunks(true)
+      ->execute();
+    $changesets = mpull($changesets, null, 'getID');
+
+    $changeset = idx($changesets, $id);
     if (!$changeset) {
       return new Aphront404Response();
     }
 
-    // TODO: (T603) Make Changeset policy-aware. For now, just fake it
-    // by making sure we can see the diff.
-    $diff = id(new DifferentialDiffQuery())
-      ->setViewer($request->getUser())
-      ->withIDs(array($changeset->getDiffID()))
-      ->executeOne();
-    if (!$diff) {
-      return new Aphront404Response();
+    $vs_changeset = null;
+    if ($vs && ($vs != -1)) {
+      $vs_changeset = idx($changesets, $vs);
+      if (!$vs_changeset) {
+        return new Aphront404Response();
+      }
     }
-
 
     $view = $request->getStr('view');
     if ($view) {
-      $changeset->attachHunks($changeset->loadHunks());
       $phid = idx($changeset->getMetadata(), "$view:binary-phid");
       if ($phid) {
         return id(new AphrontRedirectResponse())->setURI("/file/info/$phid/");
@@ -50,12 +56,8 @@ final class DifferentialChangesetViewController extends DifferentialController {
         case 'new':
           return $this->buildRawFileResponse($changeset, $is_new = true);
         case 'old':
-          if ($vs && ($vs != -1)) {
-            $vs_changeset = id(new DifferentialChangeset())->load($vs);
-            if ($vs_changeset) {
-              $vs_changeset->attachHunks($vs_changeset->loadHunks());
-              return $this->buildRawFileResponse($vs_changeset, $is_new = true);
-            }
+          if ($vs_changeset) {
+            return $this->buildRawFileResponse($vs_changeset, $is_new = true);
           }
           return $this->buildRawFileResponse($changeset, $is_new = false);
         default:
@@ -63,13 +65,8 @@ final class DifferentialChangesetViewController extends DifferentialController {
       }
     }
 
-    if ($vs && ($vs != -1)) {
-      $vs_changeset = id(new DifferentialChangeset())->load($vs);
-      if (!$vs_changeset) {
-        return new Aphront404Response();
-      }
-    }
-
+    $old = array();
+    $new = array();
     if (!$vs) {
       $right = $changeset;
       $left  = null;
@@ -80,6 +77,9 @@ final class DifferentialChangesetViewController extends DifferentialController {
       $left_new = false;
 
       $render_cache_key = $right->getID();
+
+      $old[] = $changeset;
+      $new[] = $changeset;
     } else if ($vs == -1) {
       $right = null;
       $left = $changeset;
@@ -90,6 +90,9 @@ final class DifferentialChangesetViewController extends DifferentialController {
       $left_new = true;
 
       $render_cache_key = null;
+
+      $old[] = $changeset;
+      $new[] = $changeset;
     } else {
       $right = $changeset;
       $left = $vs_changeset;
@@ -100,23 +103,20 @@ final class DifferentialChangesetViewController extends DifferentialController {
       $left_new = true;
 
       $render_cache_key = null;
+
+      $new[] = $left;
+      $new[] = $right;
     }
 
     if ($left) {
-      $left->attachHunks($left->loadHunks());
-    }
-
-    if ($right) {
-      $right->attachHunks($right->loadHunks());
-    }
-
-    if ($left) {
-
       $left_data = $left->makeNewFile();
+      $left_properties = $left->getNewProperties();
       if ($right) {
         $right_data = $right->makeNewFile();
+        $right_properties = $right->getNewProperties();
       } else {
         $right_data = $left->makeOldFile();
+        $right_properties = $left->getOldProperties();
       }
 
       $engine = new PhabricatorDifferenceEngine();
@@ -127,60 +127,90 @@ final class DifferentialChangesetViewController extends DifferentialController {
       $choice = clone nonempty($left, $right);
       $choice->attachHunks($synthetic->getHunks());
 
+      $choice->setOldProperties($left_properties);
+      $choice->setNewProperties($right_properties);
+
       $changeset = $choice;
     }
 
-    $coverage = null;
-    if ($right && $right->getDiffID()) {
-      $unit = id(new DifferentialDiffProperty())->loadOneWhere(
-        'diffID = %d AND name = %s',
-        $right->getDiffID(),
-        'arc:unit');
-
-      if ($unit) {
-        $coverage = array();
-        foreach ($unit->getData() as $result) {
-          $result_coverage = idx($result, 'coverage');
-          if (!$result_coverage) {
-            continue;
-          }
-          $file_coverage = idx($result_coverage, $right->getFileName());
-          if (!$file_coverage) {
-            continue;
-          }
-          $coverage[] = $file_coverage;
-        }
-
-        $coverage = ArcanistUnitTestResult::mergeCoverage($coverage);
+    if ($left_new || $right_new) {
+      $diff_map = array();
+      if ($left) {
+        $diff_map[] = $left->getDiff();
       }
+      if ($right) {
+        $diff_map[] = $right->getDiff();
+      }
+      $diff_map = mpull($diff_map, null, 'getPHID');
+
+      $buildables = id(new HarbormasterBuildableQuery())
+        ->setViewer($viewer)
+        ->withBuildablePHIDs(array_keys($diff_map))
+        ->withManualBuildables(false)
+        ->needBuilds(true)
+        ->needTargets(true)
+        ->execute();
+      $buildables = mpull($buildables, null, 'getBuildablePHID');
+      foreach ($diff_map as $diff_phid => $changeset_diff) {
+        $changeset_diff->attachBuildable(idx($buildables, $diff_phid));
+      }
+    }
+
+    $coverage = null;
+    if ($right_new) {
+      $coverage = $this->loadCoverage($right);
     }
 
     $spec = $request->getStr('range');
     list($range_s, $range_e, $mask) =
       DifferentialChangesetParser::parseRangeSpecification($spec);
 
-    $parser = new DifferentialChangesetParser();
-    $parser->setCoverage($coverage);
-    $parser->setChangeset($changeset);
-    $parser->setRenderingReference($rendering_reference);
-    $parser->setRenderCacheKey($render_cache_key);
-    $parser->setRightSideCommentMapping($right_source, $right_new);
-    $parser->setLeftSideCommentMapping($left_source, $left_new);
-    $parser->setWhitespaceMode($request->getStr('whitespace'));
+    $parser = id(new DifferentialChangesetParser())
+      ->setCoverage($coverage)
+      ->setChangeset($changeset)
+      ->setRenderingReference($rendering_reference)
+      ->setRenderCacheKey($render_cache_key)
+      ->setRightSideCommentMapping($right_source, $right_new)
+      ->setLeftSideCommentMapping($left_source, $left_new);
 
-    if ($request->getStr('renderer') == '1up') {
-      $parser->setRenderer(new DifferentialChangesetOneUpRenderer());
-    }
-
+    $parser->readParametersFromRequest($request);
 
     if ($left && $right) {
       $parser->setOriginals($left, $right);
     }
 
+    $diff = $changeset->getDiff();
+    $revision_id = $diff->getRevisionID();
+
+    $can_mark = false;
+    $object_owner_phid = null;
+    $revision = null;
+    if ($revision_id) {
+      $revision = id(new DifferentialRevisionQuery())
+        ->setViewer($viewer)
+        ->withIDs(array($revision_id))
+        ->executeOne();
+      if ($revision) {
+        $can_mark = ($revision->getAuthorPHID() == $viewer->getPHID());
+        $object_owner_phid = $revision->getAuthorPHID();
+      }
+    }
+
     // Load both left-side and right-side inline comments.
-    $inlines = $this->loadInlineComments(
-      array($left_source, $right_source),
-      $author_phid);
+    if ($revision) {
+      $query = id(new DifferentialInlineCommentQuery())
+        ->setViewer($viewer)
+        ->needHidden(true)
+        ->withRevisionPHIDs(array($revision->getPHID()));
+      $inlines = $query->execute();
+      $inlines = $query->adjustInlinesForChangesets(
+        $inlines,
+        $old,
+        $new,
+        $revision);
+    } else {
+      $inlines = array();
+    }
 
     if ($left_new) {
       $inlines = array_merge(
@@ -207,7 +237,7 @@ final class DifferentialChangesetViewController extends DifferentialController {
     $parser->setHandles($handles);
 
     $engine = new PhabricatorMarkupEngine();
-    $engine->setViewer($request->getUser());
+    $engine->setViewer($viewer);
 
     foreach ($inlines as $inline) {
       $engine->addObject(
@@ -216,79 +246,85 @@ final class DifferentialChangesetViewController extends DifferentialController {
     }
 
     $engine->process();
-    $parser->setMarkupEngine($engine);
+
+    $parser
+      ->setUser($viewer)
+      ->setMarkupEngine($engine)
+      ->setShowEditAndReplyLinks(true)
+      ->setCanMarkDone($can_mark)
+      ->setObjectOwnerPHID($object_owner_phid)
+      ->setRange($range_s, $range_e)
+      ->setMask($mask);
 
     if ($request->isAjax()) {
-      // TODO: This is sort of lazy, the effect is just to not render "Edit"
-      // and "Reply" links on the "standalone view".
-      $parser->setUser($request->getUser());
-    }
+      // NOTE: We must render the changeset before we render coverage
+      // information, since it builds some caches.
+      $rendered_changeset = $parser->renderChangeset();
 
-    $output = $parser->render($range_s, $range_e, $mask);
+      $mcov = $parser->renderModifiedCoverage();
 
-    $mcov = $parser->renderModifiedCoverage();
-
-    if ($request->isAjax()) {
-      $coverage = array(
+      $coverage_data = array(
         'differential-mcoverage-'.md5($changeset->getFilename()) => $mcov,
       );
 
       return id(new PhabricatorChangesetResponse())
-        ->setRenderedChangeset($output)
-        ->setCoverage($coverage);
+        ->setRenderedChangeset($rendered_changeset)
+        ->setCoverage($coverage_data)
+        ->setUndoTemplates($parser->getRenderer()->renderUndoTemplates());
     }
 
-    Javelin::initBehavior('differential-show-more', array(
-      'uri' => '/differential/changeset/',
-      'whitespace' => $request->getStr('whitespace'),
-    ));
+    $detail = id(new DifferentialChangesetListView())
+      ->setUser($this->getViewer())
+      ->setChangesets(array($changeset))
+      ->setVisibleChangesets(array($changeset))
+      ->setRenderingReferences(array($rendering_reference))
+      ->setRenderURI('/differential/changeset/')
+      ->setDiff($diff)
+      ->setTitle(pht('Standalone View'))
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->setIsStandalone(true)
+      ->setParser($parser);
 
-    Javelin::initBehavior('differential-comment-jump', array());
-
-    // TODO: [HTML] Clean up DifferentialChangesetParser output, but it's
-    // undergoing like six kinds of refactoring anyway.
-    $output = phutil_safe_html($output);
-
-    $detail = new DifferentialChangesetDetailView();
-    $detail->setChangeset($changeset);
-    $detail->appendChild($output);
-    $detail->setVsChangesetID($left_source);
-
-    $panel = new DifferentialPrimaryPaneView();
-    $panel->appendChild(
-      phutil_tag(
-      'div',
-      array(
-        'class' => 'differential-review-stage',
-        'id'    => 'differential-review-stage',
-      ),
-      $detail->render()));
-
-    return $this->buildApplicationPage(
-      array(
-        $panel
-      ),
-      array(
-        'title' => pht('Changeset View'),
-      ));
-  }
-
-  private function loadInlineComments(array $changeset_ids, $author_phid) {
-    $changeset_ids = array_unique(array_filter($changeset_ids));
-    if (!$changeset_ids) {
-      return;
+    if ($revision_id) {
+      $detail->setInlineCommentControllerURI(
+        '/differential/comment/inline/edit/'.$revision_id.'/');
     }
 
-    return id(new DifferentialInlineCommentQuery())
-      ->withViewerAndChangesetIDs($author_phid, $changeset_ids)
-      ->execute();
+    $crumbs = $this->buildApplicationCrumbs();
+
+    if ($revision_id) {
+      $crumbs->addTextCrumb('D'.$revision_id, '/D'.$revision_id);
+    }
+
+    $diff_id = $diff->getID();
+    if ($diff_id) {
+      $crumbs->addTextCrumb(
+        pht('Diff %d', $diff_id),
+        $this->getApplicationURI('diff/'.$diff_id));
+    }
+
+    $crumbs->addTextCrumb($changeset->getDisplayFilename());
+    $crumbs->setBorder(true);
+
+    $header = id(new PHUIHeaderView())
+      ->setHeader(pht('Changeset View'))
+      ->setHeaderIcon('fa-gear');
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter($detail);
+
+    return $this->newPage()
+      ->setTitle(pht('Changeset View'))
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
   }
 
   private function buildRawFileResponse(
     DifferentialChangeset $changeset,
     $is_new) {
 
-    $viewer = $this->getRequest()->getUser();
+    $viewer = $this->getViewer();
 
     if ($is_new) {
       $key = 'raw:new:phid';
@@ -321,12 +357,18 @@ final class DifferentialChangesetViewController extends DifferentialController {
         $data = $changeset->makeOldFile();
       }
 
+      $diff = $changeset->getDiff();
+
       $file = PhabricatorFile::newFromFileData(
         $data,
         array(
-          'name'      => $changeset->getFilename(),
+          'name' => $changeset->getFilename(),
           'mime-type' => 'text/plain',
+          'ttl.relative' => phutil_units('24 hours in seconds'),
+          'viewPolicy' => PhabricatorPolicies::POLICY_NOONE,
         ));
+
+      $file->attachToObject($diff->getPHID());
 
       $metadata[$key] = $file->getPHID();
       $changeset->setMetadata($metadata);
@@ -335,38 +377,88 @@ final class DifferentialChangesetViewController extends DifferentialController {
       unset($unguard);
     }
 
-    return id(new AphrontRedirectResponse())
-      ->setURI($file->getBestURI());
+    return $file->getRedirectResponse();
   }
 
   private function buildLintInlineComments($changeset) {
-    $lint = id(new DifferentialDiffProperty())->loadOneWhere(
-      'diffID = %d AND name = %s',
-      $changeset->getDiffID(),
-      'arc:lint');
-    if (!$lint) {
+    $diff = $changeset->getDiff();
+
+    $target_phids = $diff->getBuildTargetPHIDs();
+    if (!$target_phids) {
       return array();
     }
-    $lint = $lint->getData();
+
+    $messages = id(new HarbormasterBuildLintMessage())->loadAllWhere(
+      'buildTargetPHID IN (%Ls) AND path = %s',
+      $target_phids,
+      $changeset->getFilename());
+
+    if (!$messages) {
+      return array();
+    }
+
+    $change_type = $changeset->getChangeType();
+    if (DifferentialChangeType::isDeleteChangeType($change_type)) {
+      // If this is a lint message on a deleted file, show it on the left
+      // side of the UI because there are no source code lines on the right
+      // side of the UI so inlines don't have anywhere to render. See PHI416.
+      $is_new = 0;
+    } else {
+      $is_new = 1;
+    }
+
+    $template = id(new DifferentialInlineComment())
+      ->setChangesetID($changeset->getID())
+      ->setIsNewFile($is_new)
+      ->setLineLength(0);
 
     $inlines = array();
-    foreach ($lint as $msg) {
-      if ($msg['path'] != $changeset->getFilename()) {
-        continue;
-      }
-      $inline = new DifferentialInlineComment();
-      $inline->setChangesetID($changeset->getID());
-      $inline->setIsNewFile(true);
-      $inline->setSyntheticAuthor('Lint: '.$msg['name']);
-      $inline->setLineNumber($msg['line']);
-      $inline->setLineLength(0);
+    foreach ($messages as $message) {
+      $description = $message->getProperty('description');
 
-      $inline->setContent('%%%'.$msg['description'].'%%%');
-
-      $inlines[] = $inline;
+      $inlines[] = id(clone $template)
+        ->setSyntheticAuthor(pht('Lint: %s', $message->getName()))
+        ->setLineNumber($message->getLine())
+        ->setContent($description);
     }
 
     return $inlines;
+  }
+
+  private function loadCoverage(DifferentialChangeset $changeset) {
+    $viewer = $this->getViewer();
+
+    $target_phids = $changeset->getDiff()->getBuildTargetPHIDs();
+    if (!$target_phids) {
+      return null;
+    }
+
+    $unit = id(new HarbormasterBuildUnitMessageQuery())
+      ->setViewer($viewer)
+      ->withBuildTargetPHIDs($target_phids)
+      ->execute();
+    if (!$unit) {
+      return null;
+    }
+
+    $coverage = array();
+    foreach ($unit as $message) {
+      $test_coverage = $message->getProperty('coverage');
+      if ($test_coverage === null) {
+        continue;
+      }
+      $coverage_data = idx($test_coverage, $changeset->getFileName());
+      if (!strlen($coverage_data)) {
+        continue;
+      }
+      $coverage[] = $coverage_data;
+    }
+
+    if (!$coverage) {
+      return null;
+    }
+
+    return ArcanistUnitTestResult::mergeCoverage($coverage);
   }
 
 }

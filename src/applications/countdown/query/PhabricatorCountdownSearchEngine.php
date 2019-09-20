@@ -3,65 +3,52 @@
 final class PhabricatorCountdownSearchEngine
   extends PhabricatorApplicationSearchEngine {
 
-  public function buildSavedQueryFromRequest(AphrontRequest $request) {
-    $saved = new PhabricatorSavedQuery();
-    $saved->setParameter(
-      'authorPHIDs',
-      $this->readUsersFromRequest($request, 'authors'));
-
-    $saved->setParameter('upcoming', $request->getBool('upcoming'));
-
-    return $saved;
+  public function getResultTypeDescription() {
+    return pht('Countdowns');
   }
 
-  public function buildQueryFromSavedQuery(PhabricatorSavedQuery $saved) {
-    $query = id(new PhabricatorCountdownQuery());
+  public function getApplicationClassName() {
+    return 'PhabricatorCountdownApplication';
+  }
 
-    $author_phids = $saved->getParameter('authorPHIDs', array());
-    if ($author_phids) {
-      $query->withAuthorPHIDs($author_phids);
+  public function newQuery() {
+    return new PhabricatorCountdownQuery();
+  }
+
+  protected function buildQueryFromParameters(array $map) {
+    $query = $this->newQuery();
+
+    if ($map['authorPHIDs']) {
+      $query->withAuthorPHIDs($map['authorPHIDs']);
     }
 
-    if ($saved->getParameter('upcoming')) {
-      $query->withUpcoming(true);
+    if ($map['upcoming'] && $map['upcoming'][0] == 'upcoming') {
+      $query->withUpcoming();
     }
 
     return $query;
   }
 
-  public function buildSearchForm(
-    AphrontFormView $form,
-    PhabricatorSavedQuery $saved_query) {
-    $phids = $saved_query->getParameter('authorPHIDs', array());
-    $author_handles = id(new PhabricatorHandleQuery())
-      ->setViewer($this->requireViewer())
-      ->withPHIDs($phids)
-      ->execute();
-
-    $upcoming = $saved_query->getParameter('upcoming');
-
-    $form
-      ->appendChild(
-        id(new AphrontFormTokenizerControl())
-          ->setDatasource('/typeahead/common/users/')
-          ->setName('authors')
-          ->setLabel(pht('Authors'))
-          ->setValue($author_handles))
-      ->appendChild(
-        id(new AphrontFormCheckboxControl())
-          ->addCheckbox(
-            'upcoming',
-            1,
-            pht('Show only countdowns that are still counting down.'),
-            $upcoming));
-
+  protected function buildCustomSearchFields() {
+    return array(
+      id(new PhabricatorUsersSearchField())
+        ->setLabel(pht('Authors'))
+        ->setKey('authorPHIDs')
+        ->setAliases(array('author', 'authors')),
+      id(new PhabricatorSearchCheckboxesField())
+        ->setKey('upcoming')
+        ->setOptions(
+          array(
+            'upcoming' => pht('Show only upcoming countdowns.'),
+          )),
+    );
   }
 
   protected function getURI($path) {
     return '/countdown/'.$path;
   }
 
-  public function getBuiltinQueryNames() {
+  protected function getBuiltinQueryNames() {
     $names = array(
       'upcoming' => pht('Upcoming'),
       'all' => pht('All'),
@@ -75,7 +62,6 @@ final class PhabricatorCountdownSearchEngine
   }
 
   public function buildSavedQueryFromBuiltin($query_key) {
-
     $query = $this->newSavedQuery();
     $query->setQueryKey($query_key);
 
@@ -87,10 +73,94 @@ final class PhabricatorCountdownSearchEngine
           'authorPHIDs',
           array($this->requireViewer()->getPHID()));
       case 'upcoming':
-        return $query->setParameter('upcoming', true);
+        return $query->setParameter('upcoming', array('upcoming'));
     }
 
     return parent::buildSavedQueryFromBuiltin($query_key);
+  }
+
+  protected function getRequiredHandlePHIDsForResultList(
+    array $countdowns,
+    PhabricatorSavedQuery $query) {
+
+    return mpull($countdowns, 'getAuthorPHID');
+  }
+
+  protected function renderResultList(
+    array $countdowns,
+    PhabricatorSavedQuery $query,
+    array $handles) {
+
+    assert_instances_of($countdowns, 'PhabricatorCountdown');
+
+    $viewer = $this->requireViewer();
+
+    $list = new PHUIObjectItemListView();
+    $list->setUser($viewer);
+    foreach ($countdowns as $countdown) {
+      $id = $countdown->getID();
+      $ended = false;
+      $epoch = $countdown->getEpoch();
+      if ($epoch <= PhabricatorTime::getNow()) {
+        $ended = true;
+      }
+
+      $item = id(new PHUIObjectItemView())
+        ->setUser($viewer)
+        ->setObject($countdown)
+        ->setObjectName($countdown->getMonogram())
+        ->setHeader($countdown->getTitle())
+        ->setHref($countdown->getURI())
+        ->addByline(
+          pht(
+            'Created by %s',
+            $handles[$countdown->getAuthorPHID()]->renderLink()));
+
+      if ($ended) {
+        $item->addAttribute(
+          pht('Launched on %s', phabricator_datetime($epoch, $viewer)));
+        $item->setDisabled(true);
+      } else {
+        $time_left = ($epoch - PhabricatorTime::getNow());
+        $num = round($time_left / (60 * 60 * 24));
+        $noun = pht('Days');
+        if ($num < 1) {
+          $num = round($time_left / (60 * 60), 1);
+          $noun = pht('Hours');
+        }
+        $item->setCountdown($num, $noun);
+        $item->addAttribute(
+          phabricator_datetime($epoch, $viewer));
+      }
+
+      $list->addItem($item);
+    }
+
+    $result = new PhabricatorApplicationSearchResultView();
+    $result->setObjectList($list);
+    $result->setNoDataString(pht('No countdowns found.'));
+
+    return $result;
+  }
+
+  protected function getNewUserBody() {
+    $create_button = id(new PHUIButtonView())
+      ->setTag('a')
+      ->setText(pht('Create a Countdown'))
+      ->setHref('/countdown/edit/')
+      ->setColor(PHUIButtonView::GREEN);
+
+    $icon = $this->getApplication()->getIcon();
+    $app_name =  $this->getApplication()->getName();
+    $view = id(new PHUIBigInfoView())
+      ->setIcon($icon)
+      ->setTitle(pht('Welcome to %s', $app_name))
+      ->setDescription(
+        pht('Keep track of upcoming launch dates with '.
+            'embeddable counters.'))
+      ->addAction($create_button);
+
+      return $view;
   }
 
 }

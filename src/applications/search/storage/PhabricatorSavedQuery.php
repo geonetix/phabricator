@@ -1,8 +1,5 @@
 <?php
 
-/**
- * @group search
- */
 final class PhabricatorSavedQuery extends PhabricatorSearchDAO
   implements PhabricatorPolicyInterface {
 
@@ -10,10 +7,22 @@ final class PhabricatorSavedQuery extends PhabricatorSearchDAO
   protected $queryKey;
   protected $engineClassName;
 
-  public function getConfiguration() {
+  private $parameterMap = self::ATTACHABLE;
+
+  protected function getConfiguration() {
     return array(
       self::CONFIG_SERIALIZATION => array(
         'parameters' => self::SERIALIZATION_JSON,
+      ),
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'engineClassName' => 'text255',
+        'queryKey' => 'text12',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_queryKey' => array(
+          'columns' => array('queryKey'),
+          'unique' => true,
+        ),
       ),
     ) + parent::getConfiguration();
   }
@@ -29,7 +38,7 @@ final class PhabricatorSavedQuery extends PhabricatorSearchDAO
 
   public function save() {
     if ($this->getEngineClassName() === null) {
-      throw new Exception(pht("Engine class is null."));
+      throw new Exception(pht('Engine class is null.'));
     }
 
     // Instantiate the engine to make sure it's valid.
@@ -43,6 +52,22 @@ final class PhabricatorSavedQuery extends PhabricatorSearchDAO
 
   public function newEngine() {
     return newv($this->getEngineClassName(), array());
+  }
+
+  public function attachParameterMap(array $map) {
+    $this->parameterMap = $map;
+    return $this;
+  }
+
+  public function getEvaluatedParameter($key) {
+    return $this->assertAttachedKey($this->parameterMap, $key);
+  }
+
+  public function newCopy() {
+    return id(new self())
+      ->setParameters($this->getParameters())
+      ->setQueryKey(null)
+      ->setEngineClassName($this->getEngineClassName());
   }
 
 
@@ -61,10 +86,6 @@ final class PhabricatorSavedQuery extends PhabricatorSearchDAO
 
   public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
     return false;
-  }
-
-  public function describeAutomaticCapability($capability) {
-    return null;
   }
 
 }

@@ -2,8 +2,12 @@
 
 final class HeraldRule extends HeraldDAO
   implements
+    PhabricatorApplicationTransactionInterface,
     PhabricatorFlaggableInterface,
-    PhabricatorPolicyInterface {
+    PhabricatorPolicyInterface,
+    PhabricatorDestructibleInterface,
+    PhabricatorIndexableInterface,
+    PhabricatorSubscribableInterface {
 
   const TABLE_RULE_APPLIED = 'herald_ruleapplied';
 
@@ -15,23 +19,54 @@ final class HeraldRule extends HeraldDAO
   protected $repetitionPolicy;
   protected $ruleType;
   protected $isDisabled = 0;
+  protected $triggerObjectPHID;
 
-  protected $configVersion = 14;
+  protected $configVersion = 38;
 
-  private $ruleApplied = self::ATTACHABLE; // phids for which this rule has been applied
+  // PHIDs for which this rule has been applied
+  private $ruleApplied = self::ATTACHABLE;
   private $validAuthor = self::ATTACHABLE;
   private $author = self::ATTACHABLE;
   private $conditions;
   private $actions;
+  private $triggerObject = self::ATTACHABLE;
 
-  public function getConfiguration() {
+  const REPEAT_EVERY = 'every';
+  const REPEAT_FIRST = 'first';
+  const REPEAT_CHANGE = 'change';
+
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID => true,
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'name' => 'sort255',
+        'contentType' => 'text255',
+        'mustMatchAll' => 'bool',
+        'configVersion' => 'uint32',
+        'repetitionPolicy' => 'text32',
+        'ruleType' => 'text32',
+        'isDisabled' => 'uint32',
+        'triggerObjectPHID' => 'phid?',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_name' => array(
+          'columns' => array('name(128)'),
+        ),
+        'key_author' => array(
+          'columns' => array('authorPHID'),
+        ),
+        'key_ruletype' => array(
+          'columns' => array('ruleType'),
+        ),
+        'key_trigger' => array(
+          'columns' => array('triggerObjectPHID'),
+        ),
+      ),
     ) + parent::getConfiguration();
   }
 
   public function generatePHID() {
-    return PhabricatorPHID::generateNewPHID(HeraldPHIDTypeRule::TYPECONST);
+    return PhabricatorPHID::generateNewPHID(HeraldRulePHIDType::TYPECONST);
   }
 
   public function getRuleApplied($phid) {
@@ -70,40 +105,20 @@ final class HeraldRule extends HeraldDAO
     if (!$this->getID()) {
       return array();
     }
-    return id(new HeraldAction())->loadAllWhere(
+    return id(new HeraldActionRecord())->loadAllWhere(
       'ruleID = %d',
       $this->getID());
   }
 
   public function attachActions(array $actions) {
     // TODO: validate actions have been attached.
-    assert_instances_of($actions, 'HeraldAction');
+    assert_instances_of($actions, 'HeraldActionRecord');
     $this->actions = $actions;
     return $this;
   }
 
   public function getActions() {
     return $this->actions;
-  }
-
-  public function loadEdits() {
-    if (!$this->getID()) {
-      return array();
-    }
-    $edits = id(new HeraldRuleEdit())->loadAllWhere(
-      'ruleID = %d ORDER BY dateCreated DESC',
-      $this->getID());
-
-    return $edits;
-  }
-
-  public function logEdit($editor_phid, $action) {
-    id(new HeraldRuleEdit())
-      ->setRuleID($this->getID())
-      ->setRuleName($this->getName())
-      ->setEditorPHID($editor_phid)
-      ->setAction($action)
-      ->save();
   }
 
   public function saveConditions(array $conditions) {
@@ -114,9 +129,9 @@ final class HeraldRule extends HeraldDAO
   }
 
   public function saveActions(array $actions) {
-    assert_instances_of($actions, 'HeraldAction');
+    assert_instances_of($actions, 'HeraldActionRecord');
     return $this->saveChildren(
-      id(new HeraldAction())->getTableName(),
+      id(new HeraldActionRecord())->getTableName(),
       $actions);
   }
 
@@ -124,15 +139,14 @@ final class HeraldRule extends HeraldDAO
     assert_instances_of($children, 'HeraldDAO');
 
     if (!$this->getID()) {
-      throw new Exception("Save rule before saving children.");
+      throw new PhutilInvalidStateException('save');
     }
 
     foreach ($children as $child) {
       $child->setRuleID($this->getID());
     }
 
-// TODO:
-//    $this->openTransaction();
+    $this->openTransaction();
       queryfx(
         $this->establishConnection('w'),
         'DELETE FROM %T WHERE ruleID = %d',
@@ -141,13 +155,11 @@ final class HeraldRule extends HeraldDAO
       foreach ($children as $child) {
         $child->save();
       }
-//    $this->saveTransaction();
+    $this->saveTransaction();
   }
 
   public function delete() {
-
-// TODO:
-//    $this->openTransaction();
+    $this->openTransaction();
       queryfx(
         $this->establishConnection('w'),
         'DELETE FROM %T WHERE ruleID = %d',
@@ -156,10 +168,12 @@ final class HeraldRule extends HeraldDAO
       queryfx(
         $this->establishConnection('w'),
         'DELETE FROM %T WHERE ruleID = %d',
-        id(new HeraldAction())->getTableName(),
+        id(new HeraldActionRecord())->getTableName(),
         $this->getID());
-      parent::delete();
-//    $this->saveTransaction();
+      $result = parent::delete();
+    $this->saveTransaction();
+
+    return $result;
   }
 
   public function hasValidAuthor() {
@@ -188,6 +202,143 @@ final class HeraldRule extends HeraldDAO
     return ($this->getRuleType() === HeraldRuleTypeConfig::RULE_TYPE_PERSONAL);
   }
 
+  public function isObjectRule() {
+    return ($this->getRuleType() == HeraldRuleTypeConfig::RULE_TYPE_OBJECT);
+  }
+
+  public function attachTriggerObject($trigger_object) {
+    $this->triggerObject = $trigger_object;
+    return $this;
+  }
+
+  public function getTriggerObject() {
+    return $this->assertAttached($this->triggerObject);
+  }
+
+  /**
+   * Get a sortable key for rule execution order.
+   *
+   * Rules execute in a well-defined order: personal rules first, then object
+   * rules, then global rules. Within each rule type, rules execute from lowest
+   * ID to highest ID.
+   *
+   * This ordering allows more powerful rules (like global rules) to override
+   * weaker rules (like personal rules) when multiple rules exist which try to
+   * affect the same field. Executing from low IDs to high IDs makes
+   * interactions easier to understand when adding new rules, because the newest
+   * rules always happen last.
+   *
+   * @return string A sortable key for this rule.
+   */
+  public function getRuleExecutionOrderSortKey() {
+
+    $rule_type = $this->getRuleType();
+
+    switch ($rule_type) {
+      case HeraldRuleTypeConfig::RULE_TYPE_PERSONAL:
+        $type_order = 1;
+        break;
+      case HeraldRuleTypeConfig::RULE_TYPE_OBJECT:
+        $type_order = 2;
+        break;
+      case HeraldRuleTypeConfig::RULE_TYPE_GLOBAL:
+        $type_order = 3;
+        break;
+      default:
+        throw new Exception(pht('Unknown rule type "%s"!', $rule_type));
+    }
+
+    return sprintf('~%d%010d', $type_order, $this->getID());
+  }
+
+  public function getMonogram() {
+    return 'H'.$this->getID();
+  }
+
+  public function getURI() {
+    return '/'.$this->getMonogram();
+  }
+
+  public function getEditorSortVector() {
+    return id(new PhutilSortVector())
+      ->addInt($this->getIsDisabled() ? 1 : 0)
+      ->addString($this->getName());
+  }
+
+  public function getEditorDisplayName() {
+    $name = pht('%s %s', $this->getMonogram(), $this->getName());
+
+    if ($this->getIsDisabled()) {
+      $name = pht('%s (Disabled)', $name);
+    }
+
+    return $name;
+  }
+
+
+/* -(  Repetition Policies  )------------------------------------------------ */
+
+
+  public function getRepetitionPolicyStringConstant() {
+    return $this->getRepetitionPolicy();
+  }
+
+  public function setRepetitionPolicyStringConstant($value) {
+    $map = self::getRepetitionPolicyMap();
+
+    if (!isset($map[$value])) {
+      throw new Exception(
+        pht(
+          'Rule repetition string constant "%s" is unknown.',
+          $value));
+    }
+
+    return $this->setRepetitionPolicy($value);
+  }
+
+  public function isRepeatEvery() {
+    return ($this->getRepetitionPolicyStringConstant() === self::REPEAT_EVERY);
+  }
+
+  public function isRepeatFirst() {
+    return ($this->getRepetitionPolicyStringConstant() === self::REPEAT_FIRST);
+  }
+
+  public function isRepeatOnChange() {
+    return ($this->getRepetitionPolicyStringConstant() === self::REPEAT_CHANGE);
+  }
+
+  public static function getRepetitionPolicySelectOptionMap() {
+    $map = self::getRepetitionPolicyMap();
+    return ipull($map, 'select');
+  }
+
+  private static function getRepetitionPolicyMap() {
+    return array(
+      self::REPEAT_EVERY => array(
+        'select' => pht('every time this rule matches:'),
+      ),
+      self::REPEAT_FIRST => array(
+        'select' => pht('only the first time this rule matches:'),
+      ),
+      self::REPEAT_CHANGE => array(
+        'select' => pht('if this rule did not match the last time:'),
+      ),
+    );
+  }
+
+
+/* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
+
+
+  public function getApplicationTransactionEditor() {
+    return new HeraldRuleEditor();
+  }
+
+  public function getApplicationTransactionTemplate() {
+    return new HeraldRuleTransaction();
+  }
+
 
 /* -(  PhabricatorPolicyInterface  )----------------------------------------- */
 
@@ -200,35 +351,60 @@ final class HeraldRule extends HeraldDAO
   }
 
   public function getPolicy($capability) {
+    if ($capability == PhabricatorPolicyCapability::CAN_VIEW) {
+      return PhabricatorPolicies::getMostOpenPolicy();
+    }
+
     if ($this->isGlobalRule()) {
-      switch ($capability) {
-        case PhabricatorPolicyCapability::CAN_VIEW:
-          return PhabricatorPolicies::POLICY_USER;
-        case PhabricatorPolicyCapability::CAN_EDIT:
-          $app = 'PhabricatorApplicationHerald';
-          $herald = PhabricatorApplication::getByClass($app);
-          $global = HeraldCapabilityManageGlobalRules::CAPABILITY;
-          return $herald->getPolicy($global);
-      }
+      $app = 'PhabricatorHeraldApplication';
+      $herald = PhabricatorApplication::getByClass($app);
+      $global = HeraldManageGlobalRulesCapability::CAPABILITY;
+      return $herald->getPolicy($global);
+    } else if ($this->isObjectRule()) {
+      return $this->getTriggerObject()->getPolicy($capability);
     } else {
-      return PhabricatorPolicies::POLICY_NOONE;
+      return $this->getAuthorPHID();
     }
   }
 
   public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
-    if ($this->isPersonalRule()) {
-      return ($viewer->getPHID() == $this->getAuthorPHID());
-    } else {
-      return false;
-    }
+    return false;
   }
 
   public function describeAutomaticCapability($capability) {
-    if ($this->isPersonalRule()) {
-      return pht("A personal rule's owner can always view and edit it.");
+    if ($capability == PhabricatorPolicyCapability::CAN_VIEW) {
+      return null;
     }
 
-    return null;
+    if ($this->isGlobalRule()) {
+      return pht(
+        'Global Herald rules can be edited by users with the "Can Manage '.
+        'Global Rules" Herald application permission.');
+    } else if ($this->isObjectRule()) {
+      return pht('Object rules inherit the edit policies of their objects.');
+    } else {
+      return pht('A personal rule can only be edited by its owner.');
+    }
+  }
+
+
+/* -(  PhabricatorSubscribableInterface  )----------------------------------- */
+
+
+  public function isAutomaticallySubscribed($phid) {
+    return $this->isPersonalRule() && $phid == $this->getAuthorPHID();
+  }
+
+
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+
+    $this->openTransaction();
+    $this->delete();
+    $this->saveTransaction();
   }
 
 }

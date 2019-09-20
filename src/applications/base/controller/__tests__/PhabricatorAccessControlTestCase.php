@@ -1,7 +1,6 @@
 <?php
 
-final class PhabricatorAccessControlTestCase
-  extends PhabricatorTestCase {
+final class PhabricatorAccessControlTestCase extends PhabricatorTestCase {
 
   protected function getPhabricatorTestCaseConfiguration() {
     return array(
@@ -11,9 +10,9 @@ final class PhabricatorAccessControlTestCase
 
   public function testControllerAccessControls() {
     $root = dirname(phutil_get_library_root('phabricator'));
-    require_once $root.'/support/PhabricatorStartup.php';
+    require_once $root.'/support/startup/PhabricatorStartup.php';
 
-    $application_configuration = new AphrontDefaultApplicationConfiguration();
+    $application_configuration = new AphrontApplicationConfiguration();
 
     $host = 'meow.example.com';
 
@@ -23,7 +22,8 @@ final class PhabricatorAccessControlTestCase
       ->setApplicationConfiguration($application_configuration)
       ->setRequestData(array());
 
-    $controller = new PhabricatorTestController($request);
+    $controller = new PhabricatorTestController();
+    $controller->setRequest($request);
 
     $u_public = id(new PhabricatorUser())
       ->setUsername('public');
@@ -31,7 +31,7 @@ final class PhabricatorAccessControlTestCase
     $u_unverified = $this->generateNewTestUser()
       ->setUsername('unverified')
       ->save();
-    $u_unverified->loadPrimaryEmail()->setIsVerified(0)->save();
+    $u_unverified->setIsEmailVerified(0)->save();
 
     $u_normal = $this->generateNewTestUser()
       ->setUsername('normal')
@@ -47,17 +47,22 @@ final class PhabricatorAccessControlTestCase
       ->setUsername('admin')
       ->save();
 
+    $u_notapproved = $this->generateNewTestUser()
+      ->setIsApproved(0)
+      ->setUsername('notapproved')
+      ->save();
+
     $env = PhabricatorEnv::beginScopedEnv();
     $env->overrideEnvConfig('phabricator.base-uri', 'http://'.$host);
     $env->overrideEnvConfig('policy.allow-public', false);
     $env->overrideEnvConfig('auth.require-email-verification', false);
-    $env->overrideEnvConfig('auth.email-domains', array());
+    $env->overrideEnvConfig('security.require-multi-factor-auth', false);
 
 
     // Test standard defaults.
 
     $this->checkAccess(
-      "Default",
+      pht('Default'),
       id(clone $controller),
       $request,
       array(
@@ -68,6 +73,7 @@ final class PhabricatorAccessControlTestCase
       array(
         $u_public,
         $u_disabled,
+        $u_notapproved,
       ));
 
 
@@ -75,7 +81,7 @@ final class PhabricatorAccessControlTestCase
 
     $env->overrideEnvConfig('auth.require-email-verification', true);
     $this->checkAccess(
-      "Email Verification Required",
+      pht('Email Verification Required'),
       id(clone $controller),
       $request,
       array(
@@ -86,10 +92,11 @@ final class PhabricatorAccessControlTestCase
         $u_unverified,
         $u_public,
         $u_disabled,
+        $u_notapproved,
       ));
 
     $this->checkAccess(
-      "Email Verification Required, With Exception",
+      pht('Email Verification Required, With Exception'),
       id(clone $controller)->setConfig('email', false),
       $request,
       array(
@@ -100,6 +107,7 @@ final class PhabricatorAccessControlTestCase
       array(
         $u_public,
         $u_disabled,
+        $u_notapproved,
       ));
     $env->overrideEnvConfig('auth.require-email-verification', false);
 
@@ -107,7 +115,7 @@ final class PhabricatorAccessControlTestCase
     // Test admin access.
 
     $this->checkAccess(
-      "Admin Required",
+      pht('Admin Required'),
       id(clone $controller)->setConfig('admin', true),
       $request,
       array(
@@ -118,13 +126,14 @@ final class PhabricatorAccessControlTestCase
         $u_unverified,
         $u_public,
         $u_disabled,
+        $u_notapproved,
       ));
 
 
     // Test disabled access.
 
     $this->checkAccess(
-      "Allow Disabled",
+      pht('Allow Disabled'),
       id(clone $controller)->setConfig('enabled', false),
       $request,
       array(
@@ -132,6 +141,7 @@ final class PhabricatorAccessControlTestCase
         $u_unverified,
         $u_admin,
         $u_disabled,
+        $u_notapproved,
       ),
       array(
         $u_public,
@@ -141,7 +151,7 @@ final class PhabricatorAccessControlTestCase
     // Test no login required.
 
     $this->checkAccess(
-      "No Login Required",
+      pht('No Login Required'),
       id(clone $controller)->setConfig('login', false),
       $request,
       array(
@@ -149,6 +159,7 @@ final class PhabricatorAccessControlTestCase
         $u_unverified,
         $u_admin,
         $u_public,
+        $u_notapproved,
       ),
       array(
         $u_disabled,
@@ -158,7 +169,7 @@ final class PhabricatorAccessControlTestCase
     // Test public access.
 
     $this->checkAccess(
-      "No Login Required",
+      pht('Public Access'),
       id(clone $controller)->setConfig('public', true),
       $request,
       array(
@@ -173,7 +184,7 @@ final class PhabricatorAccessControlTestCase
 
     $env->overrideEnvConfig('policy.allow-public', true);
     $this->checkAccess(
-      "Public + configured",
+      pht('Public + configured'),
       id(clone $controller)->setConfig('public', true),
       $request,
       array(
@@ -184,11 +195,12 @@ final class PhabricatorAccessControlTestCase
       ),
       array(
         $u_disabled,
+        $u_notapproved,
       ));
     $env->overrideEnvConfig('policy.allow-public', false);
 
 
-    $app = PhabricatorApplication::getByClass('PhabricatorApplicationTest');
+    $app = PhabricatorApplication::getByClass('PhabricatorTestApplication');
     $app->reset();
     $app->setPolicy(
       PhabricatorPolicyCapability::CAN_VIEW,
@@ -197,7 +209,7 @@ final class PhabricatorAccessControlTestCase
     $app_controller = id(clone $controller)->setCurrentApplication($app);
 
     $this->checkAccess(
-      "Application Controller",
+      pht('Application Controller'),
       $app_controller,
       $request,
       array(
@@ -208,10 +220,11 @@ final class PhabricatorAccessControlTestCase
         $u_admin,
         $u_public,
         $u_disabled,
+        $u_notapproved,
       ));
 
     $this->checkAccess(
-      "Application Controller",
+      pht('Application Controller, No Login Required'),
       id(clone $app_controller)->setConfig('login', false),
       $request,
       array(
@@ -219,6 +232,7 @@ final class PhabricatorAccessControlTestCase
         $u_unverified,
         $u_admin,
         $u_public,
+        $u_notapproved,
       ),
       array(
         $u_disabled,
@@ -242,10 +256,9 @@ final class PhabricatorAccessControlTestCase
         $result = $ex;
       }
 
-      $this->assertEqual(
-        true,
+      $this->assertTrue(
         ($result === null),
-        "Expect user '{$uname}' to be allowed access to '{$label}'.");
+        pht("Expect user '%s' to be allowed access to '%s'.", $uname, $label));
     }
 
     foreach ($no as $user) {
@@ -258,10 +271,9 @@ final class PhabricatorAccessControlTestCase
         $result = $ex;
       }
 
-      $this->assertEqual(
-        false,
+      $this->assertFalse(
         ($result === null),
-        "Expect user '{$uname}' to be denied access to '{$label}'.");
+        pht("Expect user '%s' to be denied access to '%s'.", $uname, $label));
     }
   }
 

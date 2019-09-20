@@ -2,18 +2,10 @@
 
 final class HeraldDisableController extends HeraldController {
 
-  private $id;
-  private $action;
-
-  public function willProcessRequest(array $data) {
-    $this->id = $data['id'];
-    $this->action = $data['action'];
-  }
-
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
-    $id = $this->id;
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $id = $request->getURIData('id');
+    $action = $request->getURIData('action');
 
     $rule = id(new HeraldRuleQuery())
       ->setViewer($viewer)
@@ -28,18 +20,18 @@ final class HeraldDisableController extends HeraldController {
       return new Aphront404Response();
     }
 
-    if ($rule->getRuleType() == HeraldRuleTypeConfig::RULE_TYPE_GLOBAL) {
+    if ($rule->isGlobalRule()) {
       $this->requireApplicationCapability(
-        HeraldCapabilityManageGlobalRules::CAPABILITY);
+        HeraldManageGlobalRulesCapability::CAPABILITY);
     }
 
-    $view_uri = $this->getApplicationURI("rule/{$id}/");
+    $view_uri = '/'.$rule->getMonogram();
 
-    $is_disable = ($this->action === 'disable');
+    $is_disable = ($action === 'disable');
 
     if ($request->isFormPost()) {
       $xaction = id(new HeraldRuleTransaction())
-        ->setTransactionType(HeraldRuleTransaction::TYPE_DISABLE)
+        ->setTransactionType(HeraldRuleDisableTransaction::TRANSACTIONTYPE)
         ->setNewValue($is_disable);
 
       id(new HeraldRuleEditor())

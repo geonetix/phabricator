@@ -3,18 +3,18 @@
 final class PHUIBoxExample extends PhabricatorUIExample {
 
   public function getName() {
-    return 'Box';
+    return pht('Box');
   }
 
   public function getDescription() {
-    return 'It\'s a fancy or non-fancy box. Put stuff in it.';
+    return pht("It's a fancy or non-fancy box. Put stuff in it.");
   }
 
   public function renderExample() {
 
     $content1 = 'Asmund and Signy';
     $content2 = 'The Cottager and his Cat';
-    $content3 = 'Geirlug The King\'s Daughter';
+    $content3 = "Geirlug The King's Daughter";
 
     $layout1 =
       array(
@@ -23,7 +23,8 @@ final class PHUIBoxExample extends PhabricatorUIExample {
         id(new PHUIBoxView())
           ->appendChild($content2),
         id(new PHUIBoxView())
-          ->appendChild($content3));
+          ->appendChild($content3),
+      );
 
 
     $layout2 =
@@ -38,25 +39,45 @@ final class PHUIBoxExample extends PhabricatorUIExample {
         id(new PHUIBoxView())
           ->appendChild($content3)
           ->addMargin(PHUI::MARGIN_LARGE_LEFT)
-          ->addMargin(PHUI::MARGIN_LARGE_TOP));
+          ->addMargin(PHUI::MARGIN_LARGE_TOP),
+      );
 
     $layout3 =
       array(
         id(new PHUIBoxView())
           ->appendChild($content1)
-          ->setShadow(true)
+          ->setBorder(true)
           ->addPadding(PHUI::PADDING_SMALL)
           ->addMargin(PHUI::MARGIN_LARGE_BOTTOM),
         id(new PHUIBoxView())
           ->appendChild($content2)
-          ->setShadow(true)
+          ->setBorder(true)
           ->addPadding(PHUI::PADDING_MEDIUM)
           ->addMargin(PHUI::MARGIN_LARGE_BOTTOM),
         id(new PHUIBoxView())
           ->appendChild($content3)
-          ->setShadow(true)
+          ->setBorder(true)
           ->addPadding(PHUI::PADDING_LARGE)
-          ->addMargin(PHUI::MARGIN_LARGE_BOTTOM));
+          ->addMargin(PHUI::MARGIN_LARGE_BOTTOM),
+      );
+
+    $button = id(new PHUIButtonView())
+      ->setTag('a')
+      ->setButtonType(PHUIButtonView::BUTTONTYPE_SIMPLE)
+      ->setIcon('fa-heart')
+      ->setText(pht('Such Wow'))
+      ->addClass(PHUI::MARGIN_SMALL_RIGHT);
+
+    $header = id(new PHUIHeaderView())
+      ->setHeader(pht('Fancy Box'))
+      ->addActionLink($button)
+      ->setSubheader(pht('Much Features'));
+
+    $obj4 = id(new PHUIObjectBoxView())
+      ->setHeader($header)
+      ->appendChild(id(new PHUIBoxView())
+        ->addPadding(PHUI::PADDING_MEDIUM)
+        ->appendChild(pht('Such Fancy, Nice Box, Many Corners.')));
 
     $head1 = id(new PHUIHeaderView())
       ->setHeader(pht('Plain Box'));
@@ -65,7 +86,10 @@ final class PHUIBoxExample extends PhabricatorUIExample {
       ->setHeader(pht('Plain Box with space'));
 
     $head3 = id(new PHUIHeaderView())
-      ->setHeader(pht('Shadow Box with space'));
+      ->setHeader(pht('Border Box with space'));
+
+    $head4 = id(new PHUIHeaderView())
+      ->setHeader(pht('PHUIObjectBoxView'));
 
     $wrap1 = id(new PHUIBoxView())
       ->appendChild($layout1)
@@ -81,14 +105,18 @@ final class PHUIBoxExample extends PhabricatorUIExample {
 
     return phutil_tag(
       'div',
-        array(),
+        array(
+          'class' => 'ml',
+        ),
         array(
           $head1,
           $wrap1,
           $head2,
           $wrap2,
           $head3,
-          $wrap3
+          $wrap3,
+          $head4,
+          $obj4,
         ));
-        }
+      }
 }

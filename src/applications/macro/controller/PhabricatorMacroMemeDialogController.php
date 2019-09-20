@@ -3,24 +3,23 @@
 final class PhabricatorMacroMemeDialogController
   extends PhabricatorMacroController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
 
-    $name = $request->getStr('macro');
+    $phid = head($request->getArr('macro'));
     $above = $request->getStr('above');
     $below = $request->getStr('below');
 
     $e_macro = true;
     $errors = array();
     if ($request->isDialogFormPost()) {
-      if (!$name) {
+      if (!$phid) {
         $e_macro = pht('Required');
         $errors[] = pht('Macro name is required.');
       } else {
         $macro = id(new PhabricatorMacroQuery())
-          ->setViewer($user)
-          ->withNames(array($name))
+          ->setViewer($viewer)
+          ->withPHIDs(array($phid))
           ->executeOne();
         if (!$macro) {
           $e_macro = pht('Invalid');
@@ -31,7 +30,7 @@ final class PhabricatorMacroMemeDialogController
       if (!$errors) {
         $options = new PhutilSimpleOptions();
         $data = array(
-          'src' => $name,
+          'src' => $macro->getName(),
           'above' => $above,
           'below' => $below,
         );
@@ -44,12 +43,14 @@ final class PhabricatorMacroMemeDialogController
       }
     }
 
-    $view = id(new PHUIFormLayoutView())
-      ->appendChild(
-        id(new AphrontFormTextControl())
+    $view = id(new AphrontFormView())
+      ->setUser($viewer)
+      ->appendControl(
+        id(new AphrontFormTokenizerControl())
           ->setLabel(pht('Macro'))
           ->setName('macro')
-          ->setValue($name)
+          ->setLimit(1)
+          ->setDatasource(new PhabricatorMacroDatasource())
           ->setError($e_macro))
       ->appendChild(
         id(new AphrontFormTextControl())
@@ -63,11 +64,11 @@ final class PhabricatorMacroMemeDialogController
           ->setValue($below));
 
     $dialog = id(new AphrontDialogView())
-      ->setUser($user)
+      ->setUser($viewer)
       ->setTitle(pht('Create Meme'))
-      ->appendChild($view)
+      ->appendForm($view)
       ->addCancelButton('/')
-      ->addSubmitButton(pht('rofllolo!!~'));
+      ->addSubmitButton(pht('Llama Diorama'));
 
     return id(new AphrontDialogResponse())->setDialog($dialog);
   }

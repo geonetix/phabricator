@@ -3,37 +3,31 @@
 final class PhabricatorMacroDisableController
   extends PhabricatorMacroController {
 
-  private $id;
-
-  public function willProcessRequest(array $data) {
-    $this->id = $data['id'];
-  }
-
-  public function processRequest() {
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $id = $request->getURIData('id');
 
     $this->requireApplicationCapability(
-      PhabricatorMacroCapabilityManage::CAPABILITY);
-
-    $request = $this->getRequest();
-    $user = $request->getUser();
+      PhabricatorMacroManageCapability::CAPABILITY);
 
     $macro = id(new PhabricatorMacroQuery())
-      ->setViewer($user)
-      ->withIDs(array($this->id))
+      ->setViewer($viewer)
+      ->withIDs(array($id))
       ->executeOne();
     if (!$macro) {
       return new Aphront404Response();
     }
 
-    $view_uri = $this->getApplicationURI('/view/'.$this->id.'/');
+    $view_uri = $this->getApplicationURI('/view/'.$id.'/');
 
     if ($request->isDialogFormPost() || $macro->getIsDisabled()) {
       $xaction = id(new PhabricatorMacroTransaction())
-        ->setTransactionType(PhabricatorMacroTransactionType::TYPE_DISABLED)
+        ->setTransactionType(
+          PhabricatorMacroDisabledTransaction::TRANSACTIONTYPE)
         ->setNewValue($macro->getIsDisabled() ? 0 : 1);
 
       $editor = id(new PhabricatorMacroEditor())
-        ->setActor($user)
+        ->setActor($viewer)
         ->setContentSourceFromRequest($request);
 
       $xactions = $editor->applyTransactions($macro, array($xaction));
@@ -45,14 +39,19 @@ final class PhabricatorMacroDisableController
     $dialog
       ->setUser($request->getUser())
       ->setTitle(pht('Really disable macro?'))
-      ->appendChild(phutil_tag('p', array(), pht(
-        'Really disable the much-beloved image macro %s? '.
-          'It will be sorely missed.',
-        $macro->getName())))
-      ->setSubmitURI($this->getApplicationURI('/disable/'.$this->id.'/'))
+      ->appendChild(
+        phutil_tag(
+          'p',
+          array(),
+          pht(
+            'Really disable the much-beloved image macro %s? '.
+            'It will be sorely missed.',
+          $macro->getName())))
+      ->setSubmitURI($this->getApplicationURI('/disable/'.$id.'/'))
       ->addSubmitButton(pht('Disable'))
       ->addCancelButton($view_uri);
 
     return id(new AphrontDialogResponse())->setDialog($dialog);
   }
+
 }

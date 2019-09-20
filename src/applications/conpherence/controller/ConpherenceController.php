@@ -1,156 +1,229 @@
 <?php
 
-/**
- * @group conpherence
- */
 abstract class ConpherenceController extends PhabricatorController {
-  private $conpherences;
+
+  private $conpherence;
+
+  public function setConpherence(ConpherenceThread $conpherence) {
+    $this->conpherence = $conpherence;
+    return $this;
+  }
+  public function getConpherence() {
+    return $this->conpherence;
+  }
 
   public function buildApplicationMenu() {
     $nav = new PHUIListView();
+    $conpherence = $this->conpherence;
 
+    // Local Links
+    if ($conpherence) {
+      $nav->addMenuItem(
+        id(new PHUIListItemView())
+        ->setName(pht('Joined Rooms'))
+        ->setType(PHUIListItemView::TYPE_LINK)
+        ->setHref($this->getApplicationURI()));
+
+      $nav->addMenuItem(
+        id(new PHUIListItemView())
+        ->setName(pht('Edit Room'))
+        ->setType(PHUIListItemView::TYPE_LINK)
+        ->setHref(
+          $this->getApplicationURI('update/'.$conpherence->getID()).'/')
+        ->setWorkflow(true));
+
+      $nav->addMenuItem(
+        id(new PHUIListItemView())
+        ->setName(pht('Add Participants'))
+        ->setType(PHUIListItemView::TYPE_LINK)
+        ->setHref('#')
+        ->addSigil('conpherence-widget-adder')
+        ->setMetadata(array('widget' => 'widgets-people')));
+    }
+
+    // Global Links
+    $nav->newLabel(pht('Conpherence'));
     $nav->newLink(
-      pht('New Message'),
+      pht('New Room'),
       $this->getApplicationURI('new/'));
-
-    $nav->addMenuItem(
-      id(new PHUIListItemView())
-      ->setName(pht('Add Participants'))
-      ->setType(PHUIListItemView::TYPE_LINK)
-      ->setHref('#')
-      ->addSigil('conpherence-widget-adder')
-      ->setMetadata(array('widget' => 'widgets-people')));
-
-    $nav->addMenuItem(
-      id(new PHUIListItemView())
-      ->setName(pht('New Calendar Item'))
-      ->setType(PHUIListItemView::TYPE_LINK)
-      ->setHref('/calendar/status/create/')
-      ->addSigil('conpherence-widget-adder')
-      ->setMetadata(array('widget' => 'widgets-calendar')));
+    $nav->newLink(
+      pht('Search Rooms'),
+      $this->getApplicationURI('search/'));
 
     return $nav;
   }
 
-  public function buildApplicationCrumbs() {
-    $crumbs = parent::buildApplicationCrumbs();
-
-    $crumbs
-      ->addAction(
-        id(new PHUIListItemView())
-        ->setName(pht('New Message'))
-        ->setHref($this->getApplicationURI('new/'))
-        ->setIcon('create')
-        ->setWorkflow(true))
-      ->addAction(
-        id(new PHUIListItemView())
-        ->setName(pht('Thread'))
-        ->setHref('#')
-        ->setIcon('action-menu')
-        ->setStyle('display: none;')
-        ->addClass('device-widgets-selector')
-        ->addSigil('device-widgets-selector'));
-    return $crumbs;
-  }
-
-  protected function buildHeaderPaneContent(ConpherenceThread $conpherence) {
-    $crumbs = $this->buildApplicationCrumbs();
-    if ($conpherence->getTitle()) {
-      $title = $conpherence->getTitle();
-    } else {
-      $title = pht('[No Title]');
-    }
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-      ->setName($title)
-      ->setHref($this->getApplicationURI('update/'.$conpherence->getID().'/'))
-      ->setWorkflow(true));
-
-    return hsprintf(
-      '%s',
-      array(
-        phutil_tag(
-          'div',
-          array(
-            'class' => 'header-loading-mask'
-          ),
-          ''),
-        $crumbs));
-  }
-
-  protected function renderConpherenceTransactions(
+  protected function buildHeaderPaneContent(
     ConpherenceThread $conpherence) {
+    $viewer = $this->getViewer();
+    $header = null;
+    $id = $conpherence->getID();
 
-    $user = $this->getRequest()->getUser();
-    $transactions = $conpherence->getTransactions();
-    $oldest_transaction_id = 0;
-    $too_many = ConpherenceThreadQuery::TRANSACTION_LIMIT + 1;
-    if (count($transactions) == $too_many) {
-      $last_transaction = end($transactions);
-      unset($transactions[$last_transaction->getID()]);
-      $oldest_transaction = end($transactions);
-      $oldest_transaction_id = $oldest_transaction->getID();
-    }
-    $transactions = array_reverse($transactions);
-    $handles = $conpherence->getHandles();
-    $rendered_transactions = array();
-    $engine = id(new PhabricatorMarkupEngine())
-      ->setViewer($user);
-    foreach ($transactions as $key => $transaction) {
-      if ($transaction->shouldHide()) {
-        unset($transactions[$key]);
-        continue;
-      }
-      if ($transaction->getComment()) {
-        $engine->addObject(
-          $transaction->getComment(),
-          PhabricatorApplicationTransactionComment::MARKUP_FIELD_COMMENT);
-      }
-    }
-    $engine->process();
-    // we're going to insert a dummy date marker transaction for breaks
-    // between days. some setup required!
-    $previous_transaction = null;
-    $date_marker_transaction = id(new ConpherenceTransaction())
-      ->setTransactionType(ConpherenceTransactionType::TYPE_DATE_MARKER)
-      ->makeEphemeral();
-    $date_marker_transaction_view = id(new ConpherenceTransactionView())
-      ->setUser($user)
-      ->setConpherenceTransaction($date_marker_transaction)
-      ->setHandles($handles)
-      ->setMarkupEngine($engine);
-    foreach ($transactions as $transaction) {
-      if ($previous_transaction) {
-        $previous_day = phabricator_format_local_time(
-          $previous_transaction->getDateCreated(),
-          $user,
-          'Ymd');
-        $current_day = phabricator_format_local_time(
-          $transaction->getDateCreated(),
-          $user,
-          'Ymd');
-        // date marker transaction time!
-        if ($previous_day != $current_day) {
-          $date_marker_transaction->setDateCreated(
-            $transaction->getDateCreated());
-          $rendered_transactions[] = $date_marker_transaction_view->render();
-        }
-      }
-      $rendered_transactions[] = id(new ConpherenceTransactionView())
-        ->setUser($user)
-        ->setConpherenceTransaction($transaction)
-        ->setHandles($handles)
-        ->setMarkupEngine($engine)
-        ->render();
-      $previous_transaction = $transaction;
-    }
-    $latest_transaction_id = $transaction->getID();
+    if ($id) {
+      $data = $conpherence->getDisplayData($this->getViewer());
 
-    return array(
-      'transactions' => $rendered_transactions,
-      'latest_transaction_id' => $latest_transaction_id,
-      'oldest_transaction_id' => $oldest_transaction_id
-    );
+      $header = id(new PHUIHeaderView())
+        ->setViewer($viewer)
+        ->setHeader($data['title'])
+        ->setPolicyObject($conpherence)
+        ->setImage($data['image']);
 
+      if (strlen($data['topic'])) {
+        $topic = id(new PHUITagView())
+          ->setName($data['topic'])
+          ->setColor(PHUITagView::COLOR_VIOLET)
+          ->setType(PHUITagView::TYPE_SHADE)
+          ->addClass('conpherence-header-topic');
+        $header->addTag($topic);
+      }
+
+      $can_edit = PhabricatorPolicyFilter::hasCapability(
+        $viewer,
+        $conpherence,
+        PhabricatorPolicyCapability::CAN_EDIT);
+
+      if ($can_edit) {
+        $header->setImageURL(
+          $this->getApplicationURI("picture/{$id}/"));
+      }
+
+      $participating = $conpherence->getParticipantIfExists($viewer->getPHID());
+
+      $header->addActionItem(
+        id(new PHUIIconCircleView())
+          ->setHref(
+            $this->getApplicationURI('edit/'.$conpherence->getID()).'/')
+          ->setIcon('fa-pencil')
+          ->addClass('hide-on-device')
+          ->setColor('violet')
+          ->setWorkflow(true));
+
+      $header->addActionItem(
+        id(new PHUIIconCircleView())
+          ->setHref($this->getApplicationURI("preferences/{$id}/"))
+          ->setIcon('fa-gear')
+          ->addClass('hide-on-device')
+          ->setColor('pink')
+          ->setWorkflow(true));
+
+      $widget_key = PhabricatorConpherenceWidgetVisibleSetting::SETTINGKEY;
+      $widget_view = (bool)$viewer->getUserSetting($widget_key, false);
+
+      Javelin::initBehavior(
+        'toggle-widget',
+        array(
+          'show' => (int)$widget_view,
+          'settingsURI' => '/settings/adjust/?key='.$widget_key,
+        ));
+
+      $header->addActionItem(
+        id(new PHUIIconCircleView())
+          ->addSigil('conpherence-widget-toggle')
+          ->setIcon('fa-group')
+          ->setHref('#')
+          ->addClass('conpherence-participant-toggle'));
+
+      Javelin::initBehavior('conpherence-search');
+
+      $header->addActionItem(
+        id(new PHUIIconCircleView())
+          ->addSigil('conpherence-search-toggle')
+          ->setIcon('fa-search')
+          ->setHref('#')
+          ->setColor('green')
+          ->addClass('conpherence-search-toggle'));
+
+      if (!$participating) {
+        $action = ConpherenceUpdateActions::JOIN_ROOM;
+        $uri = $this->getApplicationURI("update/{$id}/");
+        $button = phutil_tag(
+          'button',
+          array(
+            'type' => 'SUBMIT',
+            'class' => 'button button-green mlr',
+          ),
+          pht('Join Room'));
+
+        $hidden = phutil_tag(
+          'input',
+          array(
+            'type' => 'hidden',
+            'name' => 'action',
+            'value' => ConpherenceUpdateActions::JOIN_ROOM,
+          ));
+
+        $form = phabricator_form(
+          $viewer,
+          array(
+            'method' => 'POST',
+            'action' => (string)$uri,
+          ),
+          array(
+            $hidden,
+            $button,
+          ));
+        $header->addActionItem($form);
+      }
+    }
+
+    return $header;
   }
+
+  public function buildSearchForm() {
+    $viewer = $this->getViewer();
+    $conpherence = $this->conpherence;
+    $name = $conpherence->getTitle();
+
+    $bar = javelin_tag(
+      'input',
+      array(
+        'type' => 'text',
+        'id' => 'conpherence-search-input',
+        'name' => 'fulltext',
+        'class' => 'conpherence-search-input',
+        'sigil' => 'conpherence-search-input',
+        'placeholder' => pht('Search %s...', $name),
+      ));
+
+    $id = $conpherence->getID();
+    $form = phabricator_form(
+      $viewer,
+      array(
+        'method' => 'POST',
+        'action' => '/conpherence/threadsearch/'.$id.'/',
+        'sigil' => 'conpherence-search-form',
+        'class' => 'conpherence-search-form',
+        'id' => 'conpherence-search-form',
+      ),
+      array(
+        $bar,
+      ));
+
+    $form_view = phutil_tag(
+      'div',
+      array(
+        'class' => 'conpherence-search-form-view',
+      ),
+      $form);
+
+    $results = phutil_tag(
+      'div',
+      array(
+        'id' => 'conpherence-search-results',
+        'class' => 'conpherence-search-results',
+      ));
+
+    $view = phutil_tag(
+      'div',
+      array(
+        'class' => 'conpherence-search-window',
+      ),
+      array(
+        $form_view,
+        $results,
+      ));
+
+    return $view;
+  }
+
 }

@@ -1,19 +1,49 @@
 <?php
 
 /**
- * @group file
+ * Parameters
+ * ==========
+ *
+ * When creating a new file using a method like @{method:newFromFileData}, these
+ * parameters are supported:
+ *
+ *   | name | Human readable filename.
+ *   | authorPHID | User PHID of uploader.
+ *   | ttl.absolute | Temporary file lifetime as an epoch timestamp.
+ *   | ttl.relative | Temporary file lifetime, relative to now, in seconds.
+ *   | viewPolicy | File visibility policy.
+ *   | isExplicitUpload | Used to show users files they explicitly uploaded.
+ *   | canCDN | Allows the file to be cached and delivered over a CDN.
+ *   | profile | Marks the file as a profile image.
+ *   | format | Internal encoding format.
+ *   | mime-type | Optional, explicit file MIME type.
+ *   | builtin | Optional filename, identifies this as a builtin.
+ *
  */
 final class PhabricatorFile extends PhabricatorFileDAO
   implements
+    PhabricatorApplicationTransactionInterface,
     PhabricatorTokenReceiverInterface,
     PhabricatorSubscribableInterface,
     PhabricatorFlaggableInterface,
-    PhabricatorPolicyInterface {
-
-  const STORAGE_FORMAT_RAW  = 'raw';
+    PhabricatorPolicyInterface,
+    PhabricatorDestructibleInterface,
+    PhabricatorConduitResultInterface,
+    PhabricatorIndexableInterface,
+    PhabricatorNgramsInterface {
 
   const METADATA_IMAGE_WIDTH  = 'width';
   const METADATA_IMAGE_HEIGHT = 'height';
+  const METADATA_CAN_CDN = 'canCDN';
+  const METADATA_BUILTIN = 'builtin';
+  const METADATA_PARTIAL = 'partial';
+  const METADATA_PROFILE = 'profile';
+  const METADATA_STORAGE = 'storage';
+  const METADATA_INTEGRITY = 'integrity';
+  const METADATA_CHUNK = 'chunk';
+
+  const STATUS_ACTIVE = 'active';
+  const STATUS_DELETED = 'deleted';
 
   protected $name;
   protected $mimeType;
@@ -23,6 +53,7 @@ final class PhabricatorFile extends PhabricatorFileDAO
   protected $contentHash;
   protected $metadata = array();
   protected $mailKey;
+  protected $builtinKey;
 
   protected $storageEngine;
   protected $storageFormat;
@@ -31,22 +62,89 @@ final class PhabricatorFile extends PhabricatorFileDAO
   protected $ttl;
   protected $isExplicitUpload = 1;
   protected $viewPolicy = PhabricatorPolicies::POLICY_USER;
+  protected $isPartial = 0;
+  protected $isDeleted = 0;
 
   private $objects = self::ATTACHABLE;
   private $objectPHIDs = self::ATTACHABLE;
+  private $originalFile = self::ATTACHABLE;
+  private $transforms = self::ATTACHABLE;
 
-  public function getConfiguration() {
+  public static function initializeNewFile() {
+    $app = id(new PhabricatorApplicationQuery())
+      ->setViewer(PhabricatorUser::getOmnipotentUser())
+      ->withClasses(array('PhabricatorFilesApplication'))
+      ->executeOne();
+
+    $view_policy = $app->getPolicy(
+      FilesDefaultViewCapability::CAPABILITY);
+
+    return id(new PhabricatorFile())
+      ->setViewPolicy($view_policy)
+      ->setIsPartial(0)
+      ->attachOriginalFile(null)
+      ->attachObjects(array())
+      ->attachObjectPHIDs(array());
+  }
+
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID => true,
       self::CONFIG_SERIALIZATION => array(
         'metadata' => self::SERIALIZATION_JSON,
+      ),
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'name' => 'sort255?',
+        'mimeType' => 'text255?',
+        'byteSize' => 'uint64',
+        'storageEngine' => 'text32',
+        'storageFormat' => 'text32',
+        'storageHandle' => 'text255',
+        'authorPHID' => 'phid?',
+        'secretKey' => 'bytes20?',
+        'contentHash' => 'bytes64?',
+        'ttl' => 'epoch?',
+        'isExplicitUpload' => 'bool?',
+        'mailKey' => 'bytes20',
+        'isPartial' => 'bool',
+        'builtinKey' => 'text64?',
+        'isDeleted' => 'bool',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_phid' => null,
+        'phid' => array(
+          'columns' => array('phid'),
+          'unique' => true,
+        ),
+        'authorPHID' => array(
+          'columns' => array('authorPHID'),
+        ),
+        'contentHash' => array(
+          'columns' => array('contentHash'),
+        ),
+        'key_ttl' => array(
+          'columns' => array('ttl'),
+        ),
+        'key_dateCreated' => array(
+          'columns' => array('dateCreated'),
+        ),
+        'key_partial' => array(
+          'columns' => array('authorPHID', 'isPartial'),
+        ),
+        'key_builtin' => array(
+          'columns' => array('builtinKey'),
+          'unique' => true,
+        ),
+        'key_engine' => array(
+          'columns' => array('storageEngine', 'storageHandle(64)'),
+        ),
       ),
     ) + parent::getConfiguration();
   }
 
   public function generatePHID() {
     return PhabricatorPHID::generateNewPHID(
-      PhabricatorFilePHIDTypeFile::TYPECONST);
+      PhabricatorFileFilePHIDType::TYPECONST);
   }
 
   public function save() {
@@ -59,9 +157,35 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return parent::save();
   }
 
+  public function saveAndIndex() {
+    $this->save();
+
+    if ($this->isIndexableFile()) {
+      PhabricatorSearchWorker::queueDocumentForIndexing($this->getPHID());
+    }
+
+    return $this;
+  }
+
+  private function isIndexableFile() {
+    if ($this->getIsChunk()) {
+      return false;
+    }
+
+    return true;
+  }
+
+  public function getMonogram() {
+    return 'F'.$this->getID();
+  }
+
+  public function scrambleSecret() {
+    return $this->setSecretKey($this->generateSecretKey());
+  }
+
   public static function readUploadedFileData($spec) {
     if (!$spec) {
-      throw new Exception("No file was uploaded!");
+      throw new Exception(pht('No file was uploaded!'));
     }
 
     $err = idx($spec, 'error');
@@ -70,19 +194,25 @@ final class PhabricatorFile extends PhabricatorFileDAO
     }
 
     $tmp_name = idx($spec, 'tmp_name');
-    $is_valid = @is_uploaded_file($tmp_name);
-    if (!$is_valid) {
-      throw new Exception("File is not an uploaded file.");
+
+    // NOTE: If we parsed the request body ourselves, the files we wrote will
+    // not be registered in the `is_uploaded_file()` list. It's fine to skip
+    // this check: it just protects against sloppy code from the long ago era
+    // of "register_globals".
+
+    if (ini_get('enable_post_data_reading')) {
+      $is_valid = @is_uploaded_file($tmp_name);
+      if (!$is_valid) {
+        throw new Exception(pht('File is not an uploaded file.'));
+      }
     }
 
     $file_data = Filesystem::readFile($tmp_name);
     $file_size = idx($spec, 'size');
 
     if (strlen($file_data) != $file_size) {
-      throw new Exception("File size disagrees with uploaded size.");
+      throw new Exception(pht('File size disagrees with uploaded size.'));
     }
-
-    self::validateFileSize(strlen($file_data));
 
     return $file_data;
   }
@@ -101,130 +231,157 @@ final class PhabricatorFile extends PhabricatorFileDAO
   }
 
   public static function newFromXHRUpload($data, array $params = array()) {
-    self::validateFileSize(strlen($data));
     return self::newFromFileData($data, $params);
   }
 
-  private static function validateFileSize($size) {
-    $limit = PhabricatorEnv::getEnvConfig('storage.upload-size-limit');
-    if (!$limit) {
-      return;
+
+  public static function newFileFromContentHash($hash, array $params) {
+    if ($hash === null) {
+      return null;
     }
 
-    $limit = phabricator_parse_bytes($limit);
-    if ($size > $limit) {
-      throw new PhabricatorFileUploadException(-1000);
-    }
-  }
-
-
-  /**
-   * Given a block of data, try to load an existing file with the same content
-   * if one exists. If it does not, build a new file.
-   *
-   * This method is generally used when we have some piece of semi-trusted data
-   * like a diff or a file from a repository that we want to show to the user.
-   * We can't just dump it out because it may be dangerous for any number of
-   * reasons; instead, we need to serve it through the File abstraction so it
-   * ends up on the CDN domain if one is configured and so on. However, if we
-   * simply wrote a new file every time we'd potentially end up with a lot
-   * of redundant data in file storage.
-   *
-   * To solve these problems, we use file storage as a cache and reuse the
-   * same file again if we've previously written it.
-   *
-   * NOTE: This method unguards writes.
-   *
-   * @param string  Raw file data.
-   * @param dict    Dictionary of file information.
-   */
-  public static function buildFromFileDataOrHash(
-    $data,
-    array $params = array()) {
-
+    // Check to see if a file with same hash already exists.
     $file = id(new PhabricatorFile())->loadOneWhere(
-      'name = %s AND contentHash = %s LIMIT 1',
-      self::normalizeFileName(idx($params, 'name')),
-      self::hashFileContent($data));
-
+      'contentHash = %s LIMIT 1',
+      $hash);
     if (!$file) {
-      $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
-      $file = PhabricatorFile::newFromFileData($data, $params);
-      unset($unguarded);
+      return null;
     }
 
-    return $file;
+    $copy_of_storage_engine = $file->getStorageEngine();
+    $copy_of_storage_handle = $file->getStorageHandle();
+    $copy_of_storage_format = $file->getStorageFormat();
+    $copy_of_storage_properties = $file->getStorageProperties();
+    $copy_of_byte_size = $file->getByteSize();
+    $copy_of_mime_type = $file->getMimeType();
+
+    $new_file = self::initializeNewFile();
+
+    $new_file->setByteSize($copy_of_byte_size);
+
+    $new_file->setContentHash($hash);
+    $new_file->setStorageEngine($copy_of_storage_engine);
+    $new_file->setStorageHandle($copy_of_storage_handle);
+    $new_file->setStorageFormat($copy_of_storage_format);
+    $new_file->setStorageProperties($copy_of_storage_properties);
+    $new_file->setMimeType($copy_of_mime_type);
+    $new_file->copyDimensions($file);
+
+    $new_file->readPropertiesFromParameters($params);
+
+    $new_file->saveAndIndex();
+
+    return $new_file;
   }
 
-  public static function newFileFromContentHash($hash, $params) {
+  public static function newChunkedFile(
+    PhabricatorFileStorageEngine $engine,
+    $length,
+    array $params) {
 
-    // Check to see if a file with same contentHash exist
-    $file = id(new PhabricatorFile())->loadOneWhere(
-      'contentHash = %s LIMIT 1', $hash);
+    $file = self::initializeNewFile();
 
-    if ($file) {
-      // copy storageEngine, storageHandle, storageFormat
-      $copy_of_storage_engine = $file->getStorageEngine();
-      $copy_of_storage_handle = $file->getStorageHandle();
-      $copy_of_storage_format = $file->getStorageFormat();
-      $copy_of_byteSize = $file->getByteSize();
-      $copy_of_mimeType = $file->getMimeType();
+    $file->setByteSize($length);
 
-      $file_name = idx($params, 'name');
-      $file_name = self::normalizeFileName($file_name);
-      $file_ttl = idx($params, 'ttl');
-      $authorPHID = idx($params, 'authorPHID');
-
-      $new_file = new  PhabricatorFile();
-
-      $new_file->setName($file_name);
-      $new_file->setByteSize($copy_of_byteSize);
-      $new_file->setAuthorPHID($authorPHID);
-      $new_file->setTtl($file_ttl);
-
-      $new_file->setContentHash($hash);
-      $new_file->setStorageEngine($copy_of_storage_engine);
-      $new_file->setStorageHandle($copy_of_storage_handle);
-      $new_file->setStorageFormat($copy_of_storage_format);
-      $new_file->setMimeType($copy_of_mimeType);
-      $new_file->copyDimensions($file);
-
-      $new_file->save();
-
-      return $new_file;
+    // NOTE: Once we receive the first chunk, we'll detect its MIME type and
+    // update the parent file if a MIME type hasn't been provided. This matters
+    // for large media files like video.
+    $mime_type = idx($params, 'mime-type');
+    if (!strlen($mime_type)) {
+      $file->setMimeType('application/octet-stream');
     }
+
+    $chunked_hash = idx($params, 'chunkedHash');
+
+    // Get rid of this parameter now; we aren't passing it any further down
+    // the stack.
+    unset($params['chunkedHash']);
+
+    if ($chunked_hash) {
+      $file->setContentHash($chunked_hash);
+    } else {
+      // See PhabricatorChunkedFileStorageEngine::getChunkedHash() for some
+      // discussion of this.
+      $seed = Filesystem::readRandomBytes(64);
+      $hash = PhabricatorChunkedFileStorageEngine::getChunkedHashForInput(
+        $seed);
+      $file->setContentHash($hash);
+    }
+
+    $file->setStorageEngine($engine->getEngineIdentifier());
+    $file->setStorageHandle(PhabricatorFileChunk::newChunkHandle());
+
+    // Chunked files are always stored raw because they do not actually store
+    // data. The chunks do, and can be individually formatted.
+    $file->setStorageFormat(PhabricatorFileRawStorageFormat::FORMATKEY);
+
+    $file->setIsPartial(1);
+
+    $file->readPropertiesFromParameters($params);
 
     return $file;
   }
 
   private static function buildFromFileData($data, array $params = array()) {
-    $selector = PhabricatorEnv::newObjectFromConfig('storage.engine-selector');
 
     if (isset($params['storageEngines'])) {
       $engines = $params['storageEngines'];
     } else {
-      $selector = PhabricatorEnv::newObjectFromConfig(
-        'storage.engine-selector');
-      $engines = $selector->selectStorageEngines($data, $params);
+      $size = strlen($data);
+      $engines = PhabricatorFileStorageEngine::loadStorageEngines($size);
+
+      if (!$engines) {
+        throw new Exception(
+          pht(
+            'No configured storage engine can store this file. See '.
+            '"Configuring File Storage" in the documentation for '.
+            'information on configuring storage engines.'));
+      }
     }
 
     assert_instances_of($engines, 'PhabricatorFileStorageEngine');
     if (!$engines) {
-      throw new Exception("No valid storage engines are available!");
+      throw new Exception(pht('No valid storage engines are available!'));
     }
 
-    $file = new PhabricatorFile();
+    $file = self::initializeNewFile();
+
+    $aes_type = PhabricatorFileAES256StorageFormat::FORMATKEY;
+    $has_aes = PhabricatorKeyring::getDefaultKeyName($aes_type);
+    if ($has_aes !== null) {
+      $default_key = PhabricatorFileAES256StorageFormat::FORMATKEY;
+    } else {
+      $default_key = PhabricatorFileRawStorageFormat::FORMATKEY;
+    }
+    $key = idx($params, 'format', $default_key);
+
+    // Callers can pass in an object explicitly instead of a key. This is
+    // primarily useful for unit tests.
+    if ($key instanceof PhabricatorFileStorageFormat) {
+      $format = clone $key;
+    } else {
+      $format = clone PhabricatorFileStorageFormat::requireFormat($key);
+    }
+
+    $format->setFile($file);
+
+    $properties = $format->newStorageProperties();
+    $file->setStorageFormat($format->getStorageFormatKey());
+    $file->setStorageProperties($properties);
 
     $data_handle = null;
     $engine_identifier = null;
+    $integrity_hash = null;
     $exceptions = array();
     foreach ($engines as $engine) {
       $engine_class = get_class($engine);
       try {
-        list($engine_identifier, $data_handle) = $file->writeToEngine(
+        $result = $file->writeToEngine(
           $engine,
           $data,
           $params);
+
+        list($engine_identifier, $data_handle, $integrity_hash) = $result;
 
         // We stored the file somewhere so stop trying to write it to other
         // places.
@@ -244,66 +401,60 @@ final class PhabricatorFile extends PhabricatorFileDAO
 
     if (!$data_handle) {
       throw new PhutilAggregateException(
-        "All storage engines failed to write file:",
+        pht('All storage engines failed to write file:'),
         $exceptions);
     }
 
-    $file_name = idx($params, 'name');
-    $file_name = self::normalizeFileName($file_name);
-    $file_ttl = idx($params, 'ttl');
-
-    // If for whatever reason, authorPHID isn't passed as a param
-    // (always the case with newFromFileDownload()), store a ''
-    $authorPHID = idx($params, 'authorPHID');
-
-    $file->setName($file_name);
     $file->setByteSize(strlen($data));
-    $file->setAuthorPHID($authorPHID);
-    $file->setTtl($file_ttl);
-    $file->setContentHash(self::hashFileContent($data));
+
+    $hash = self::hashFileContent($data);
+    $file->setContentHash($hash);
 
     $file->setStorageEngine($engine_identifier);
     $file->setStorageHandle($data_handle);
 
-    // TODO: This is probably YAGNI, but allows for us to do encryption or
-    // compression later if we want.
-    $file->setStorageFormat(self::STORAGE_FORMAT_RAW);
-    $file->setIsExplicitUpload(idx($params, 'isExplicitUpload') ? 1 : 0);
+    $file->setIntegrityHash($integrity_hash);
 
-    if (isset($params['mime-type'])) {
-      $file->setMimeType($params['mime-type']);
-    } else {
+    $file->readPropertiesFromParameters($params);
+
+    if (!$file->getMimeType()) {
       $tmp = new TempFile();
       Filesystem::writeFile($tmp, $data);
       $file->setMimeType(Filesystem::getMimeType($tmp));
+      unset($tmp);
     }
 
     try {
       $file->updateDimensions(false);
     } catch (Exception $ex) {
-      // Do nothing
+      // Do nothing.
     }
 
-    $file->save();
+    $file->saveAndIndex();
 
     return $file;
   }
 
   public static function newFromFileData($data, array $params = array()) {
     $hash = self::hashFileContent($data);
-    $file = self::newFileFromContentHash($hash, $params);
 
-    if ($file) {
-      return $file;
+    if ($hash !== null) {
+      $file = self::newFileFromContentHash($hash, $params);
+      if ($file) {
+        return $file;
+      }
     }
 
     return self::buildFromFileData($data, $params);
   }
 
-  public function migrateToEngine(PhabricatorFileStorageEngine $engine) {
+  public function migrateToEngine(
+    PhabricatorFileStorageEngine $engine,
+    $make_copy) {
+
     if (!$this->getID() || !$this->getStorageHandle()) {
       throw new Exception(
-        "You can not migrate a file which hasn't yet been saved.");
+        pht("You can not migrate a file which hasn't yet been saved."));
     }
 
     $data = $this->loadFileData();
@@ -311,19 +462,74 @@ final class PhabricatorFile extends PhabricatorFileDAO
       'name' => $this->getName(),
     );
 
-    list($new_identifier, $new_handle) = $this->writeToEngine(
+    list($new_identifier, $new_handle, $integrity_hash) = $this->writeToEngine(
       $engine,
       $data,
       $params);
 
     $old_engine = $this->instantiateStorageEngine();
+    $old_identifier = $this->getStorageEngine();
     $old_handle = $this->getStorageHandle();
 
     $this->setStorageEngine($new_identifier);
     $this->setStorageHandle($new_handle);
+    $this->setIntegrityHash($integrity_hash);
     $this->save();
 
-    $old_engine->deleteFile($old_handle);
+    if (!$make_copy) {
+      $this->deleteFileDataIfUnused(
+        $old_engine,
+        $old_identifier,
+        $old_handle);
+    }
+
+    return $this;
+  }
+
+  public function migrateToStorageFormat(PhabricatorFileStorageFormat $format) {
+    if (!$this->getID() || !$this->getStorageHandle()) {
+      throw new Exception(
+        pht("You can not migrate a file which hasn't yet been saved."));
+    }
+
+    $data = $this->loadFileData();
+    $params = array(
+      'name' => $this->getName(),
+    );
+
+    $engine = $this->instantiateStorageEngine();
+    $old_handle = $this->getStorageHandle();
+
+    $properties = $format->newStorageProperties();
+    $this->setStorageFormat($format->getStorageFormatKey());
+    $this->setStorageProperties($properties);
+
+    list($identifier, $new_handle, $integrity_hash) = $this->writeToEngine(
+      $engine,
+      $data,
+      $params);
+
+    $this->setStorageHandle($new_handle);
+    $this->setIntegrityHash($integrity_hash);
+    $this->save();
+
+    $this->deleteFileDataIfUnused(
+      $engine,
+      $identifier,
+      $old_handle);
+
+    return $this;
+  }
+
+  public function cycleMasterStorageKey(PhabricatorFileStorageFormat $format) {
+    if (!$this->getID() || !$this->getStorageHandle()) {
+      throw new Exception(
+        pht("You can not cycle keys for a file which hasn't yet been saved."));
+    }
+
+    $properties = $format->cycleStorageProperties();
+    $this->setStorageProperties($properties);
+    $this->save();
 
     return $this;
   }
@@ -335,57 +541,157 @@ final class PhabricatorFile extends PhabricatorFileDAO
 
     $engine_class = get_class($engine);
 
-    $data_handle = $engine->writeFile($data, $params);
+    $format = $this->newStorageFormat();
+
+    $data_iterator = array($data);
+    $formatted_iterator = $format->newWriteIterator($data_iterator);
+    $formatted_data = $this->loadDataFromIterator($formatted_iterator);
+
+    $integrity_hash = $engine->newIntegrityHash($formatted_data, $format);
+
+    $data_handle = $engine->writeFile($formatted_data, $params);
 
     if (!$data_handle || strlen($data_handle) > 255) {
       // This indicates an improperly implemented storage engine.
       throw new PhabricatorFileStorageConfigurationException(
-        "Storage engine '{$engine_class}' executed writeFile() but did ".
-        "not return a valid handle ('{$data_handle}') to the data: it ".
-        "must be nonempty and no longer than 255 characters.");
+        pht(
+          "Storage engine '%s' executed %s but did not return a valid ".
+          "handle ('%s') to the data: it must be nonempty and no longer ".
+          "than 255 characters.",
+          $engine_class,
+          'writeFile()',
+          $data_handle));
     }
 
     $engine_identifier = $engine->getEngineIdentifier();
     if (!$engine_identifier || strlen($engine_identifier) > 32) {
       throw new PhabricatorFileStorageConfigurationException(
-        "Storage engine '{$engine_class}' returned an improper engine ".
-        "identifier '{$engine_identifier}': it must be nonempty ".
-        "and no longer than 32 characters.");
+        pht(
+          "Storage engine '%s' returned an improper engine identifier '{%s}': ".
+          "it must be nonempty and no longer than 32 characters.",
+          $engine_class,
+          $engine_identifier));
     }
 
-    return array($engine_identifier, $data_handle);
+    return array($engine_identifier, $data_handle, $integrity_hash);
   }
 
 
+  /**
+   * Download a remote resource over HTTP and save the response body as a file.
+   *
+   * This method respects `security.outbound-blacklist`, and protects against
+   * HTTP redirection (by manually following "Location" headers and verifying
+   * each destination). It does not protect against DNS rebinding. See
+   * discussion in T6755.
+   */
   public static function newFromFileDownload($uri, array $params = array()) {
-    // Make sure we're allowed to make a request first
-    if (!PhabricatorEnv::getEnvConfig('security.allow-outbound-http')) {
-      throw new Exception("Outbound HTTP requests are disabled!");
-    }
-
-    $uri = new PhutilURI($uri);
-
-    $protocol = $uri->getProtocol();
-    switch ($protocol) {
-      case 'http':
-      case 'https':
-        break;
-      default:
-        // Make sure we are not accessing any file:// URIs or similar.
-        return null;
-    }
-
     $timeout = 5;
 
-    list($file_data) = id(new HTTPSFuture($uri))
-        ->setTimeout($timeout)
-        ->resolvex();
+    $redirects = array();
+    $current = $uri;
+    while (true) {
+      try {
+        if (count($redirects) > 10) {
+          throw new Exception(
+            pht('Too many redirects trying to fetch remote URI.'));
+        }
 
-    $params = $params + array(
-      'name' => basename($uri),
-    );
+        $resolved = PhabricatorEnv::requireValidRemoteURIForFetch(
+          $current,
+          array(
+            'http',
+            'https',
+          ));
 
-    return self::newFromFileData($file_data, $params);
+        list($resolved_uri, $resolved_domain) = $resolved;
+
+        $current = new PhutilURI($current);
+        if ($current->getProtocol() == 'http') {
+          // For HTTP, we can use a pre-resolved URI to defuse DNS rebinding.
+          $fetch_uri = $resolved_uri;
+          $fetch_host = $resolved_domain;
+        } else {
+          // For HTTPS, we can't: cURL won't verify the SSL certificate if
+          // the domain has been replaced with an IP. But internal services
+          // presumably will not have valid certificates for rebindable
+          // domain names on attacker-controlled domains, so the DNS rebinding
+          // attack should generally not be possible anyway.
+          $fetch_uri = $current;
+          $fetch_host = null;
+        }
+
+        $future = id(new HTTPSFuture($fetch_uri))
+          ->setFollowLocation(false)
+          ->setTimeout($timeout);
+
+        if ($fetch_host !== null) {
+          $future->addHeader('Host', $fetch_host);
+        }
+
+        list($status, $body, $headers) = $future->resolve();
+
+        if ($status->isRedirect()) {
+          // This is an HTTP 3XX status, so look for a "Location" header.
+          $location = null;
+          foreach ($headers as $header) {
+            list($name, $value) = $header;
+            if (phutil_utf8_strtolower($name) == 'location') {
+              $location = $value;
+              break;
+            }
+          }
+
+          // HTTP 3XX status with no "Location" header, just treat this like
+          // a normal HTTP error.
+          if ($location === null) {
+            throw $status;
+          }
+
+          if (isset($redirects[$location])) {
+            throw new Exception(
+              pht('Encountered loop while following redirects.'));
+          }
+
+          $redirects[$location] = $location;
+          $current = $location;
+          // We'll fall off the bottom and go try this URI now.
+        } else if ($status->isError()) {
+          // This is something other than an HTTP 2XX or HTTP 3XX status, so
+          // just bail out.
+          throw $status;
+        } else {
+          // This is HTTP 2XX, so use the response body to save the file data.
+          // Provide a default name based on the URI, truncating it if the URI
+          // is exceptionally long.
+
+          $default_name = basename($uri);
+          $default_name = id(new PhutilUTF8StringTruncator())
+            ->setMaximumBytes(64)
+            ->truncateString($default_name);
+
+          $params = $params + array(
+            'name' => $default_name,
+          );
+
+          return self::newFromFileData($body, $params);
+        }
+      } catch (Exception $ex) {
+        if ($redirects) {
+          throw new PhutilProxyException(
+            pht(
+              'Failed to fetch remote URI "%s" after following %s redirect(s) '.
+              '(%s): %s',
+              $uri,
+              phutil_count($redirects),
+              implode(' > ', array_keys($redirects)),
+              $ex->getMessage()),
+            $ex);
+        } else {
+          throw $ex;
+        }
+      }
+    }
   }
 
   public static function normalizeFileName($file_name) {
@@ -405,7 +711,6 @@ final class PhabricatorFile extends PhabricatorFileDAO
   }
 
   public function delete() {
-
     // We want to delete all the rows which mark this file as the transformation
     // of some other file (since we're getting rid of it). We also delete all
     // the transformations of this file, so that a user who deletes an image
@@ -438,64 +743,141 @@ final class PhabricatorFile extends PhabricatorFileDAO
       $ret = parent::delete();
     $this->saveTransaction();
 
-    // Check to see if other files are using storage
-    $other_file = id(new PhabricatorFile())->loadAllWhere(
-      'storageEngine = %s AND storageHandle = %s AND
-      storageFormat = %s AND id != %d LIMIT 1',
+    $this->deleteFileDataIfUnused(
+      $this->instantiateStorageEngine(),
       $this->getStorageEngine(),
-      $this->getStorageHandle(),
-      $this->getStorageFormat(),
-      $this->getID());
-
-    // If this is the only file using the storage, delete storage
-    if (!$other_file) {
-      $engine = $this->instantiateStorageEngine();
-      try {
-        $engine->deleteFile($this->getStorageHandle());
-      } catch (Exception $ex) {
-        // In the worst case, we're leaving some data stranded in a storage
-        // engine, which is fine.
-        phlog($ex);
-      }
-    }
+      $this->getStorageHandle());
 
     return $ret;
   }
 
+
+  /**
+   * Destroy stored file data if there are no remaining files which reference
+   * it.
+   */
+  public function deleteFileDataIfUnused(
+    PhabricatorFileStorageEngine $engine,
+    $engine_identifier,
+    $handle) {
+
+    // Check to see if any files are using storage.
+    $usage = id(new PhabricatorFile())->loadAllWhere(
+      'storageEngine = %s AND storageHandle = %s LIMIT 1',
+      $engine_identifier,
+      $handle);
+
+    // If there are no files using the storage, destroy the actual storage.
+    if (!$usage) {
+      try {
+        $engine->deleteFile($handle);
+      } catch (Exception $ex) {
+        // In the worst case, we're leaving some data stranded in a storage
+        // engine, which is not a big deal.
+        phlog($ex);
+      }
+    }
+  }
+
   public static function hashFileContent($data) {
-    return sha1($data);
+    // NOTE: Hashing can fail if the algorithm isn't available in the current
+    // build of PHP. It's fine if we're unable to generate a content hash:
+    // it just means we'll store extra data when users upload duplicate files
+    // instead of being able to deduplicate it.
+
+    $hash = hash('sha256', $data, $raw_output = false);
+    if ($hash === false) {
+      return null;
+    }
+
+    return $hash;
   }
 
   public function loadFileData() {
+    $iterator = $this->getFileDataIterator();
+    return $this->loadDataFromIterator($iterator);
+  }
 
+
+  /**
+   * Return an iterable which emits file content bytes.
+   *
+   * @param int Offset for the start of data.
+   * @param int Offset for the end of data.
+   * @return Iterable Iterable object which emits requested data.
+   */
+  public function getFileDataIterator($begin = null, $end = null) {
     $engine = $this->instantiateStorageEngine();
-    $data = $engine->readFile($this->getStorageHandle());
 
-    switch ($this->getStorageFormat()) {
-      case self::STORAGE_FORMAT_RAW:
-        $data = $data;
-        break;
-      default:
-        throw new Exception("Unknown storage format.");
-    }
+    $format = $this->newStorageFormat();
 
-    return $data;
+    $iterator = $engine->getRawFileDataIterator(
+      $this,
+      $begin,
+      $end,
+      $format);
+
+    return $iterator;
+  }
+
+  public function getURI() {
+    return $this->getInfoURI();
   }
 
   public function getViewURI() {
     if (!$this->getPHID()) {
       throw new Exception(
-        "You must save a file before you can generate a view URI.");
+        pht('You must save a file before you can generate a view URI.'));
     }
 
-    $name = phutil_escape_uri($this->getName());
-
-    $path = '/file/data/'.$this->getSecretKey().'/'.$this->getPHID().'/'.$name;
-    return PhabricatorEnv::getCDNURI($path);
+    return $this->getCDNURI('data');
   }
 
+  public function getCDNURI($request_kind) {
+    if (($request_kind !== 'data') &&
+        ($request_kind !== 'download')) {
+      throw new Exception(
+        pht(
+          'Unknown file content request kind "%s".',
+          $request_kind));
+    }
+
+    $name = self::normalizeFileName($this->getName());
+    $name = phutil_escape_uri($name);
+
+    $parts = array();
+    $parts[] = 'file';
+    $parts[] = $request_kind;
+
+    // If this is an instanced install, add the instance identifier to the URI.
+    // Instanced configurations behind a CDN may not be able to control the
+    // request domain used by the CDN (as with AWS CloudFront). Embedding the
+    // instance identity in the path allows us to distinguish between requests
+    // originating from different instances but served through the same CDN.
+    $instance = PhabricatorEnv::getEnvConfig('cluster.instance');
+    if (strlen($instance)) {
+      $parts[] = '@'.$instance;
+    }
+
+    $parts[] = $this->getSecretKey();
+    $parts[] = $this->getPHID();
+    $parts[] = $name;
+
+    $path = '/'.implode('/', $parts);
+
+    // If this file is only partially uploaded, we're just going to return a
+    // local URI to make sure that Ajax works, since the page is inevitably
+    // going to give us an error back.
+    if ($this->getIsPartial()) {
+      return PhabricatorEnv::getURI($path);
+    } else {
+      return PhabricatorEnv::getCDNURI($path);
+    }
+  }
+
+
   public function getInfoURI() {
-    return '/file/info/'.$this->getPHID().'/';
+    return '/'.$this->getMonogram();
   }
 
   public function getBestURI() {
@@ -507,50 +889,30 @@ final class PhabricatorFile extends PhabricatorFileDAO
   }
 
   public function getDownloadURI() {
-    $uri = id(new PhutilURI($this->getViewURI()))
-      ->setQueryParam('download', true);
-    return (string) $uri;
+    return $this->getCDNURI('download');
   }
 
-  public function getProfileThumbURI() {
-    $path = '/file/xform/thumb-profile/'.$this->getPHID().'/'
-      .$this->getSecretKey().'/';
-    return PhabricatorEnv::getCDNURI($path);
+  public function getURIForTransform(PhabricatorFileTransform $transform) {
+    return $this->getTransformedURI($transform->getTransformKey());
   }
 
-  public function getThumb60x45URI() {
-    $path = '/file/xform/thumb-60x45/'.$this->getPHID().'/'
-      .$this->getSecretKey().'/';
-    return PhabricatorEnv::getCDNURI($path);
-  }
+  private function getTransformedURI($transform) {
+    $parts = array();
+    $parts[] = 'file';
+    $parts[] = 'xform';
 
-  public function getThumb160x120URI() {
-    $path = '/file/xform/thumb-160x120/'.$this->getPHID().'/'
-      .$this->getSecretKey().'/';
-    return PhabricatorEnv::getCDNURI($path);
-  }
+    $instance = PhabricatorEnv::getEnvConfig('cluster.instance');
+    if (strlen($instance)) {
+      $parts[] = '@'.$instance;
+    }
 
-  public function getPreview140URI() {
-    $path = '/file/xform/preview-140/'.$this->getPHID().'/'
-      .$this->getSecretKey().'/';
-    return PhabricatorEnv::getCDNURI($path);
-  }
+    $parts[] = $transform;
+    $parts[] = $this->getPHID();
+    $parts[] = $this->getSecretKey();
 
-  public function getPreview220URI() {
-    $path = '/file/xform/preview-220/'.$this->getPHID().'/'
-      .$this->getSecretKey().'/';
-    return PhabricatorEnv::getCDNURI($path);
-  }
+    $path = implode('/', $parts);
+    $path = $path.'/';
 
-  public function getThumb220x165URI() {
-    $path = '/file/xform/thumb-220x165/'.$this->getPHID().'/'
-      .$this->getSecretKey().'/';
-    return PhabricatorEnv::getCDNURI($path);
-  }
-
-  public function getThumb280x210URI() {
-    $path = '/file/xform/thumb-280x210/'.$this->getPHID().'/'
-      .$this->getSecretKey().'/';
     return PhabricatorEnv::getCDNURI($path);
   }
 
@@ -578,8 +940,30 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return idx($mime_map, $mime_type);
   }
 
-  public function isTransformableImage() {
+  public function isVideo() {
+    if (!$this->isViewableInBrowser()) {
+      return false;
+    }
 
+    $mime_map = PhabricatorEnv::getEnvConfig('files.video-mime-types');
+    $mime_type = $this->getMimeType();
+    return idx($mime_map, $mime_type);
+  }
+
+  public function isPDF() {
+    if (!$this->isViewableInBrowser()) {
+      return false;
+    }
+
+    $mime_map = array(
+      'application/pdf' => 'application/pdf',
+    );
+
+    $mime_type = $this->getMimeType();
+    return idx($mime_map, $mime_type);
+  }
+
+  public function isTransformableImage() {
     // NOTE: The way the 'gd' extension works in PHP is that you can install it
     // with support for only some file types, so it might be able to handle
     // PNG but not JPEG. Try to generate thumbnails for whatever we can. Setup
@@ -606,7 +990,7 @@ final class PhabricatorFile extends PhabricatorFileDAO
         return function_exists('imagegif');
         break;
       default:
-        throw new Exception('Unknown type matched as image MIME type.');
+        throw new Exception(pht('Unknown type matched as image MIME type.'));
     }
   }
 
@@ -628,7 +1012,15 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return $supported;
   }
 
-  protected function instantiateStorageEngine() {
+  public function getDragAndDropDictionary() {
+    return array(
+      'id'   => $this->getID(),
+      'phid' => $this->getPHID(),
+      'uri'  => $this->getBestURI(),
+    );
+  }
+
+  public function instantiateStorageEngine() {
     return self::buildEngine($this->getStorageEngine());
   }
 
@@ -641,22 +1033,15 @@ final class PhabricatorFile extends PhabricatorFileDAO
     }
 
     throw new Exception(
-      "Storage engine '{$engine_identifier}' could not be located!");
+      pht(
+        "Storage engine '%s' could not be located!",
+        $engine_identifier));
   }
 
   public static function buildAllEngines() {
-    $engines = id(new PhutilSymbolLoader())
-      ->setType('class')
-      ->setConcreteOnly(true)
+    return id(new PhutilClassMapQuery())
       ->setAncestorClass('PhabricatorFileStorageEngine')
-      ->selectAndLoadSymbols();
-
-    $results = array();
-    foreach ($engines as $engine_class) {
-      $results[] = newv($engine_class['name'], array());
-    }
-
-    return $results;
+      ->execute();
   }
 
   public function getViewableMimeType() {
@@ -672,7 +1057,7 @@ final class PhabricatorFile extends PhabricatorFileDAO
   public function getDisplayIconForMimeType() {
     $mime_map = PhabricatorEnv::getEnvConfig('files.icon-mime-types');
     $mime_type = $this->getMimeType();
-    return idx($mime_map, $mime_type, 'docs_file');
+    return idx($mime_map, $mime_type, 'fa-file-o');
   }
 
   public function validateSecretKey($key) {
@@ -683,23 +1068,55 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return Filesystem::readRandomCharacters(20);
   }
 
-  public function updateDimensions($save = true) {
-    if (!$this->isViewableImage()) {
-      throw new Exception(
-        "This file is not a viewable image.");
+  public function setStorageProperties(array $properties) {
+    $this->metadata[self::METADATA_STORAGE] = $properties;
+    return $this;
+  }
+
+  public function getStorageProperties() {
+    return idx($this->metadata, self::METADATA_STORAGE, array());
+  }
+
+  public function getStorageProperty($key, $default = null) {
+    $properties = $this->getStorageProperties();
+    return idx($properties, $key, $default);
+  }
+
+  public function loadDataFromIterator($iterator) {
+    $result = '';
+
+    foreach ($iterator as $chunk) {
+      $result .= $chunk;
     }
 
-    if (!function_exists("imagecreatefromstring")) {
+    return $result;
+  }
+
+  public function updateDimensions($save = true) {
+    if (!$this->isViewableImage()) {
+      throw new Exception(pht('This file is not a viewable image.'));
+    }
+
+    if (!function_exists('imagecreatefromstring')) {
+      throw new Exception(pht('Cannot retrieve image information.'));
+    }
+
+    if ($this->getIsChunk()) {
       throw new Exception(
-        "Cannot retrieve image information.");
+        pht('Refusing to assess image dimensions of file chunk.'));
+    }
+
+    $engine = $this->instantiateStorageEngine();
+    if ($engine->isChunkEngine()) {
+      throw new Exception(
+        pht('Refusing to assess image dimensions of chunked file.'));
     }
 
     $data = $this->loadFileData();
 
-    $img = imagecreatefromstring($data);
+    $img = @imagecreatefromstring($data);
     if ($img === false) {
-      throw new Exception(
-        "Error when decoding image.");
+      throw new Exception(pht('Error when decoding image.'));
     }
 
     $this->metadata[self::METADATA_IMAGE_WIDTH] = imagesx($img);
@@ -736,70 +1153,67 @@ final class PhabricatorFile extends PhabricatorFileDAO
    * Builtins are located in `resources/builtin/` and identified by their
    * name.
    *
-   * @param  PhabricatorUser                Viewing user.
-   * @param  list<string>                   List of builtin file names.
-   * @return dict<string, PhabricatorFile>  Dictionary of named builtins.
+   * @param  PhabricatorUser Viewing user.
+   * @param  list<PhabricatorFilesBuiltinFile> List of builtin file specs.
+   * @return dict<string, PhabricatorFile> Dictionary of named builtins.
    */
-  public static function loadBuiltins(PhabricatorUser $user, array $names) {
-    $specs = array();
-    foreach ($names as $name) {
-      $specs[] = array(
-        'originalPHID' => PhabricatorPHIDConstants::PHID_VOID,
-        'transform'    => 'builtin:'.$name,
-      );
-    }
+  public static function loadBuiltins(PhabricatorUser $user, array $builtins) {
+    $builtins = mpull($builtins, null, 'getBuiltinFileKey');
 
     // NOTE: Anyone is allowed to access builtin files.
 
     $files = id(new PhabricatorFileQuery())
       ->setViewer(PhabricatorUser::getOmnipotentUser())
-      ->withTransforms($specs)
+      ->withBuiltinKeys(array_keys($builtins))
       ->execute();
 
-    $files = mpull($files, null, 'getName');
-
-    $root = dirname(phutil_get_library_root('phabricator'));
-    $root = $root.'/resources/builtin/';
+    $results = array();
+    foreach ($files as $file) {
+      $builtin_key = $file->getBuiltinName();
+      if ($builtin_key !== null) {
+        $results[$builtin_key] = $file;
+      }
+    }
 
     $build = array();
-    foreach ($names as $name) {
-      if (isset($files[$name])) {
+    foreach ($builtins as $key => $builtin) {
+      if (isset($results[$key])) {
         continue;
       }
 
-      // This is just a sanity check to prevent loading arbitrary files.
-      if (basename($name) != $name) {
-        throw new Exception("Invalid builtin name '{$name}'!");
-      }
+      $data = $builtin->loadBuiltinFileData();
 
-      $path = $root.$name;
-
-      if (!Filesystem::pathExists($path)) {
-        throw new Exception("Builtin '{$path}' does not exist!");
-      }
-
-      $data = Filesystem::readFile($path);
       $params = array(
-        'name' => $name,
-        'ttl'  => time() + (60 * 60 * 24 * 7),
+        'name' => $builtin->getBuiltinDisplayName(),
+        'canCDN' => true,
+        'builtin' => $key,
       );
 
       $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
-        $file = PhabricatorFile::newFromFileData($data, $params);
-        $xform = id(new PhabricatorTransformedFile())
-          ->setOriginalPHID(PhabricatorPHIDConstants::PHID_VOID)
-          ->setTransform('builtin:'.$name)
-          ->setTransformedPHID($file->getPHID())
-          ->save();
+        try {
+          $file = self::newFromFileData($data, $params);
+        } catch (AphrontDuplicateKeyQueryException $ex) {
+          $file = id(new PhabricatorFileQuery())
+            ->setViewer(PhabricatorUser::getOmnipotentUser())
+            ->withBuiltinKeys(array($key))
+            ->executeOne();
+          if (!$file) {
+            throw new Exception(
+              pht(
+                'Collided mid-air when generating builtin file "%s", but '.
+                'then failed to load the object we collided with.',
+                $key));
+          }
+        }
       unset($unguarded);
 
       $file->attachObjectPHIDs(array());
       $file->attachObjects(array());
 
-      $files[$name] = $file;
+      $results[$key] = $file;
     }
 
-    return $files;
+    return $results;
   }
 
 
@@ -811,7 +1225,12 @@ final class PhabricatorFile extends PhabricatorFileDAO
    * @return PhabricatorFile  Corresponding builtin file.
    */
   public static function loadBuiltin(PhabricatorUser $user, $name) {
-    return idx(self::loadBuiltins($user, array($name)), $name);
+    $builtin = id(new PhabricatorFilesOnDiskBuiltinFile())
+      ->setName($name);
+
+    $key = $builtin->getBuiltinFileKey();
+
+    return idx(self::loadBuiltins($user, array($builtin)), $key);
   }
 
   public function getObjects() {
@@ -832,6 +1251,15 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return $this;
   }
 
+  public function getOriginalFile() {
+    return $this->assertAttached($this->originalFile);
+  }
+
+  public function attachOriginalFile(PhabricatorFile $file = null) {
+    $this->originalFile = $file;
+    return $this;
+  }
+
   public function getImageHeight() {
     if (!$this->isViewableImage()) {
       return null;
@@ -846,23 +1274,278 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return idx($this->metadata, self::METADATA_IMAGE_WIDTH);
   }
 
+  public function getCanCDN() {
+    if (!$this->isViewableImage()) {
+      return false;
+    }
+
+    return idx($this->metadata, self::METADATA_CAN_CDN);
+  }
+
+  public function setCanCDN($can_cdn) {
+    $this->metadata[self::METADATA_CAN_CDN] = $can_cdn ? 1 : 0;
+    return $this;
+  }
+
+  public function isBuiltin() {
+    return ($this->getBuiltinName() !== null);
+  }
+
+  public function getBuiltinName() {
+    return idx($this->metadata, self::METADATA_BUILTIN);
+  }
+
+  public function setBuiltinName($name) {
+    $this->metadata[self::METADATA_BUILTIN] = $name;
+    return $this;
+  }
+
+  public function getIsProfileImage() {
+    return idx($this->metadata, self::METADATA_PROFILE);
+  }
+
+  public function setIsProfileImage($value) {
+    $this->metadata[self::METADATA_PROFILE] = $value;
+    return $this;
+  }
+
+  public function getIsChunk() {
+    return idx($this->metadata, self::METADATA_CHUNK);
+  }
+
+  public function setIsChunk($value) {
+    $this->metadata[self::METADATA_CHUNK] = $value;
+    return $this;
+  }
+
+  public function setIntegrityHash($integrity_hash) {
+    $this->metadata[self::METADATA_INTEGRITY] = $integrity_hash;
+    return $this;
+  }
+
+  public function getIntegrityHash() {
+    return idx($this->metadata, self::METADATA_INTEGRITY);
+  }
+
+  public function newIntegrityHash() {
+    $engine = $this->instantiateStorageEngine();
+
+    if ($engine->isChunkEngine()) {
+      return null;
+    }
+
+    $format = $this->newStorageFormat();
+
+    $storage_handle = $this->getStorageHandle();
+    $data = $engine->readFile($storage_handle);
+
+    return $engine->newIntegrityHash($data, $format);
+  }
+
   /**
    * Write the policy edge between this file and some object.
    *
-   * @param PhabricatorUser Acting user.
    * @param phid Object PHID to attach to.
    * @return this
    */
-  public function attachToObject(PhabricatorUser $actor, $phid) {
-    $edge_type = PhabricatorEdgeConfig::TYPE_OBJECT_HAS_FILE;
+  public function attachToObject($phid) {
+    $edge_type = PhabricatorObjectHasFileEdgeType::EDGECONST;
 
     id(new PhabricatorEdgeEditor())
-      ->setActor($actor)
-      ->setSuppressEvents(true)
       ->addEdge($phid, $edge_type, $this->getPHID())
       ->save();
 
     return $this;
+  }
+
+
+  /**
+   * Remove the policy edge between this file and some object.
+   *
+   * @param phid Object PHID to detach from.
+   * @return this
+   */
+  public function detachFromObject($phid) {
+    $edge_type = PhabricatorObjectHasFileEdgeType::EDGECONST;
+
+    id(new PhabricatorEdgeEditor())
+      ->removeEdge($phid, $edge_type, $this->getPHID())
+      ->save();
+
+    return $this;
+  }
+
+
+  /**
+   * Configure a newly created file object according to specified parameters.
+   *
+   * This method is called both when creating a file from fresh data, and
+   * when creating a new file which reuses existing storage.
+   *
+   * @param map<string, wild>   Bag of parameters, see @{class:PhabricatorFile}
+   *  for documentation.
+   * @return this
+   */
+  private function readPropertiesFromParameters(array $params) {
+    PhutilTypeSpec::checkMap(
+      $params,
+      array(
+        'name' => 'optional string',
+        'authorPHID' => 'optional string',
+        'ttl.relative' => 'optional int',
+        'ttl.absolute' => 'optional int',
+        'viewPolicy' => 'optional string',
+        'isExplicitUpload' => 'optional bool',
+        'canCDN' => 'optional bool',
+        'profile' => 'optional bool',
+        'format' => 'optional string|PhabricatorFileStorageFormat',
+        'mime-type' => 'optional string',
+        'builtin' => 'optional string',
+        'storageEngines' => 'optional list<PhabricatorFileStorageEngine>',
+        'chunk' => 'optional bool',
+      ));
+
+    $file_name = idx($params, 'name');
+    $this->setName($file_name);
+
+    $author_phid = idx($params, 'authorPHID');
+    $this->setAuthorPHID($author_phid);
+
+    $absolute_ttl = idx($params, 'ttl.absolute');
+    $relative_ttl = idx($params, 'ttl.relative');
+    if ($absolute_ttl !== null && $relative_ttl !== null) {
+      throw new Exception(
+        pht(
+          'Specify an absolute TTL or a relative TTL, but not both.'));
+    } else if ($absolute_ttl !== null) {
+      if ($absolute_ttl < PhabricatorTime::getNow()) {
+        throw new Exception(
+          pht(
+            'Absolute TTL must be in the present or future, but TTL "%s" '.
+            'is in the past.',
+            $absolute_ttl));
+      }
+
+      $this->setTtl($absolute_ttl);
+    } else if ($relative_ttl !== null) {
+      if ($relative_ttl < 0) {
+        throw new Exception(
+          pht(
+            'Relative TTL must be zero or more seconds, but "%s" is '.
+            'negative.',
+            $relative_ttl));
+      }
+
+      $max_relative = phutil_units('365 days in seconds');
+      if ($relative_ttl > $max_relative) {
+        throw new Exception(
+          pht(
+            'Relative TTL must not be more than "%s" seconds, but TTL '.
+            '"%s" was specified.',
+            $max_relative,
+            $relative_ttl));
+      }
+
+      $absolute_ttl = PhabricatorTime::getNow() + $relative_ttl;
+
+      $this->setTtl($absolute_ttl);
+    }
+
+    $view_policy = idx($params, 'viewPolicy');
+    if ($view_policy) {
+      $this->setViewPolicy($params['viewPolicy']);
+    }
+
+    $is_explicit = (idx($params, 'isExplicitUpload') ? 1 : 0);
+    $this->setIsExplicitUpload($is_explicit);
+
+    $can_cdn = idx($params, 'canCDN');
+    if ($can_cdn) {
+      $this->setCanCDN(true);
+    }
+
+    $builtin = idx($params, 'builtin');
+    if ($builtin) {
+      $this->setBuiltinName($builtin);
+      $this->setBuiltinKey($builtin);
+    }
+
+    $profile = idx($params, 'profile');
+    if ($profile) {
+      $this->setIsProfileImage(true);
+    }
+
+    $mime_type = idx($params, 'mime-type');
+    if ($mime_type) {
+      $this->setMimeType($mime_type);
+    }
+
+    $is_chunk = idx($params, 'chunk');
+    if ($is_chunk) {
+      $this->setIsChunk(true);
+    }
+
+    return $this;
+  }
+
+  public function getRedirectResponse() {
+    $uri = $this->getBestURI();
+
+    // TODO: This is a bit iffy. Sometimes, getBestURI() returns a CDN URI
+    // (if the file is a viewable image) and sometimes a local URI (if not).
+    // For now, just detect which one we got and configure the response
+    // appropriately. In the long run, if this endpoint is served from a CDN
+    // domain, we can't issue a local redirect to an info URI (which is not
+    // present on the CDN domain). We probably never actually issue local
+    // redirects here anyway, since we only ever transform viewable images
+    // right now.
+
+    $is_external = strlen(id(new PhutilURI($uri))->getDomain());
+
+    return id(new AphrontRedirectResponse())
+      ->setIsExternal($is_external)
+      ->setURI($uri);
+  }
+
+  public function newDownloadResponse() {
+    // We're cheating a little bit here and relying on the fact that
+    // getDownloadURI() always returns a fully qualified URI with a complete
+    // domain.
+    return id(new AphrontRedirectResponse())
+      ->setIsExternal(true)
+      ->setCloseDialogBeforeRedirect(true)
+      ->setURI($this->getDownloadURI());
+  }
+
+  public function attachTransforms(array $map) {
+    $this->transforms = $map;
+    return $this;
+  }
+
+  public function getTransform($key) {
+    return $this->assertAttachedKey($this->transforms, $key);
+  }
+
+  public function newStorageFormat() {
+    $key = $this->getStorageFormat();
+    $template = PhabricatorFileStorageFormat::requireFormat($key);
+
+    $format = id(clone $template)
+      ->setFile($this);
+
+    return $format;
+  }
+
+
+/* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
+
+
+  public function getApplicationTransactionEditor() {
+    return new PhabricatorFileEditor();
+  }
+
+  public function getApplicationTransactionTemplate() {
+    return new PhabricatorFileTransaction();
   }
 
 
@@ -877,8 +1560,18 @@ final class PhabricatorFile extends PhabricatorFileDAO
   }
 
   public function getPolicy($capability) {
-    // TODO: Implement proper per-object policies.
-    return PhabricatorPolicies::POLICY_USER;
+    switch ($capability) {
+      case PhabricatorPolicyCapability::CAN_VIEW:
+        if ($this->isBuiltin()) {
+          return PhabricatorPolicies::getMostOpenPolicy();
+        }
+        if ($this->getIsProfileImage()) {
+          return PhabricatorPolicies::getMostOpenPolicy();
+        }
+        return $this->getViewPolicy();
+      case PhabricatorPolicyCapability::CAN_EDIT:
+        return PhabricatorPolicies::POLICY_NOONE;
+    }
   }
 
   public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
@@ -891,6 +1584,12 @@ final class PhabricatorFile extends PhabricatorFileDAO
 
     switch ($capability) {
       case PhabricatorPolicyCapability::CAN_VIEW:
+        // If you can see the file this file is a transform of, you can see
+        // this file.
+        if ($this->getOriginalFile()) {
+          return true;
+        }
+
         // If you can see any object this file is attached to, you can see
         // the file.
         return (count($this->getObjects()) > 0);
@@ -907,6 +1606,9 @@ final class PhabricatorFile extends PhabricatorFileDAO
         $out[] = pht(
           'Files attached to objects are visible to users who can view '.
           'those objects.');
+        $out[] = pht(
+          'Thumbnails are visible only to users who can view the original '.
+          'file.');
         break;
     }
 
@@ -931,5 +1633,59 @@ final class PhabricatorFile extends PhabricatorFileDAO
     );
   }
 
+
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+
+    $this->openTransaction();
+      $this->delete();
+    $this->saveTransaction();
+  }
+
+
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
+
+
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('name')
+        ->setType('string')
+        ->setDescription(pht('The name of the file.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('dataURI')
+        ->setType('string')
+        ->setDescription(pht('Download URI for the file data.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('size')
+        ->setType('int')
+        ->setDescription(pht('File size, in bytes.')),
+    );
+  }
+
+  public function getFieldValuesForConduit() {
+    return array(
+      'name' => $this->getName(),
+      'dataURI' => $this->getCDNURI('data'),
+      'size' => (int)$this->getByteSize(),
+    );
+  }
+
+  public function getConduitSearchAttachments() {
+    return array();
+  }
+
+/* -(  PhabricatorNgramInterface  )------------------------------------------ */
+
+
+  public function newNgrams() {
+    return array(
+      id(new PhabricatorFileNameNgrams())
+        ->setValue($this->getName()),
+    );
+  }
 
 }

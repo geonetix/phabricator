@@ -3,18 +3,18 @@
 final class PhabricatorRepositoryManagementImportingWorkflow
   extends PhabricatorRepositoryManagementWorkflow {
 
-  public function didConstruct() {
+  protected function didConstruct() {
     $this
       ->setName('importing')
       ->setExamples('**importing** __repository__ ...')
       ->setSynopsis(
-        'Show commits in __repository__, named by callsign, which are still '.
-        'importing.')
+        pht(
+          'Show commits in __repository__ which are still importing.'))
       ->setArguments(
         array(
           array(
             'name'        => 'simple',
-            'help'        => 'Show simpler output.',
+            'help'        => pht('Show simpler output.'),
           ),
           array(
             'name'        => 'repos',
@@ -28,8 +28,8 @@ final class PhabricatorRepositoryManagementImportingWorkflow
 
     if (!$repos) {
       throw new PhutilArgumentUsageException(
-        "Specify one or more repositories to find importing commits for, ".
-        "by callsign.");
+        pht(
+          'Specify one or more repositories to find importing commits for.'));
     }
 
     $repos = mpull($repos, null, 'getID');
@@ -40,10 +40,15 @@ final class PhabricatorRepositoryManagementImportingWorkflow
     $rows = queryfx_all(
       $conn_r,
       'SELECT repositoryID, commitIdentifier, importStatus FROM %T
-        WHERE repositoryID IN (%Ld) AND importStatus != %d',
+        WHERE repositoryID IN (%Ld)
+          AND (importStatus & %d) != %d
+          AND (importStatus & %d) != %d',
       $table->getTableName(),
       array_keys($repos),
-      PhabricatorRepositoryCommit::IMPORTED_ALL);
+      PhabricatorRepositoryCommit::IMPORTED_ALL,
+      PhabricatorRepositoryCommit::IMPORTED_ALL,
+      PhabricatorRepositoryCommit::IMPORTED_UNREACHABLE,
+      PhabricatorRepositoryCommit::IMPORTED_UNREACHABLE);
 
     $console = PhutilConsole::getConsole();
     if ($rows) {
@@ -51,25 +56,22 @@ final class PhabricatorRepositoryManagementImportingWorkflow
         $repo = $repos[$row['repositoryID']];
         $identifier = $row['commitIdentifier'];
 
-        $console->writeOut("%s", 'r'.$repo->getCallsign().$identifier);
+        $console->writeOut('%s', $repo->formatCommitName($identifier));
 
         if (!$args->getArg('simple')) {
           $status = $row['importStatus'];
           $need = array();
           if (!($status & PhabricatorRepositoryCommit::IMPORTED_MESSAGE)) {
-            $need[] = 'Message';
+            $need[] = pht('Message');
           }
           if (!($status & PhabricatorRepositoryCommit::IMPORTED_CHANGE)) {
-            $need[] = 'Change';
+            $need[] = pht('Change');
           }
-          if (!($status & PhabricatorRepositoryCommit::IMPORTED_OWNERS)) {
-            $need[] = 'Owners';
-          }
-          if (!($status & PhabricatorRepositoryCommit::IMPORTED_HERALD)) {
-            $need[] = 'Herald';
+          if (!($status & PhabricatorRepositoryCommit::IMPORTED_PUBLISH)) {
+            $need[] = pht('Publish');
           }
 
-          $console->writeOut(" %s", implode(', ', $need));
+          $console->writeOut(' %s', implode(', ', $need));
         }
 
         $console->writeOut("\n");

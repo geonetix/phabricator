@@ -1,21 +1,22 @@
 <?php
 
-/**
- * @group file
- */
 final class PhabricatorFileTransaction
-  extends PhabricatorApplicationTransaction {
+  extends PhabricatorModularTransaction {
 
   public function getApplicationName() {
     return 'file';
   }
 
   public function getApplicationTransactionType() {
-    return PhabricatorFilePHIDTypeFile::TYPECONST;
+    return PhabricatorFileFilePHIDType::TYPECONST;
   }
 
   public function getApplicationTransactionCommentObject() {
     return new PhabricatorFileTransactionComment();
+  }
+
+  public function getBaseTransactionClass() {
+    return 'PhabricatorFileTransactionType';
   }
 
 }

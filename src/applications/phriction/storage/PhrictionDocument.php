@@ -1,36 +1,102 @@
 <?php
 
-/**
- * @group phriction
- */
 final class PhrictionDocument extends PhrictionDAO
   implements
     PhabricatorPolicyInterface,
     PhabricatorSubscribableInterface,
     PhabricatorFlaggableInterface,
-    PhabricatorTokenReceiverInterface {
+    PhabricatorTokenReceiverInterface,
+    PhabricatorDestructibleInterface,
+    PhabricatorFulltextInterface,
+    PhabricatorFerretInterface,
+    PhabricatorProjectInterface,
+    PhabricatorApplicationTransactionInterface,
+    PhabricatorConduitResultInterface,
+    PhabricatorPolicyCodexInterface,
+    PhabricatorSpacesInterface {
 
   protected $slug;
   protected $depth;
-  protected $contentID;
+  protected $contentPHID;
   protected $status;
+  protected $viewPolicy;
+  protected $editPolicy;
+  protected $spacePHID;
+  protected $editedEpoch;
+  protected $maxVersion;
 
   private $contentObject = self::ATTACHABLE;
+  private $ancestors = array();
 
-  // TODO: This should be `self::ATTACHABLE`, but there are still a lot of call
-  // sites which load PhrictionDocuments directly.
-  private $project = null;
-
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID   => true,
       self::CONFIG_TIMESTAMPS => false,
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'slug' => 'sort128',
+        'depth' => 'uint32',
+        'status' => 'text32',
+        'editedEpoch' => 'epoch',
+        'maxVersion' => 'uint32',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'slug' => array(
+          'columns' => array('slug'),
+          'unique' => true,
+        ),
+        'depth' => array(
+          'columns' => array('depth', 'slug'),
+          'unique' => true,
+        ),
+      ),
     ) + parent::getConfiguration();
   }
 
-  public function generatePHID() {
-    return PhabricatorPHID::generateNewPHID(
-      PhrictionPHIDTypeDocument::TYPECONST);
+  public function getPHIDType() {
+    return PhrictionDocumentPHIDType::TYPECONST;
+  }
+
+  public static function initializeNewDocument(PhabricatorUser $actor, $slug) {
+    $document = id(new self())
+      ->setSlug($slug);
+
+    $content = id(new PhrictionContent())
+      ->setSlug($slug);
+
+    $default_title = PhabricatorSlug::getDefaultTitle($slug);
+    $content->setTitle($default_title);
+    $document->attachContent($content);
+
+    $parent_doc = null;
+    $ancestral_slugs = PhabricatorSlug::getAncestry($slug);
+    if ($ancestral_slugs) {
+      $parent = end($ancestral_slugs);
+      $parent_doc = id(new PhrictionDocumentQuery())
+        ->setViewer($actor)
+        ->withSlugs(array($parent))
+        ->executeOne();
+    }
+
+    if ($parent_doc) {
+      $space_phid = PhabricatorSpacesNamespaceQuery::getObjectSpacePHID(
+        $parent_doc);
+
+      $document
+        ->setViewPolicy($parent_doc->getViewPolicy())
+        ->setEditPolicy($parent_doc->getEditPolicy())
+        ->setSpacePHID($space_phid);
+    } else {
+      $default_view_policy = PhabricatorPolicies::getMostOpenPolicy();
+      $document
+        ->setViewPolicy($default_view_policy)
+        ->setEditPolicy(PhabricatorPolicies::POLICY_USER)
+        ->setSpacePHID($actor->getDefaultSpacePHID());
+    }
+
+    $document->setEditedEpoch(PhabricatorTime::getNow());
+    $document->setMaxVersion(0);
+
+    return $document;
   }
 
   public static function getSlugURI($slug, $type = 'document') {
@@ -40,7 +106,7 @@ final class PhrictionDocument extends PhrictionDAO
     );
 
     if (empty($types[$type])) {
-      throw new Exception("Unknown URI type '{$type}'!");
+      throw new Exception(pht("Unknown URI type '%s'!", $type));
     }
 
     $prefix = $types[$type];
@@ -71,38 +137,49 @@ final class PhrictionDocument extends PhrictionDAO
     return $this->assertAttached($this->contentObject);
   }
 
-  public function getProject() {
-    return $this->assertAttached($this->project);
+  public function getAncestors() {
+    return $this->ancestors;
   }
 
-  public function attachProject(PhabricatorProject $project = null) {
-    $this->project = $project;
+  public function getAncestor($slug) {
+    return $this->assertAttachedKey($this->ancestors, $slug);
+  }
+
+  public function attachAncestor($slug, $ancestor) {
+    $this->ancestors[$slug] = $ancestor;
     return $this;
   }
 
-  public function hasProject() {
-    return (bool)$this->getProject();
+  public function getURI() {
+    return self::getSlugURI($this->getSlug());
   }
 
-  public static function isProjectSlug($slug) {
-    $slug = PhabricatorSlug::normalize($slug);
-    $prefix = 'projects/';
-    if ($slug == $prefix) {
-      // The 'projects/' document is not itself a project slug.
-      return false;
-    }
-    return !strncmp($slug, $prefix, strlen($prefix));
+/* -(  Status  )------------------------------------------------------------- */
+
+
+  public function getStatusObject() {
+    return PhrictionDocumentStatus::newStatusObject($this->getStatus());
   }
 
-  public static function getProjectSlugIdentifier($slug) {
-    if (!self::isProjectSlug($slug)) {
-      throw new Exception("Slug '{$slug}' is not a project slug!");
-    }
-
-    $slug = PhabricatorSlug::normalize($slug);
-    $parts = explode('/', $slug);
-    return $parts[1].'/';
+  public function getStatusIcon() {
+    return $this->getStatusObject()->getIcon();
   }
+
+  public function getStatusColor() {
+    return $this->getStatusObject()->getColor();
+  }
+
+  public function getStatusDisplayName() {
+    return $this->getStatusObject()->getDisplayName();
+  }
+
+  public function isActive() {
+    return $this->getStatusObject()->isActive();
+  }
+
+
+/* -(  PhabricatorPolicyInterface  )----------------------------------------- */
+
 
   public function getCapabilities() {
     return array(
@@ -112,34 +189,135 @@ final class PhrictionDocument extends PhrictionDAO
   }
 
   public function getPolicy($capability) {
-    if ($this->hasProject()) {
-      return $this->getProject()->getPolicy($capability);
+    switch ($capability) {
+      case PhabricatorPolicyCapability::CAN_VIEW:
+        return $this->getViewPolicy();
+      case PhabricatorPolicyCapability::CAN_EDIT:
+        return $this->getEditPolicy();
     }
-    return PhabricatorPolicies::POLICY_USER;
   }
 
   public function hasAutomaticCapability($capability, PhabricatorUser $user) {
-    if ($this->hasProject()) {
-      return $this->getProject()->hasAutomaticCapability($capability, $user);
-    }
     return false;
   }
 
-  public function describeAutomaticCapability($capability) {
-    if ($this->hasProject()) {
-      return pht(
-        "This is a project wiki page, and inherits the project's policies.");
-    }
-    return null;
+
+/* -(  PhabricatorSpacesInterface  )----------------------------------------- */
+
+
+  public function getSpacePHID() {
+    return $this->spacePHID;
   }
+
+
+
+/* -(  PhabricatorSubscribableInterface  )----------------------------------- */
+
 
   public function isAutomaticallySubscribed($phid) {
     return false;
   }
 
+
+/* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
+
+
+  public function getApplicationTransactionEditor() {
+    return new PhrictionTransactionEditor();
+  }
+
+  public function getApplicationTransactionTemplate() {
+    return new PhrictionTransaction();
+  }
+
+
 /* -(  PhabricatorTokenReceiverInterface  )---------------------------------- */
+
 
   public function getUsersToNotifyOfTokenGiven() {
     return PhabricatorSubscribersQuery::loadSubscribersForPHID($this->phid);
   }
+
+
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+
+    $this->openTransaction();
+
+      $contents = id(new PhrictionContentQuery())
+        ->setViewer($engine->getViewer())
+        ->withDocumentPHIDs(array($this->getPHID()))
+        ->execute();
+      foreach ($contents as $content) {
+        $engine->destroyObject($content);
+      }
+
+      $this->delete();
+
+    $this->saveTransaction();
+  }
+
+
+/* -(  PhabricatorFulltextInterface  )--------------------------------------- */
+
+
+  public function newFulltextEngine() {
+    return new PhrictionDocumentFulltextEngine();
+  }
+
+
+/* -(  PhabricatorFerretInterface  )----------------------------------------- */
+
+
+  public function newFerretEngine() {
+    return new PhrictionDocumentFerretEngine();
+  }
+
+
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
+
+
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('path')
+        ->setType('string')
+        ->setDescription(pht('The path to the document.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('status')
+        ->setType('map<string, wild>')
+        ->setDescription(pht('Status information about the document.')),
+    );
+  }
+
+  public function getFieldValuesForConduit() {
+    $status = array(
+      'value' => $this->getStatus(),
+      'name' => $this->getStatusDisplayName(),
+    );
+
+    return array(
+      'path' => $this->getSlug(),
+      'status' => $status,
+    );
+  }
+
+  public function getConduitSearchAttachments() {
+    return array(
+      id(new PhrictionContentSearchEngineAttachment())
+        ->setAttachmentKey('content'),
+    );
+  }
+
+/* -(  PhabricatorPolicyCodexInterface  )------------------------------------ */
+
+
+  public function newPolicyCodex() {
+    return new PhrictionDocumentPolicyCodex();
+  }
+
+
 }

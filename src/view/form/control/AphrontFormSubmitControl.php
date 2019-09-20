@@ -2,20 +2,29 @@
 
 final class AphrontFormSubmitControl extends AphrontFormControl {
 
-  protected $cancelButton;
+  private $buttons = array();
+  private $sigils = array();
 
   public function addCancelButton($href, $label = null) {
     if (!$label) {
       $label = pht('Cancel');
     }
+    $button = id(new PHUIButtonView())
+      ->setTag('a')
+      ->setHref($href)
+      ->setText($label)
+      ->setColor(PHUIButtonView::GREY);
+    $this->addButton($button);
+    return $this;
+  }
 
-    $this->cancelButton = phutil_tag(
-      'a',
-      array(
-        'href' => $href,
-        'class' => 'button grey',
-      ),
-      $label);
+  public function addButton(PHUIButtonView $button) {
+    $this->buttons[] = $button;
+    return $this;
+  }
+
+  public function addSigil($sigil) {
+    $this->sigils[] = $sigil;
     return $this;
   }
 
@@ -26,16 +35,28 @@ final class AphrontFormSubmitControl extends AphrontFormControl {
   protected function renderInput() {
     $submit_button = null;
     if ($this->getValue()) {
-      $submit_button = phutil_tag(
+
+      if ($this->sigils) {
+        $sigils = $this->sigils;
+      } else {
+        $sigils = null;
+      }
+
+      $submit_button = javelin_tag(
         'button',
         array(
           'type'      => 'submit',
           'name'      => '__submit__',
+          'sigil' => $sigils,
           'disabled'  => $this->getDisabled() ? 'disabled' : null,
         ),
         $this->getValue());
     }
-    return hsprintf('%s%s', $submit_button, $this->cancelButton);
+
+    return array(
+      $submit_button,
+      $this->buttons,
+    );
   }
 
 }

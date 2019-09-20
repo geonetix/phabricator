@@ -1,14 +1,17 @@
 <?php
 
-final class NuanceQueueTransaction
-  extends NuanceTransaction {
+final class NuanceQueueTransaction extends NuanceTransaction {
 
   public function getApplicationTransactionType() {
-    return NuancePHIDTypeQueue::TYPECONST;
+    return NuanceQueuePHIDType::TYPECONST;
   }
 
   public function getApplicationTransactionCommentObject() {
     return new NuanceQueueTransactionComment();
+  }
+
+  public function getBaseTransactionClass() {
+    return 'NuanceQueueTransactionType';
   }
 
 }

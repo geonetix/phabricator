@@ -1,21 +1,15 @@
 <?php
 
 final class PhabricatorApplicationEditController
-  extends PhabricatorApplicationsController{
+  extends PhabricatorApplicationsController {
 
-  private $application;
-
-  public function willProcessRequest(array $data) {
-    $this->application = $data['application'];
-  }
-
-  public function processRequest() {
-    $request = $this->getRequest();
+  public function handleRequest(AphrontRequest $request) {
     $user = $request->getUser();
+    $application = $request->getURIData('application');
 
     $application = id(new PhabricatorApplicationQuery())
       ->setViewer($user)
-      ->withClasses(array($this->application))
+      ->withClasses(array($application))
       ->requireCapabilities(
         array(
           PhabricatorPolicyCapability::CAN_VIEW,
@@ -36,8 +30,14 @@ final class PhabricatorApplicationEditController
       ->execute();
 
     if ($request->isFormPost()) {
-      $result = array();
+      $xactions = array();
+
+      $template = $application->getApplicationTransactionTemplate();
       foreach ($application->getCapabilities() as $capability) {
+        if (!$application->isCapabilityEditable($capability)) {
+          continue;
+        }
+
         $old = $application->getPolicy($capability);
         $new = $request->getStr('policy:'.$capability);
 
@@ -46,66 +46,32 @@ final class PhabricatorApplicationEditController
           continue;
         }
 
-        if (empty($policies[$new])) {
-          // Not a standard policy, check for a custom policy.
-          $policy = id(new PhabricatorPolicyQuery())
-            ->setViewer($user)
-            ->withPHIDs(array($new))
-            ->executeOne();
-          if (!$policy) {
-            // Not a custom policy either. Can't set the policy to something
-            // invalid, so skip this.
-            continue;
-          }
-        }
-
-        if ($new == PhabricatorPolicies::POLICY_PUBLIC) {
-          $capobj = PhabricatorPolicyCapability::getCapabilityByKey(
-            $capability);
-          if (!$capobj || !$capobj->shouldAllowPublicPolicySetting()) {
-            // Can't set non-public policies to public.
-            continue;
-          }
-        }
-
-        $result[$capability] = $new;
+        $xactions[] = id(clone $template)
+          ->setTransactionType(
+              PhabricatorApplicationPolicyChangeTransaction::TRANSACTIONTYPE)
+          ->setMetadataValue(
+            PhabricatorApplicationPolicyChangeTransaction::METADATA_ATTRIBUTE,
+            $capability)
+          ->setNewValue($new);
       }
 
-      if ($result) {
-        $key = 'phabricator.application-settings';
-        $config_entry = PhabricatorConfigEntry::loadConfigEntry($key);
-        $value = $config_entry->getValue();
+      $editor = id(new PhabricatorApplicationEditor())
+        ->setActor($user)
+        ->setContentSourceFromRequest($request)
+        ->setContinueOnNoEffect(true)
+        ->setContinueOnMissingFields(true);
 
-        $phid = $application->getPHID();
-        if (empty($value[$phid])) {
-          $value[$application->getPHID()] = array();
-        }
-        if (empty($value[$phid]['policy'])) {
-          $value[$phid]['policy'] = array();
-        }
-
-        $value[$phid]['policy'] = $result + $value[$phid]['policy'];
-
-        // Don't allow users to make policy edits which would lock them out of
-        // applications, since they would be unable to undo those actions.
-        PhabricatorEnv::overrideConfig($key, $value);
-        PhabricatorPolicyFilter::mustRetainCapability(
-          $user,
-          $application,
-          PhabricatorPolicyCapability::CAN_VIEW);
-
-        PhabricatorPolicyFilter::mustRetainCapability(
-          $user,
-          $application,
-          PhabricatorPolicyCapability::CAN_EDIT);
-
-        PhabricatorConfigEditor::storeNewValue(
-          $config_entry,
-          $value,
-          $this->getRequest());
+      try {
+        $editor->applyTransactions($application, $xactions);
+        return id(new AphrontRedirectResponse())->setURI($view_uri);
+      } catch (PhabricatorApplicationTransactionValidationException $ex) {
+        $validation_exception = $ex;
       }
 
-      return id(new AphrontRedirectResponse())->setURI($view_uri);
+      return $this->newDialog()
+        ->setTitle(pht('Validation Failed'))
+        ->setValidationException($validation_exception)
+        ->addCancelButton($view_uri);
     }
 
     $descriptions = PhabricatorPolicyQuery::renderPolicyDescriptions(
@@ -115,27 +81,55 @@ final class PhabricatorApplicationEditController
     $form = id(new AphrontFormView())
       ->setUser($user);
 
+    $locked_policies = PhabricatorEnv::getEnvConfig('policy.locked');
     foreach ($application->getCapabilities() as $capability) {
       $label = $application->getCapabilityLabel($capability);
       $can_edit = $application->isCapabilityEditable($capability);
+      $locked = idx($locked_policies, $capability);
       $caption = $application->getCapabilityCaption($capability);
 
-      if (!$can_edit) {
+      if (!$can_edit || $locked) {
         $form->appendChild(
           id(new AphrontFormStaticControl())
             ->setLabel($label)
             ->setValue(idx($descriptions, $capability))
             ->setCaption($caption));
       } else {
-        $form->appendChild(
-          id(new AphrontFormPolicyControl())
+        $control = id(new AphrontFormPolicyControl())
           ->setUser($user)
+          ->setDisabled($locked)
           ->setCapability($capability)
           ->setPolicyObject($application)
           ->setPolicies($policies)
           ->setLabel($label)
           ->setName('policy:'.$capability)
-          ->setCaption($caption));
+          ->setCaption($caption);
+
+        $template = $application->getCapabilityTemplatePHIDType($capability);
+        if ($template) {
+          $phid_types = PhabricatorPHIDType::getAllTypes();
+          $phid_type = idx($phid_types, $template);
+          if ($phid_type) {
+            $template_object = $phid_type->newObject();
+            if ($template_object) {
+              $template_policies = id(new PhabricatorPolicyQuery())
+                ->setViewer($user)
+                ->setObject($template_object)
+                ->execute();
+
+              // NOTE: We want to expose both any object template policies
+              // (like "Subscribers") and any custom policy.
+              $all_policies = $template_policies + $policies;
+
+              $control->setPolicies($all_policies);
+              $control->setTemplateObject($template_object);
+            }
+          }
+
+          $control->setTemplatePHIDType($template);
+        }
+
+        $form->appendControl($control);
       }
 
     }
@@ -146,30 +140,29 @@ final class PhabricatorApplicationEditController
         ->addCancelButton($view_uri));
 
     $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName($application->getName())
-        ->setHref($view_uri));
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('Edit Policies')));
+    $crumbs->addTextCrumb($application->getName(), $view_uri);
+    $crumbs->addTextCrumb(pht('Edit Policies'));
+    $crumbs->setBorder(true);
 
     $header = id(new PHUIHeaderView())
-      ->setHeader(pht('Edit Policies: %s', $application->getName()));
+      ->setHeader(pht('Edit Policies: %s', $application->getName()))
+      ->setHeaderIcon('fa-pencil');
 
     $object_box = id(new PHUIObjectBoxView())
-      ->setHeader($header)
+      ->setHeaderText(pht('Policies'))
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
       ->setForm($form);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter(array(
         $object_box,
-      ),
-      array(
-        'title' => $title,
-        'device' => true,
       ));
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
   }
 
 }

@@ -1,29 +1,7 @@
 <?php
 
-final class PhabricatorUserLog extends PhabricatorUserDAO {
-
-  const ACTION_LOGIN          = 'login';
-  const ACTION_LOGOUT         = 'logout';
-  const ACTION_LOGIN_FAILURE  = 'login-fail';
-  const ACTION_RESET_PASSWORD = 'reset-pass';
-
-  const ACTION_CREATE         = 'create';
-  const ACTION_EDIT           = 'edit';
-
-  const ACTION_ADMIN          = 'admin';
-  const ACTION_SYSTEM_AGENT   = 'system-agent';
-  const ACTION_DISABLE        = 'disable';
-  const ACTION_DELETE         = 'delete';
-
-  const ACTION_CONDUIT_CERTIFICATE = 'conduit-cert';
-  const ACTION_CONDUIT_CERTIFICATE_FAILURE = 'conduit-cert-fail';
-
-  const ACTION_EMAIL_PRIMARY    = 'email-primary';
-  const ACTION_EMAIL_REMOVE     = 'email-remove';
-  const ACTION_EMAIL_ADD        = 'email-add';
-
-  const ACTION_CHANGE_PASSWORD  = 'change-password';
-  const ACTION_CHANGE_USERNAME  = 'change-username';
+final class PhabricatorUserLog extends PhabricatorUserDAO
+  implements PhabricatorPolicyInterface {
 
   protected $actorPHID;
   protected $userPHID;
@@ -34,70 +12,174 @@ final class PhabricatorUserLog extends PhabricatorUserDAO {
   protected $remoteAddr;
   protected $session;
 
-  public static function newLog(
+  public static function initializeNewLog(
     PhabricatorUser $actor = null,
-    PhabricatorUser $user = null,
-    $action) {
+    $object_phid = null,
+    $action = null) {
 
     $log = new PhabricatorUserLog();
 
     if ($actor) {
       $log->setActorPHID($actor->getPHID());
+      if ($actor->hasSession()) {
+        $session = $actor->getSession();
+
+        // NOTE: This is a hash of the real session value, so it's safe to
+        // store it directly in the logs.
+        $log->setSession($session->getSessionKey());
+      }
     }
 
-    if ($user) {
-      $log->setUserPHID($user->getPHID());
+    $log->setUserPHID((string)$object_phid);
+    $log->setAction($action);
+
+    $address = PhabricatorEnv::getRemoteAddress();
+    if ($address) {
+      $log->remoteAddr = $address->getAddress();
     } else {
-      $log->setUserPHID('');
-    }
-
-    if ($action) {
-      $log->setAction($action);
+      $log->remoteAddr = '';
     }
 
     return $log;
   }
 
   public static function loadRecentEventsFromThisIP($action, $timespan) {
+    $address = PhabricatorEnv::getRemoteAddress();
+    if (!$address) {
+      return array();
+    }
+
     return id(new PhabricatorUserLog())->loadAllWhere(
       'action = %s AND remoteAddr = %s AND dateCreated > %d
         ORDER BY dateCreated DESC',
       $action,
-      idx($_SERVER, 'REMOTE_ADDR'),
-      time() - $timespan);
+      $address->getAddress(),
+      PhabricatorTime::getNow() - $timespan);
   }
 
   public function save() {
-    if (!$this->remoteAddr) {
-      $this->remoteAddr = idx($_SERVER, 'REMOTE_ADDR', '');
-    }
-    if (!$this->session) {
-      $this->setSession(idx($_COOKIE, 'phsid'));
-    }
     $this->details['host'] = php_uname('n');
     $this->details['user_agent'] = AphrontRequest::getHTTPHeader('User-Agent');
 
     return parent::save();
   }
 
-  public function setSession($session) {
-    // Store the hash of the session, not the actual session key, so that
-    // seeing the logs doesn't compromise all the sessions which appear in
-    // them. This just prevents casual leaks, like in a screenshot.
-    if (strlen($session)) {
-      $this->session = PhabricatorHash::digest($session);
-    }
-    return $this;
-  }
-
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_SERIALIZATION => array(
         'oldValue' => self::SERIALIZATION_JSON,
         'newValue' => self::SERIALIZATION_JSON,
         'details'  => self::SERIALIZATION_JSON,
       ),
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'actorPHID' => 'phid?',
+        'action' => 'text64',
+        'remoteAddr' => 'text64',
+        'session' => 'text64?',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'actorPHID' => array(
+          'columns' => array('actorPHID', 'dateCreated'),
+        ),
+        'userPHID' => array(
+          'columns' => array('userPHID', 'dateCreated'),
+        ),
+        'action' => array(
+          'columns' => array('action', 'dateCreated'),
+        ),
+        'dateCreated' => array(
+          'columns' => array('dateCreated'),
+        ),
+        'remoteAddr' => array(
+          'columns' => array('remoteAddr', 'dateCreated'),
+        ),
+        'session' => array(
+          'columns' => array('session', 'dateCreated'),
+        ),
+      ),
     ) + parent::getConfiguration();
+  }
+
+  public function getURI() {
+    return urisprintf('/people/logs/%s/', $this->getID());
+  }
+
+  public function getObjectName() {
+    return pht('Activity Log %d', $this->getID());
+  }
+
+  public function getRemoteAddressForViewer(PhabricatorUser $viewer) {
+    $viewer_phid = $viewer->getPHID();
+    $actor_phid = $this->getActorPHID();
+    $user_phid = $this->getUserPHID();
+
+    if (!$viewer_phid) {
+      $can_see_ip = false;
+    } else if ($viewer->getIsAdmin()) {
+      $can_see_ip = true;
+    } else if ($viewer_phid == $actor_phid) {
+      // You can see the address if you took the action.
+      $can_see_ip = true;
+    } else if (!$actor_phid && ($viewer_phid == $user_phid)) {
+      // You can see the address if it wasn't authenticated and applied
+      // to you (partial login).
+      $can_see_ip = true;
+    } else {
+      // You can't see the address when an administrator disables your
+      // account, since it's their address.
+      $can_see_ip = false;
+    }
+
+    if (!$can_see_ip) {
+      return null;
+    }
+
+    return $this->getRemoteAddr();
+  }
+
+
+/* -(  PhabricatorPolicyInterface  )----------------------------------------- */
+
+
+  public function getCapabilities() {
+    return array(
+      PhabricatorPolicyCapability::CAN_VIEW,
+    );
+  }
+
+  public function getPolicy($capability) {
+    switch ($capability) {
+      case PhabricatorPolicyCapability::CAN_VIEW:
+        return PhabricatorPolicies::POLICY_NOONE;
+    }
+  }
+
+  public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
+    if ($viewer->getIsAdmin()) {
+      return true;
+    }
+
+    $viewer_phid = $viewer->getPHID();
+    if ($viewer_phid) {
+      $user_phid = $this->getUserPHID();
+      if ($viewer_phid == $user_phid) {
+        return true;
+      }
+
+      $actor_phid = $this->getActorPHID();
+      if ($viewer_phid == $actor_phid) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  public function describeAutomaticCapability($capability) {
+    return array(
+      pht('Users can view their activity and activity that affects them.'),
+      pht('Administrators can always view all activity.'),
+    );
   }
 
 }

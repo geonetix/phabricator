@@ -1,104 +1,101 @@
 <?php
 
-final class ReleephRequestViewController extends ReleephProjectController {
+final class ReleephRequestViewController
+  extends ReleephBranchController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
+  public function handleRequest(AphrontRequest $request) {
+    $id = $request->getURIData('requestID');
+    $viewer = $request->getViewer();
 
-    $uri_path = $request->getRequestURI()->getPath();
-    $legacy_prefix = '/releeph/request/';
-    if (strncmp($uri_path, $legacy_prefix, strlen($legacy_prefix)) === 0) {
-      return id(new AphrontRedirectResponse())
-        ->setURI('/RQ'.$this->getReleephRequest()->getID());
+    $pull = id(new ReleephRequestQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($id))
+      ->executeOne();
+    if (!$pull) {
+      return new Aphront404Response();
+    }
+    $this->setBranch($pull->getBranch());
+
+    // Redirect older URIs to new "Y" URIs.
+    // TODO: Get rid of this eventually.
+    $actual_path = $request->getRequestURI()->getPath();
+    $expect_path = '/'.$pull->getMonogram();
+    if ($actual_path != $expect_path) {
+      return id(new AphrontRedirectResponse())->setURI($expect_path);
     }
 
-    $releeph_request = $this->getReleephRequest();
-    $releeph_branch  = $this->getReleephBranch();
-    $releeph_project = $this->getReleephProject();
+    // TODO: Break this 1:1 stuff?
+    $branch = $pull->getBranch();
 
-    $releeph_branch->populateReleephRequestHandles(
-      $request->getUser(), array($releeph_request));
+    $field_list = PhabricatorCustomField::getObjectFields(
+      $pull,
+      PhabricatorCustomField::ROLE_VIEW);
 
-    $rq_view =
-      id(new ReleephRequestHeaderListView())
-        ->setReleephProject($releeph_project)
-        ->setReleephBranch($releeph_branch)
-        ->setReleephRequests(array($releeph_request))
-        ->setUser($request->getUser())
-        ->setAphrontRequest($this->getRequest())
-        ->setReloadOnStateChange(true)
-        ->setOriginType('request');
+    $field_list
+      ->setViewer($viewer)
+      ->readFieldsFromStorage($pull);
 
-    $user = $request->getUser();
-
+    // TODO: This should be more modern and general.
     $engine = id(new PhabricatorMarkupEngine())
-      ->setViewer($user);
-
-    $xactions = id(new ReleephRequestTransactionQuery())
-      ->setViewer($user)
-      ->withObjectPHIDs(array($releeph_request->getPHID()))
-      ->execute();
-
-    foreach ($xactions as $xaction) {
-      if ($xaction->getComment()) {
-        $engine->addObject(
-          $xaction->getComment(),
-          PhabricatorApplicationTransactionComment::MARKUP_FIELD_COMMENT);
+      ->setViewer($viewer);
+    foreach ($field_list->getFields() as $field) {
+      if ($field->shouldMarkup()) {
+        $field->setMarkupEngine($engine);
       }
     }
     $engine->process();
 
-    $timeline = id(new PhabricatorApplicationTransactionView())
-      ->setUser($request->getUser())
-      ->setObjectPHID($releeph_request->getPHID())
-      ->setTransactions($xactions)
-      ->setMarkupEngine($engine);
+    $pull_box = id(new ReleephRequestView())
+      ->setUser($viewer)
+      ->setCustomFields($field_list)
+      ->setPullRequest($pull);
 
-    $add_comment_header = id(new PHUIHeaderView())
-      ->setHeader('Plea or yield');
+    $timeline = $this->buildTransactionTimeline(
+      $pull,
+      new ReleephRequestTransactionQuery());
+
+    $add_comment_header = pht('Plea or Yield');
 
     $draft = PhabricatorDraft::newFromUserAndKey(
-      $user,
-      $releeph_request->getPHID());
+      $viewer,
+      $pull->getPHID());
+
+    $title = hsprintf(
+      '%s %s',
+      $pull->getMonogram(),
+      $pull->getSummaryForDisplay());
 
     $add_comment_form = id(new PhabricatorApplicationTransactionCommentView())
-      ->setUser($user)
-      ->setObjectPHID($releeph_request->getPHID())
+      ->setUser($viewer)
+      ->setObjectPHID($pull->getPHID())
       ->setDraft($draft)
+      ->setHeaderText($add_comment_header)
       ->setAction($this->getApplicationURI(
-        '/request/comment/'.$releeph_request->getID().'/'))
-      ->setSubmitButtonName('Comment');
+        '/request/comment/'.$pull->getID().'/'))
+      ->setSubmitButtonName(pht('Comment'));
 
-    $title = hsprintf("RQ%d: %s",
-      $releeph_request->getID(),
-      $releeph_request->getSummaryForDisplay());
+    $crumbs = $this->buildApplicationCrumbs();
+    $crumbs->addTextCrumb($pull->getMonogram(), '/'.$pull->getMonogram());
+    $crumbs->setBorder(true);
 
-    $crumbs = $this->buildApplicationCrumbs()
-      ->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName($releeph_project->getName())
-          ->setHref($releeph_project->getURI()))
-      ->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName($releeph_branch->getDisplayNameWithDetail())
-          ->setHref($releeph_branch->getURI()))
-      ->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName('RQ'.$releeph_request->getID())
-          ->setHref('/RQ'.$releeph_request->getID()));
+    $header = id(new PHUIHeaderView())
+      ->setHeader($title)
+      ->setHeaderIcon('fa-flag-checkered');
 
-    return $this->buildStandardPageResponse(
-      array(
-        $crumbs,
-        array(
-          $rq_view,
-          $timeline,
-          $add_comment_header,
-          $add_comment_form,
-        )
-      ),
-      array(
-        'title' => $title
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter(array(
+        $pull_box,
+        $timeline,
+        $add_comment_form,
       ));
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
+
   }
+
+
 }

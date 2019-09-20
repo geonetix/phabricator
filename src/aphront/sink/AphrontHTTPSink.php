@@ -5,15 +5,21 @@
  * Normally this is just @{class:AphrontPHPHTTPSink}, which uses "echo" and
  * "header()" to emit responses.
  *
- * Mostly, this class allows us to do install security or metrics hooks in the
- * output pipeline.
- *
  * @task write  Writing Response Components
  * @task emit   Emitting the Response
- *
- * @group aphront
  */
-abstract class AphrontHTTPSink {
+abstract class AphrontHTTPSink extends Phobject {
+
+  private $showStackTraces = false;
+
+  final public function setShowStackTraces($show_stack_traces) {
+    $this->showStackTraces = $show_stack_traces;
+    return $this;
+  }
+
+  final public function getShowStackTraces() {
+    return $this->showStackTraces;
+  }
 
 
 /* -(  Writing Response Components  )---------------------------------------- */
@@ -27,7 +33,7 @@ abstract class AphrontHTTPSink {
    */
   final public function writeHTTPStatus($code, $message = '') {
     if (!preg_match('/^\d{3}$/', $code)) {
-      throw new Exception("Malformed HTTP status code '{$code}'!");
+      throw new Exception(pht("Malformed HTTP status code '%s'!", $code));
     }
 
     $code = (int)$code;
@@ -44,14 +50,15 @@ abstract class AphrontHTTPSink {
   final public function writeHeaders(array $headers) {
     foreach ($headers as $header) {
       if (!is_array($header) || count($header) !== 2) {
-        throw new Exception('Malformed header.');
+        throw new Exception(pht('Malformed header.'));
       }
       list($name, $value) = $header;
 
       if (strpos($name, ':') !== false) {
         throw new Exception(
-          "Declining to emit response with malformed HTTP header name: ".
-          $name);
+          pht(
+            'Declining to emit response with malformed HTTP header name: %s',
+            $name));
       }
 
       // Attackers may perform an "HTTP response splitting" attack by making
@@ -66,8 +73,9 @@ abstract class AphrontHTTPSink {
 
       if (preg_match('/[\r\n\0]/', $name.$value)) {
         throw new Exception(
-          "Declining to emit response with unsafe HTTP header: ".
-          "<'".$name."', '".$value."'>.");
+          pht(
+            'Declining to emit response with unsafe HTTP header: %s',
+            "<'".$name."', '".$value."'>."));
       }
     }
 
@@ -96,8 +104,23 @@ abstract class AphrontHTTPSink {
    * @return void
    */
   final public function writeResponse(AphrontResponse $response) {
-    // Do this first, in case it throws.
-    $response_string = $response->buildResponseString();
+    $response->willBeginWrite();
+
+    // Build the content iterator first, in case it throws. Ideally, we'd
+    // prefer to handle exceptions before we emit the response status or any
+    // HTTP headers.
+    $data = $response->getContentIterator();
+
+    // This isn't an exceptionally clean separation of concerns, but we need
+    // to add CSP headers for all response types (including both web pages
+    // and dialogs) and can't determine the correct CSP until after we render
+    // the page (because page elements like Recaptcha may add CSP rules).
+    $static = CelerityAPI::getStaticResourceResponse();
+    foreach ($static->getContentSecurityPolicyURIMap() as $kind => $uris) {
+      foreach ($uris as $uri) {
+        $response->addContentSecurityPolicyURI($kind, $uri);
+      }
+    }
 
     $all_headers = array_merge(
       $response->getHeaders(),
@@ -107,7 +130,34 @@ abstract class AphrontHTTPSink {
       $response->getHTTPResponseCode(),
       $response->getHTTPResponseMessage());
     $this->writeHeaders($all_headers);
-    $this->writeData($response_string);
+
+    // Allow clients an unlimited amount of time to download the response.
+
+    // This allows clients to perform a "slow loris" attack, where they
+    // download a large response very slowly to tie up process slots. However,
+    // concurrent connection limits and "RequestReadTimeout" already prevent
+    // this attack. We could add our own minimum download rate here if we want
+    // to make this easier to configure eventually.
+
+    // For normal page responses, we've fully rendered the page into a string
+    // already so all that's left is writing it to the client.
+
+    // For unusual responses (like large file downloads) we may still be doing
+    // some meaningful work, but in theory that work is intrinsic to streaming
+    // the response.
+
+    set_time_limit(0);
+
+    $abort = false;
+    foreach ($data as $block) {
+      if (!$this->isWritable()) {
+        $abort = true;
+        break;
+      }
+      $this->writeData($block);
+    }
+
+    $response->didCompleteWrite($abort);
   }
 
 
@@ -117,4 +167,6 @@ abstract class AphrontHTTPSink {
   abstract protected function emitHTTPStatus($code, $message = '');
   abstract protected function emitHeader($name, $value);
   abstract protected function emitData($data);
+  abstract protected function isWritable();
+
 }

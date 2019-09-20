@@ -1,11 +1,8 @@
 /**
  * @requires multirow-row-manager
  *           javelin-install
- *           javelin-typeahead
  *           javelin-util
  *           javelin-dom
- *           javelin-tokenizer
- *           javelin-typeahead-preloaded-source
  *           javelin-stratcom
  *           javelin-json
  *           phabricator-prefab
@@ -102,7 +99,7 @@ JX.install('HeraldRuleEditor', {
         this._onactionchange(row);
       }
     },
-    _onsubmit : function(e) {
+    _onsubmit : function() {
       var rule = JX.DOM.find(this._root, 'input', 'rule');
 
       var k;
@@ -111,7 +108,6 @@ JX.install('HeraldRuleEditor', {
         this._config.conditions[k][2] = this._getConditionValue(k);
       }
 
-      var acts = this._config.actions;
       for (k in this._config.actions) {
         this._config.actions[k][1] = this._getActionTarget(k);
       }
@@ -205,49 +201,54 @@ JX.install('HeraldRuleEditor', {
     },
 
     _buildInput : function(type) {
+      var spec = this._config.info.valueMap[type];
+
       var input;
       var get_fn;
       var set_fn;
-      switch (type) {
-        case 'rule':
-          input = this._renderSelect(this._config.template.rules);
+      switch (spec.control) {
+        case 'herald.control.none':
+          input = null;
+          get_fn = JX.bag;
+          set_fn = JX.bag;
+          break;
+        case 'herald.control.text':
+          input = JX.$N('input', {type: 'text'});
           get_fn = function() { return input.value; };
           set_fn = function(v) { input.value = v; };
           break;
-        case 'email':
-        case 'user':
-        case 'repository':
-        case 'tag':
-        case 'package':
-        case 'project':
-        case 'userorproject':
-        case 'buildplan':
-          var tokenizer = this._newTokenizer(type);
+        case 'herald.control.remarkup':
+          input = JX.$N('textarea');
+          get_fn = function() { return input.value; };
+          set_fn = function(v) { input.value = v; };
+          break;
+        case 'herald.control.select':
+          var options;
+
+          // NOTE: This is a hacky special case for "Another Herald Rule",
+          // which we don't currently generate normal options for.
+
+          if (spec.key == 'select.rule') {
+            options = this._config.template.rules;
+          } else {
+            options = spec.template.options;
+          }
+
+          input = this._renderSelect(options);
+          get_fn = function() { return input.value; };
+          set_fn = function(v) { input.value = v; };
+          if (spec.template.default) {
+            set_fn(spec.template.default);
+          }
+          break;
+        case 'herald.control.tokenizer':
+          var tokenizer = this._newTokenizer(spec.template.tokenizer);
           input = tokenizer[0];
           get_fn = tokenizer[1];
           set_fn = tokenizer[2];
           break;
-        case 'none':
-          input = '';
-          get_fn = JX.bag;
-          set_fn = JX.bag;
-          break;
-        case 'contentsource':
-          input = this._renderSelect(this._config.template.contentSources);
-          get_fn = function() { return input.value; };
-          set_fn = function(v) { input.value = v; };
-          set_fn(this._config.template.defaultSource);
-          break;
-        case 'flagcolor':
-          input = this._renderSelect(this._config.template.colors);
-          get_fn = function() { return input.value; };
-          set_fn = function(v) { input.value = v; };
-          set_fn(this._config.template.defaultColor);
-          break;
         default:
-          input = JX.$N('input', {type: 'text'});
-          get_fn = function() { return input.value; };
-          set_fn = function(v) { input.value = v; };
+          JX.$E('No rules to build control "' + spec.control + '".');
           break;
       }
 
@@ -278,32 +279,38 @@ JX.install('HeraldRuleEditor', {
       return node;
     },
 
-    _newTokenizer : function(type, limit) {
-      var template = JX.$N(
-        'div',
-        JX.$H(this._config.template.markup));
-      template = template.firstChild;
-      template.id = '';
+    _newTokenizer : function(spec) {
+      var tokenizerConfig = {
+        src: spec.datasourceURI,
+        placeholder: spec.placeholder,
+        browseURI: spec.browseURI,
+        limit: spec.limit
+      };
 
-      var datasource = new JX.TypeaheadPreloadedSource(
-        this._config.template.source[type]);
-
-      var typeahead = new JX.Typeahead(template);
-      typeahead.setDatasource(datasource);
-
-      var tokenizer = new JX.Tokenizer(template);
-      tokenizer.setLimit(limit);
-      tokenizer.setTypeahead(typeahead);
-      tokenizer.start();
+      var build = JX.Prefab.newTokenizerFromTemplate(
+        this._config.template.markup,
+        tokenizerConfig);
+      build.tokenizer.start();
 
       return [
-        template,
+        build.node,
         function() {
-          return tokenizer.getTokens();
+          return build.tokenizer.getTokens();
         },
         function(map) {
           for (var k in map) {
-            tokenizer.addToken(k, map[k]);
+            var v = map[k];
+
+            // The control value may be set from wire values from the server,
+            // or a transformed value from another control, or a bare string
+            // value from another control.
+            if (typeof v == 'string') {
+              v = v;
+            } else if (!v.hasOwnProperty('id')) {
+              v = JX.Prefab.transformDatasourceResults(v);
+            }
+
+            build.tokenizer.addToken(k, v);
           }
         }];
     },
@@ -322,7 +329,14 @@ JX.install('HeraldRuleEditor', {
     _newCondition : function(data) {
       var row = this._conditionsRowManager.addRow([]);
       var row_id = this._conditionsRowManager.getRowID(row);
-      this._config.conditions[row_id] = data || [null, null, ''];
+
+      var default_condition = [
+        this._config.default.field,
+        this._config.default.condition,
+        null
+      ];
+      this._config.conditions[row_id] = data || default_condition;
+
       var r = this._conditionsRowManager.updateRow(
         row_id,
         this._renderCondition(row_id));
@@ -330,10 +344,17 @@ JX.install('HeraldRuleEditor', {
       this._onfieldchange(r);
     },
     _renderCondition : function(row_id) {
-      var field_select = this._renderSelect(
-        this._config.info.fields,
-        this._config.conditions[row_id][0],
-        'field-select');
+      var groups = this._config.info.fields;
+
+      var attrs = {
+        sigil: 'field-select'
+      };
+
+      var field_select = this._renderGroupSelect(
+        groups,
+        attrs,
+        this._config.conditions[row_id][0]);
+
       var field_cell = JX.$N('td', {sigil: 'field-cell'}, field_select);
 
       var condition_cell = JX.$N('td', {sigil: 'condition-cell'});
@@ -347,8 +368,48 @@ JX.install('HeraldRuleEditor', {
         delete actions[k];
       }
     },
+
+    _renderGroupSelect: function(groups, attrs, value) {
+      var optgroups = [];
+      for (var ii = 0; ii < groups.length; ii++) {
+        var group = groups[ii];
+        var options = [];
+        for (var k in group.options) {
+          var option = group.options[k];
+
+          var name = option.name;
+          var available = option.available;
+
+          // See T7961. If the option is not marked as "available", we only
+          // include it in the dropdown if the dropdown already has it as a
+          // value. We want to hide options provided by applications which are
+          // not installed, but do not want to break existing rules.
+
+          if (available || (k === value)) {
+            options.push(JX.$N('option', {value: k}, name));
+          }
+        }
+        if (options.length) {
+          optgroups.push(JX.$N('optgroup', {label: group.label}, options));
+        }
+      }
+
+      var select = JX.$N('select', attrs, optgroups);
+
+      if (value !== undefined) {
+        select.value = value;
+      }
+
+      return select;
+    },
+
     _newAction : function(data) {
-      data = data || [];
+      var default_action = [
+        this._config.default.action,
+        null
+      ];
+
+      data = data || default_action;
       var temprow = this._actionsRowManager.addRow([]);
       var row_id = this._actionsRowManager.getRowID(temprow);
       this._config.actions[row_id] = data;
@@ -356,11 +417,18 @@ JX.install('HeraldRuleEditor', {
                                                 this._renderAction(data));
       this._onactionchange(r);
     },
+
     _renderAction : function(action) {
-      var action_select = this._renderSelect(
-        this._config.info.actions,
-        action[0],
-        'action-select');
+      var groups = this._config.info.actions;
+      var attrs = {
+        sigil: 'action-select'
+      };
+
+      var action_select = this._renderGroupSelect(
+        groups,
+        attrs,
+        action[0]);
+
       var action_cell = JX.$N('td', {sigil: 'action-cell'}, action_select);
 
       var target_cell = JX.$N(

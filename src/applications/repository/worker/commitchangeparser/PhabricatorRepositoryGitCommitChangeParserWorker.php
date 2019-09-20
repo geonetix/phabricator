@@ -7,38 +7,18 @@ final class PhabricatorRepositoryGitCommitChangeParserWorker
     PhabricatorRepository $repository,
     PhabricatorRepositoryCommit $commit) {
 
-    // Check if the commit has parents. We're testing to see whether it is the
-    // first commit in history (in which case we must use "git log") or some
-    // other commit (in which case we can use "git diff"). We'd rather use
-    // "git diff" because it has the right behavior for merge commits, but
-    // it requires the commit to have a parent that we can diff against. The
-    // first commit doesn't, so "commit^" is not a valid ref.
-    list($parents) = $repository->execxLocalCommand(
-      'log -n1 --format=%s %s',
-      '%P',
-      $commit->getCommitIdentifier());
-
-    $use_log = !strlen(trim($parents));
-    if ($use_log) {
-      // This is the first commit so we need to use "log". We know it's not a
-      // merge commit because it couldn't be merging anything, so this is safe.
-
-      // NOTE: "--pretty=format: " is to disable diff output, we only want the
-      // part we get from "--raw".
-      list($raw) = $repository->execxLocalCommand(
-        'log -n1 -M -C -B --find-copies-harder --raw -t '.
-          '--pretty=format: --abbrev=40 %s',
-        $commit->getCommitIdentifier());
-    } else {
-      // Otherwise, we can use "diff", which will give us output for merges.
-      // We diff against the first parent, as this is generally the expectation
-      // and results in sensible behavior.
-      list($raw) = $repository->execxLocalCommand(
-        'diff -n1 -M -C -B --find-copies-harder --raw -t '.
-          '--abbrev=40 %s^1 %s',
-        $commit->getCommitIdentifier(),
-        $commit->getCommitIdentifier());
-    }
+    $viewer = PhabricatorUser::getOmnipotentUser();
+    $raw = DiffusionQuery::callConduitWithDiffusionRequest(
+      $viewer,
+      DiffusionRequest::newFromDictionary(
+        array(
+          'repository' => $repository,
+          'user' => $viewer,
+        )),
+      'diffusion.internal.gitrawdiffquery',
+      array(
+        'commit' => $commit->getCommitIdentifier(),
+      ));
 
     $changes = array();
     $move_away = array();
@@ -127,7 +107,7 @@ final class PhabricatorRepositoryGitCommitChangeParserWorker
         // NOTE: "U" (unmerged) and "X" (unknown) statuses are also possible
         // in theory but shouldn't appear here.
         default:
-          throw new Exception("Failed to parse line '{$line}'.");
+          throw new Exception(pht("Failed to parse line '%s'.", $line));
       }
 
       $changes[$change_path] = array(
@@ -228,43 +208,21 @@ final class PhabricatorRepositoryGitCommitChangeParserWorker
       }
     }
 
-    $conn_w = $repository->establishConnection('w');
-
-    $changes_sql = array();
+    $results = array();
     foreach ($changes as $change) {
-      $values = array(
-        (int)$change['repositoryID'],
-        (int)$change['pathID'],
-        (int)$change['commitID'],
-        $change['targetPathID']
-          ? (int)$change['targetPathID']
-          : 'null',
-        $change['targetCommitID']
-          ? (int)$change['targetCommitID']
-          : 'null',
-        (int)$change['changeType'],
-        (int)$change['fileType'],
-        (int)$change['isDirect'],
-        (int)$change['commitSequence'],
-      );
-      $changes_sql[] = '('.implode(', ', $values).')';
+      $result = id(new PhabricatorRepositoryParsedChange())
+        ->setPathID($change['pathID'])
+        ->setTargetPathID($change['targetPathID'])
+        ->setTargetCommitID($change['targetCommitID'])
+        ->setChangeType($change['changeType'])
+        ->setFileType($change['fileType'])
+        ->setIsDirect($change['isDirect'])
+        ->setCommitSequence($change['commitSequence']);
+
+      $results[] = $result;
     }
 
-    queryfx(
-      $conn_w,
-      'DELETE FROM %T WHERE commitID = %d',
-      PhabricatorRepository::TABLE_PATHCHANGE,
-      $commit->getID());
-    foreach (array_chunk($changes_sql, 256) as $sql_chunk) {
-      queryfx(
-        $conn_w,
-        'INSERT INTO %T
-          (repositoryID, pathID, commitID, targetPathID, targetCommitID,
-            changeType, fileType, isDirect, commitSequence)
-          VALUES %Q',
-        PhabricatorRepository::TABLE_PATHCHANGE,
-        implode(', ', $sql_chunk));
-    }
+    return $results;
   }
 
 }

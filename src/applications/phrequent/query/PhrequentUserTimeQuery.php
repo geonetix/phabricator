@@ -9,26 +9,29 @@ final class PhrequentUserTimeQuery
   const ORDER_STARTED_DESC  = 3;
   const ORDER_ENDED_ASC     = 4;
   const ORDER_ENDED_DESC    = 5;
-  const ORDER_DURATION_ASC  = 6;
-  const ORDER_DURATION_DESC = 7;
 
   const ENDED_YES = 0;
   const ENDED_NO  = 1;
   const ENDED_ALL = 2;
 
+  private $ids;
   private $userPHIDs;
   private $objectPHIDs;
-  private $order = self::ORDER_ID_ASC;
   private $ended = self::ENDED_ALL;
 
   private $needPreemptingEvents;
 
-  public function withUserPHIDs($user_phids) {
+  public function withIDs(array $ids) {
+    $this->ids = $ids;
+    return $this;
+  }
+
+  public function withUserPHIDs(array $user_phids) {
     $this->userPHIDs = $user_phids;
     return $this;
   }
 
-  public function withObjectPHIDs($object_phids) {
+  public function withObjectPHIDs(array $object_phids) {
     $this->objectPHIDs = $object_phids;
     return $this;
   }
@@ -39,7 +42,29 @@ final class PhrequentUserTimeQuery
   }
 
   public function setOrder($order) {
-    $this->order = $order;
+    switch ($order) {
+      case self::ORDER_ID_ASC:
+        $this->setOrderVector(array('-id'));
+        break;
+      case self::ORDER_ID_DESC:
+        $this->setOrderVector(array('id'));
+        break;
+      case self::ORDER_STARTED_ASC:
+        $this->setOrderVector(array('-start', '-id'));
+        break;
+      case self::ORDER_STARTED_DESC:
+        $this->setOrderVector(array('start', 'id'));
+        break;
+      case self::ORDER_ENDED_ASC:
+        $this->setOrderVector(array('-end', '-id'));
+        break;
+      case self::ORDER_ENDED_DESC:
+        $this->setOrderVector(array('end', 'id'));
+        break;
+      default:
+        throw new Exception(pht('Unknown order "%s".', $order));
+    }
+
     return $this;
   }
 
@@ -48,17 +73,24 @@ final class PhrequentUserTimeQuery
     return $this;
   }
 
-  private function buildWhereClause(AphrontDatabaseConnection $conn) {
+  protected function buildWhereClause(AphrontDatabaseConnection $conn) {
     $where = array();
 
-    if ($this->userPHIDs) {
+    if ($this->ids !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'id IN (%Ld)',
+        $this->ids);
+    }
+
+    if ($this->userPHIDs !== null) {
       $where[] = qsprintf(
         $conn,
         'userPHID IN (%Ls)',
         $this->userPHIDs);
     }
 
-    if ($this->objectPHIDs) {
+    if ($this->objectPHIDs !== null) {
       $where[] = qsprintf(
         $conn,
         'objectPHID IN (%Ls)',
@@ -79,67 +111,34 @@ final class PhrequentUserTimeQuery
           'dateEnded IS NULL');
         break;
       default:
-        throw new Exception("Unknown ended '{$this->ended}'!");
+        throw new Exception(pht("Unknown ended '%s'!", $this->ended));
     }
 
     $where[] = $this->buildPagingClause($conn);
 
-    return $this->formatWhereClause($where);
+    return $this->formatWhereClause($conn, $where);
   }
 
-  protected function getPagingColumn() {
-    switch ($this->order) {
-      case self::ORDER_ID_ASC:
-      case self::ORDER_ID_DESC:
-        return 'id';
-      case self::ORDER_STARTED_ASC:
-      case self::ORDER_STARTED_DESC:
-        return 'dateStarted';
-      case self::ORDER_ENDED_ASC:
-      case self::ORDER_ENDED_DESC:
-        return 'dateEnded';
-      case self::ORDER_DURATION_ASC:
-      case self::ORDER_DURATION_DESC:
-        return 'COALESCE(dateEnded, UNIX_TIMESTAMP()) - dateStarted';
-      default:
-        throw new Exception("Unknown order '{$this->order}'!");
-    }
+  public function getOrderableColumns() {
+    return parent::getOrderableColumns() + array(
+      'start' => array(
+        'column' => 'dateStarted',
+        'type' => 'int',
+      ),
+      'end' => array(
+        'column' => 'dateEnded',
+        'type' => 'int',
+        'null' => 'head',
+      ),
+    );
   }
 
-  protected function getPagingValue($result) {
-    switch ($this->order) {
-      case self::ORDER_ID_ASC:
-      case self::ORDER_ID_DESC:
-        return $result->getID();
-      case self::ORDER_STARTED_ASC:
-      case self::ORDER_STARTED_DESC:
-        return $result->getDateStarted();
-      case self::ORDER_ENDED_ASC:
-      case self::ORDER_ENDED_DESC:
-        return $result->getDateEnded();
-      case self::ORDER_DURATION_ASC:
-      case self::ORDER_DURATION_DESC:
-        return ($result->getDateEnded() || time()) - $result->getDateStarted();
-      default:
-        throw new Exception("Unknown order '{$this->order}'!");
-    }
-  }
-
-  protected function getReversePaging() {
-    switch ($this->order) {
-      case self::ORDER_ID_ASC:
-      case self::ORDER_STARTED_ASC:
-      case self::ORDER_ENDED_ASC:
-      case self::ORDER_DURATION_ASC:
-        return true;
-      case self::ORDER_ID_DESC:
-      case self::ORDER_STARTED_DESC:
-      case self::ORDER_ENDED_DESC:
-      case self::ORDER_DURATION_DESC:
-        return false;
-      default:
-        throw new Exception("Unknown order '{$this->order}'!");
-    }
+  protected function newPagingMapFromPartialObject($object) {
+    return array(
+      'id' => (int)$object->getID(),
+      'start' => (int)$object->getDateStarted(),
+      'end' => (int)$object->getDateEnded(),
+    );
   }
 
   protected function loadPage() {
@@ -177,9 +176,9 @@ final class PhrequentUserTimeQuery
 
       $preempting_events = queryfx_all(
         $conn_r,
-        'SELECT * FROM %T WHERE %Q ORDER BY dateStarted ASC, id ASC',
+        'SELECT * FROM %T WHERE %LO ORDER BY dateStarted ASC, id ASC',
         $usertime->getTableName(),
-        implode(' OR ', $preempt));
+        $preempt);
       $preempting_events = $usertime->loadAllFromArray($preempting_events);
 
       $preempting_events = mgroup($preempting_events, 'getUserPHID');
@@ -199,10 +198,31 @@ final class PhrequentUserTimeQuery
           $u_start = $u_event->getDateStarted();
           $u_end = $u_event->getDateEnded();
 
-          if (($u_start >= $e_start) && ($u_end <= $e_end) &&
-              ($u_end === null || $u_end > $e_start)) {
-            $select[] = $u_event;
+          if ($u_start < $e_start) {
+            // This event started before our event started, so it's not
+            // preempting us.
+            continue;
           }
+
+          if ($u_start == $e_start) {
+            if ($u_event->getID() < $event->getID()) {
+              // This event started at the same time as our event started,
+              // but has a lower ID, so it's not preempting us.
+              continue;
+            }
+          }
+
+          if (($e_end !== null) && ($u_start > $e_end)) {
+            // Our event has ended, and this event started after it ended.
+            continue;
+          }
+
+          if (($u_end !== null) && ($u_end < $e_start)) {
+            // This event ended before our event began.
+            continue;
+          }
+
+          $select[] = $u_event;
         }
 
         $event->attachPreemptingEvents($select);
@@ -218,7 +238,8 @@ final class PhrequentUserTimeQuery
     return array(
       self::ENDED_ALL => pht('All'),
       self::ENDED_NO  => pht('No'),
-      self::ENDED_YES => pht('Yes'));
+      self::ENDED_YES => pht('Yes'),
+    );
   }
 
   public static function getOrderSearchOptions() {
@@ -227,12 +248,12 @@ final class PhrequentUserTimeQuery
       self::ORDER_STARTED_DESC  => pht('by nearest start date'),
       self::ORDER_ENDED_ASC     => pht('by furthest end date'),
       self::ORDER_ENDED_DESC    => pht('by nearest end date'),
-      self::ORDER_DURATION_ASC  => pht('by smallest duration'),
-      self::ORDER_DURATION_DESC => pht('by largest duration'));
+    );
   }
 
   public static function getUserTotalObjectsTracked(
-    PhabricatorUser $user) {
+    PhabricatorUser $user,
+    $limit = PHP_INT_MAX) {
 
     $usertime_dao = new PhrequentUserTime();
     $conn = $usertime_dao->establishConnection('r');
@@ -241,9 +262,11 @@ final class PhrequentUserTimeQuery
       $conn,
       'SELECT COUNT(usertime.id) N FROM %T usertime '.
       'WHERE usertime.userPHID = %s '.
-      'AND usertime.dateEnded IS NULL',
+      'AND usertime.dateEnded IS NULL '.
+      'LIMIT %d',
       $usertime_dao->getTableName(),
-      $user->getPHID());
+      $user->getPHID(),
+      $limit);
     return $count['N'];
   }
 
@@ -302,9 +325,8 @@ final class PhrequentUserTimeQuery
     return $sum_ended['N'] + $sum_not_ended['N'];
   }
 
-
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationPhrequent';
+    return 'PhabricatorPhrequentApplication';
   }
 
 }

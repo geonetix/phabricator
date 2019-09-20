@@ -6,7 +6,7 @@
  *
  * By default, the daemon pulls **every** repository. If you want it to be
  * responsible for only some repositories, you can launch it with a list of
- * PHIDs or callsigns:
+ * repositories:
  *
  *   ./phd launch repositorypulllocal -- X Q Z
  *
@@ -23,21 +23,11 @@
  * repository).
  *
  * @task pull   Pulling Repositories
- * @task git    Git Implementation
- * @task hg     Mercurial Implementation
  */
 final class PhabricatorRepositoryPullLocalDaemon
   extends PhabricatorDaemon {
 
-  private $commitCache = array();
-  private $repair;
-  private $discoveryEngines = array();
-
-  public function setRepair($repair) {
-    $this->repair = $repair;
-    return $this;
-  }
-
+  private $statusMessageCursor = 0;
 
 /* -(  Pulling Repositories  )----------------------------------------------- */
 
@@ -45,7 +35,7 @@ final class PhabricatorRepositoryPullLocalDaemon
   /**
    * @task pull
    */
-  public function run() {
+  protected function run() {
     $argv = $this->getArgv();
     array_unshift($argv, __CLASS__);
     $args = new PhutilArgumentParser($argv);
@@ -53,24 +43,24 @@ final class PhabricatorRepositoryPullLocalDaemon
       array(
         array(
           'name'      => 'no-discovery',
-          'help'      => 'Pull only, without discovering commits.',
+          'help'      => pht('Pull only, without discovering commits.'),
         ),
         array(
           'name'      => 'not',
           'param'     => 'repository',
           'repeat'    => true,
-          'help'      => 'Do not pull __repository__.',
+          'help'      => pht('Do not pull __repository__.'),
         ),
         array(
           'name'      => 'repositories',
           'wildcard'  => true,
-          'help'      => 'Pull specific __repositories__ instead of all.',
+          'help'      => pht('Pull specific __repositories__ instead of all.'),
         ),
       ));
 
     $no_discovery   = $args->getArg('no-discovery');
-    $repo_names     = $args->getArg('repositories');
-    $exclude_names  = $args->getArg('not');
+    $include = $args->getArg('repositories');
+    $exclude = $args->getArg('not');
 
     // Each repository has an individual pull frequency; after we pull it,
     // wait that long to pull it again. When we start up, try to pull everything
@@ -78,27 +68,66 @@ final class PhabricatorRepositoryPullLocalDaemon
     $retry_after = array();
 
     $min_sleep = 15;
+    $max_sleep = phutil_units('5 minutes in seconds');
+    $max_futures = 4;
+    $futures = array();
+    $queue = array();
 
-    while (true) {
-      $repositories = $this->loadRepositories($repo_names);
-      if ($exclude_names) {
-        $exclude = $this->loadRepositories($exclude_names);
-        $repositories = array_diff_key($repositories, $exclude);
-      }
+    $sync_wait = phutil_units('2 minutes in seconds');
+    $last_sync = array();
 
-      // Shuffle the repositories, then re-key the array since shuffle()
-      // discards keys. This is mostly for startup, we'll use soft priorities
-      // later.
-      shuffle($repositories);
-      $repositories = mpull($repositories, null, 'getID');
+    while (!$this->shouldExit()) {
+      PhabricatorCaches::destroyRequestCache();
+      $device = AlmanacKeys::getLiveDevice();
+
+      $pullable = $this->loadPullableRepositories($include, $exclude, $device);
 
       // If any repositories have the NEEDS_UPDATE flag set, pull them
       // as soon as possible.
-      $type_need_update = PhabricatorRepositoryStatusMessage::TYPE_NEEDS_UPDATE;
-      $need_update_messages = id(new PhabricatorRepositoryStatusMessage())
-        ->loadAllWhere('statusType = %s', $type_need_update);
+      $need_update_messages = $this->loadRepositoryUpdateMessages(true);
       foreach ($need_update_messages as $message) {
+        $repo = idx($pullable, $message->getRepositoryID());
+        if (!$repo) {
+          continue;
+        }
+
+        $this->log(
+          pht(
+            'Got an update message for repository "%s"!',
+            $repo->getMonogram()));
+
         $retry_after[$message->getRepositoryID()] = time();
+      }
+
+      if ($device) {
+        $unsynchronized = $this->loadUnsynchronizedRepositories($device);
+        $now = PhabricatorTime::getNow();
+        foreach ($unsynchronized as $repository) {
+          $id = $repository->getID();
+
+          $this->log(
+            pht(
+              'Cluster repository ("%s") is out of sync on this node ("%s").',
+              $repository->getDisplayName(),
+              $device->getName()));
+
+          // Don't let out-of-sync conditions trigger updates too frequently,
+          // since we don't want to get trapped in a death spiral if sync is
+          // failing.
+          $sync_at = idx($last_sync, $id, 0);
+          $wait_duration = ($now - $sync_at);
+          if ($wait_duration < $sync_wait) {
+            $this->log(
+              pht(
+                'Skipping forced out-of-sync update because the last update '.
+                'was too recent (%s seconds ago).',
+                $wait_duration));
+            continue;
+          }
+
+          $last_sync[$id] = $now;
+          $retry_after[$id] = $now;
+        }
       }
 
       // If any repositories were deleted, remove them from the retry timer map
@@ -106,635 +135,461 @@ final class PhabricatorRepositoryPullLocalDaemon
       // causes us to sleep for the minimum amount of time.
       $retry_after = array_select_keys(
         $retry_after,
-        array_keys($repositories));
+        array_keys($pullable));
 
-      // Assign soft priorities to repositories based on how frequently they
-      // should pull again.
-      asort($retry_after);
-      $repositories = array_select_keys(
-        $repositories,
-        array_keys($retry_after)) + $repositories;
+      // Figure out which repositories we need to queue for an update.
+      foreach ($pullable as $id => $repository) {
+        $now = PhabricatorTime::getNow();
+        $display_name = $repository->getDisplayName();
 
-      foreach ($repositories as $id => $repository) {
-        $after = idx($retry_after, $id, 0);
+        if (isset($futures[$id])) {
+          $this->log(
+            pht(
+              'Repository "%s" is currently updating.',
+              $display_name));
+          continue;
+        }
+
+        if (isset($queue[$id])) {
+          $this->log(
+            pht(
+              'Repository "%s" is already queued.',
+              $display_name));
+          continue;
+        }
+
+        $after = idx($retry_after, $id);
+        if (!$after) {
+          $smart_wait = $repository->loadUpdateInterval($min_sleep);
+          $last_update = $this->loadLastUpdate($repository);
+
+          $after = $last_update + $smart_wait;
+          $retry_after[$id] = $after;
+
+          $this->log(
+            pht(
+              'Scheduling repository "%s" with an update window of %s '.
+              'second(s). Last update was %s second(s) ago.',
+              $display_name,
+              new PhutilNumber($smart_wait),
+              new PhutilNumber($now - $last_update)));
+        }
+
         if ($after > time()) {
+          $this->log(
+            pht(
+              'Repository "%s" is not due for an update for %s second(s).',
+              $display_name,
+              new PhutilNumber($after - $now)));
           continue;
         }
 
-        $tracked = $repository->isTracked();
-        if (!$tracked) {
-          continue;
-        }
+        $this->log(
+          pht(
+            'Scheduling repository "%s" for an update (%s seconds overdue).',
+            $display_name,
+            new PhutilNumber($now - $after)));
 
-        $callsign = $repository->getCallsign();
+        $queue[$id] = $after;
+      }
 
-        try {
-          $this->log("Updating repository '{$callsign}'.");
+      // Process repositories in the order they became candidates for updates.
+      asort($queue);
 
-          id(new PhabricatorRepositoryPullEngine())
-            ->setRepository($repository)
-            ->pullRepository();
-
-          if (!$no_discovery) {
-            // TODO: It would be nice to discover only if we pulled something,
-            // but this isn't totally trivial. It's slightly more complicated
-            // with hosted repositories, too.
-
-            $lock_name = get_class($this).':'.$callsign;
-            $lock = PhabricatorGlobalLock::newLock($lock_name);
-            $lock->lock();
-
-            $repository->writeStatusMessage(
-              PhabricatorRepositoryStatusMessage::TYPE_NEEDS_UPDATE,
-              null);
-
-            try {
-              $this->discoverRepository($repository);
-              $repository->writeStatusMessage(
-                PhabricatorRepositoryStatusMessage::TYPE_FETCH,
-                PhabricatorRepositoryStatusMessage::CODE_OKAY);
-            } catch (Exception $ex) {
-              $repository->writeStatusMessage(
-                PhabricatorRepositoryStatusMessage::TYPE_FETCH,
-                PhabricatorRepositoryStatusMessage::CODE_ERROR,
-                array(
-                  'message' => pht(
-                    'Error updating working copy: %s', $ex->getMessage()),
-                ));
-              $lock->unlock();
-              throw $ex;
-            }
-
-            $lock->unlock();
+      // Dequeue repositories until we hit maximum parallelism.
+      while ($queue && (count($futures) < $max_futures)) {
+        foreach ($queue as $id => $time) {
+          $repository = idx($pullable, $id);
+          if (!$repository) {
+            $this->log(
+              pht('Repository %s is no longer pullable; skipping.', $id));
+            unset($queue[$id]);
+            continue;
           }
 
-          $sleep_for = $repository->getDetail('pull-frequency', $min_sleep);
-          $retry_after[$id] = time() + $sleep_for;
-        } catch (PhutilLockException $ex) {
-          $retry_after[$id] = time() + $min_sleep;
-          $this->log("Failed to acquire lock.");
-        } catch (Exception $ex) {
-          $retry_after[$id] = time() + $min_sleep;
+          $display_name = $repository->getDisplayName();
+          $this->log(
+            pht(
+              'Starting update for repository "%s".',
+              $display_name));
 
-          $proxy = new PhutilProxyException(
-            "Error while fetching changes to the '{$callsign}' repository.",
-            $ex);
-          phlog($proxy);
+          unset($queue[$id]);
+          $futures[$id] = $this->buildUpdateFuture(
+            $repository,
+            $no_discovery);
+
+          break;
+        }
+      }
+
+      if ($queue) {
+        $this->log(
+          pht(
+            'Not enough process slots to schedule the other %s '.
+            'repository(s) for updates yet.',
+            phutil_count($queue)));
+      }
+
+      if ($futures) {
+        $iterator = id(new FutureIterator($futures))
+          ->setUpdateInterval($min_sleep);
+
+        foreach ($iterator as $id => $future) {
+          $this->stillWorking();
+
+          if ($future === null) {
+            $this->log(pht('Waiting for updates to complete...'));
+            $this->stillWorking();
+
+            if ($this->loadRepositoryUpdateMessages()) {
+              $this->log(pht('Interrupted by pending updates!'));
+              break;
+            }
+
+            continue;
+          }
+
+          unset($futures[$id]);
+          $retry_after[$id] = $this->resolveUpdateFuture(
+            $pullable[$id],
+            $future,
+            $min_sleep);
+
+          // We have a free slot now, so go try to fill it.
+          break;
         }
 
-        $this->stillWorking();
+        // Jump back into prioritization if we had any futures to deal with.
+        continue;
       }
 
-      if ($retry_after) {
-        $sleep_until = max(min($retry_after), time() + $min_sleep);
-      } else {
-        $sleep_until = time() + $min_sleep;
+      $should_hibernate = $this->waitForUpdates($max_sleep, $retry_after);
+      if ($should_hibernate) {
+        break;
       }
-
-      $this->sleep($sleep_until - time());
     }
+
   }
 
 
   /**
    * @task pull
    */
-  protected function loadRepositories(array $names) {
+  private function buildUpdateFuture(
+    PhabricatorRepository $repository,
+    $no_discovery) {
+
+    $bin = dirname(phutil_get_library_root('phabricator')).'/bin/repository';
+
+    $flags = array();
+    if ($no_discovery) {
+      $flags[] = '--no-discovery';
+    }
+
+    $monogram = $repository->getMonogram();
+    $future = new ExecFuture('%s update %Ls -- %s', $bin, $flags, $monogram);
+
+    // Sometimes, the underlying VCS commands will hang indefinitely. We've
+    // observed this occasionally with GitHub, and other users have observed
+    // it with other VCS servers.
+
+    // To limit the damage this can cause, kill the update out after a
+    // reasonable amount of time, under the assumption that it has hung.
+
+    // Since it's hard to know what a "reasonable" amount of time is given that
+    // users may be downloading a repository full of pirated movies over a
+    // potato, these limits are fairly generous. Repositories exceeding these
+    // limits can be manually pulled with `bin/repository update X`, which can
+    // just run for as long as it wants.
+
+    if ($repository->isImporting()) {
+      $timeout = phutil_units('4 hours in seconds');
+    } else {
+      $timeout = phutil_units('15 minutes in seconds');
+    }
+
+    $future->setTimeout($timeout);
+
+    // The default TERM inherited by this process is "unknown", which causes PHP
+    // to produce a warning upon startup.  Override it to squash this output to
+    // STDERR.
+    $future->updateEnv('TERM', 'dumb');
+
+    return $future;
+  }
+
+
+  /**
+   * Check for repositories that should be updated immediately.
+   *
+   * With the `$consume` flag, an internal cursor will also be incremented so
+   * that these messages are not returned by subsequent calls.
+   *
+   * @param bool Pass `true` to consume these messages, so the process will
+   *   not see them again.
+   * @return list<wild> Pending update messages.
+   *
+   * @task pull
+   */
+  private function loadRepositoryUpdateMessages($consume = false) {
+    $type_need_update = PhabricatorRepositoryStatusMessage::TYPE_NEEDS_UPDATE;
+    $messages = id(new PhabricatorRepositoryStatusMessage())->loadAllWhere(
+      'statusType = %s AND id > %d',
+      $type_need_update,
+      $this->statusMessageCursor);
+
+    // Keep track of messages we've seen so that we don't load them again.
+    // If we reload messages, we can get stuck a loop if we have a failing
+    // repository: we update immediately in response to the message, but do
+    // not clear the message because the update does not succeed. We then
+    // immediately retry. Instead, messages are only permitted to trigger
+    // an immediate update once.
+
+    if ($consume) {
+      foreach ($messages as $message) {
+        $this->statusMessageCursor = max(
+          $this->statusMessageCursor,
+          $message->getID());
+      }
+    }
+
+    return $messages;
+  }
+
+
+  /**
+   * @task pull
+   */
+  private function loadLastUpdate(PhabricatorRepository $repository) {
+    $table = new PhabricatorRepositoryStatusMessage();
+    $conn = $table->establishConnection('r');
+
+    $epoch = queryfx_one(
+      $conn,
+      'SELECT MAX(epoch) last_update FROM %T
+        WHERE repositoryID = %d
+          AND statusType IN (%Ls)',
+      $table->getTableName(),
+      $repository->getID(),
+      array(
+        PhabricatorRepositoryStatusMessage::TYPE_INIT,
+        PhabricatorRepositoryStatusMessage::TYPE_FETCH,
+      ));
+
+    if ($epoch) {
+      return (int)$epoch['last_update'];
+    }
+
+    return PhabricatorTime::getNow();
+  }
+
+  /**
+   * @task pull
+   */
+  private function loadPullableRepositories(
+    array $include,
+    array $exclude,
+    AlmanacDevice $device = null) {
+
     $query = id(new PhabricatorRepositoryQuery())
       ->setViewer($this->getViewer());
 
-    if ($names) {
-      $query->withCallsigns($names);
+    if ($include) {
+      $query->withIdentifiers($include);
     }
 
-    $repos = $query->execute();
+    $repositories = $query->execute();
+    $repositories = mpull($repositories, null, 'getPHID');
 
-    if ($names) {
-      $by_callsign = mpull($repos, null, 'getCallsign');
-      foreach ($names as $name) {
-        if (empty($by_callsign[$name])) {
+    if ($include) {
+      $map = $query->getIdentifierMap();
+      foreach ($include as $identifier) {
+        if (empty($map[$identifier])) {
           throw new Exception(
-            "No repository exists with callsign '{$name}'!");
+            pht(
+              'No repository "%s" exists!',
+              $identifier));
         }
       }
     }
 
-    return $repos;
-  }
+    if ($exclude) {
+      $xquery = id(new PhabricatorRepositoryQuery())
+        ->setViewer($this->getViewer())
+        ->withIdentifiers($exclude);
 
-  public function discoverRepository(PhabricatorRepository $repository) {
-    $vcs = $repository->getVersionControlSystem();
+      $excluded_repos = $xquery->execute();
+      $xmap = $xquery->getIdentifierMap();
 
-    $result = null;
-    $refs = null;
-    switch ($vcs) {
-      case PhabricatorRepositoryType::REPOSITORY_TYPE_GIT:
-        $result = $this->executeGitDiscover($repository);
-        break;
-      case PhabricatorRepositoryType::REPOSITORY_TYPE_SVN:
-      case PhabricatorRepositoryType::REPOSITORY_TYPE_MERCURIAL:
-        $refs = $this->getDiscoveryEngine($repository)
-          ->discoverCommits();
-        break;
-      default:
-        throw new Exception("Unknown VCS '{$vcs}'!");
-    }
+      foreach ($exclude as $identifier) {
+        if (empty($xmap[$identifier])) {
+          throw new Exception(
+            pht(
+              'No repository "%s" exists!',
+              $identifier));
+        }
+      }
 
-    if ($refs !== null) {
-      foreach ($refs as $ref) {
-        $this->recordCommit(
-          $repository,
-          $ref->getIdentifier(),
-          $ref->getEpoch(),
-          $ref->getBranch());
+      foreach ($excluded_repos as $excluded_repo) {
+        unset($repositories[$excluded_repo->getPHID()]);
       }
     }
 
-    $this->checkIfRepositoryIsFullyImported($repository);
-
-    if ($refs !== null) {
-      return (bool)count($refs);
-    } else {
-      return $result;
+    foreach ($repositories as $key => $repository) {
+      if (!$repository->isTracked()) {
+        unset($repositories[$key]);
+      }
     }
+
+    $viewer = $this->getViewer();
+
+    $filter = id(new DiffusionLocalRepositoryFilter())
+      ->setViewer($viewer)
+      ->setDevice($device)
+      ->setRepositories($repositories);
+
+    $repositories = $filter->execute();
+
+    foreach ($filter->getRejectionReasons() as $reason) {
+      $this->log($reason);
+    }
+
+    // Shuffle the repositories, then re-key the array since shuffle()
+    // discards keys. This is mostly for startup, we'll use soft priorities
+    // later.
+    shuffle($repositories);
+    $repositories = mpull($repositories, null, 'getID');
+
+    return $repositories;
   }
 
-  private function getDiscoveryEngine(PhabricatorRepository $repository) {
-    $id = $repository->getID();
-    if (empty($this->discoveryEngines[$id])) {
-      $engine = id(new PhabricatorRepositoryDiscoveryEngine())
-          ->setRepository($repository)
-          ->setVerbose($this->getVerbose())
-          ->setRepairMode($this->repair);
 
-      $this->discoveryEngines[$id] = $engine;
-    }
-    return $this->discoveryEngines[$id];
-  }
-
-  private function isKnownCommit(
+  /**
+   * @task pull
+   */
+  private function resolveUpdateFuture(
     PhabricatorRepository $repository,
-    $target) {
+    ExecFuture $future,
+    $min_sleep) {
 
-    if ($this->getCache($repository, $target)) {
-      return true;
+    $display_name = $repository->getDisplayName();
+
+    $this->log(pht('Resolving update for "%s".', $display_name));
+
+    try {
+      list($stdout, $stderr) = $future->resolvex();
+    } catch (Exception $ex) {
+      $proxy = new PhutilProxyException(
+        pht(
+          'Error while updating the "%s" repository.',
+          $display_name),
+        $ex);
+      phlog($proxy);
+
+      $smart_wait = $repository->loadUpdateInterval($min_sleep);
+      return PhabricatorTime::getNow() + $smart_wait;
     }
 
-    if ($this->repair) {
-      // In repair mode, rediscover the entire repository, ignoring the
-      // database state. We can hit the local cache above, but if we miss it
-      // stop the script from going to the database cache.
-      return false;
+    if (strlen($stderr)) {
+      $stderr_msg = pht(
+        'Unexpected output while updating repository "%s": %s',
+        $display_name,
+        $stderr);
+      phlog($stderr_msg);
     }
 
-    $commit = id(new PhabricatorRepositoryCommit())->loadOneWhere(
-      'repositoryID = %d AND commitIdentifier = %s',
-      $repository->getID(),
-      $target);
+    $smart_wait = $repository->loadUpdateInterval($min_sleep);
 
-    if (!$commit) {
-      return false;
-    }
+    $this->log(
+      pht(
+        'Based on activity in repository "%s", considering a wait of %s '.
+        'seconds before update.',
+        $display_name,
+        new PhutilNumber($smart_wait)));
 
-    $this->setCache($repository, $target);
-    while (count($this->commitCache) > 2048) {
-      array_shift($this->commitCache);
-    }
-
-    return true;
+    return PhabricatorTime::getNow() + $smart_wait;
   }
 
-  private function isKnownCommitOnAnyAutocloseBranch(
-    PhabricatorRepository $repository,
-    $target) {
 
-    $commit = id(new PhabricatorRepositoryCommit())->loadOneWhere(
-      'repositoryID = %d AND commitIdentifier = %s',
-      $repository->getID(),
-      $target);
 
-    if (!$commit) {
-      $callsign = $repository->getCallsign();
+  /**
+   * Sleep for a short period of time, waiting for update messages from the
+   *
+   *
+   * @task pull
+   */
+  private function waitForUpdates($min_sleep, array $retry_after) {
+    $this->log(
+      pht('No repositories need updates right now, sleeping...'));
 
-      $console = PhutilConsole::getConsole();
-      $console->writeErr(
-        "WARNING: Repository '%s' is missing commits ('%s' is missing from ".
-        "history). Run '%s' to repair the repository.\n",
-        $callsign,
-        $target,
-        "bin/repository discover --repair {$callsign}");
-
-      return false;
+    $sleep_until = time() + $min_sleep;
+    if ($retry_after) {
+      $sleep_until = min($sleep_until, min($retry_after));
     }
 
-    $data = $commit->loadCommitData();
-    if (!$data) {
-      return false;
-    }
+    while (($sleep_until - time()) > 0) {
+      $sleep_duration = ($sleep_until - time());
 
-    if ($repository->shouldAutocloseCommit($commit, $data)) {
-      return true;
+      if ($this->shouldHibernate($sleep_duration)) {
+        return true;
+      }
+
+      $this->log(
+        pht(
+          'Sleeping for %s more second(s)...',
+          new PhutilNumber($sleep_duration)));
+
+      $this->sleep(1);
+
+      if ($this->shouldExit()) {
+        $this->log(pht('Awakened from sleep by graceful shutdown!'));
+        return false;
+      }
+
+      if ($this->loadRepositoryUpdateMessages()) {
+        $this->log(pht('Awakened from sleep by pending updates!'));
+        break;
+      }
     }
 
     return false;
   }
 
-  private function recordCommit(
-    PhabricatorRepository $repository,
-    $commit_identifier,
-    $epoch,
-    $branch = null) {
+  private function loadUnsynchronizedRepositories(AlmanacDevice $device) {
+    $viewer = $this->getViewer();
+    $table = new PhabricatorRepositoryWorkingCopyVersion();
+    $conn = $table->establishConnection('r');
 
-    $commit = new PhabricatorRepositoryCommit();
-    $commit->setRepositoryID($repository->getID());
-    $commit->setCommitIdentifier($commit_identifier);
-    $commit->setEpoch($epoch);
+    $our_versions = queryfx_all(
+      $conn,
+      'SELECT repositoryPHID, repositoryVersion FROM %R WHERE devicePHID = %s',
+      $table,
+      $device->getPHID());
+    $our_versions = ipull($our_versions, 'repositoryVersion', 'repositoryPHID');
 
-    $data = new PhabricatorRepositoryCommitData();
-    if ($branch) {
-      $data->setCommitDetail('seenOnBranches', array($branch));
-    }
+    $max_versions = queryfx_all(
+      $conn,
+      'SELECT repositoryPHID, MAX(repositoryVersion) maxVersion FROM %R
+        GROUP BY repositoryPHID',
+      $table);
+    $max_versions = ipull($max_versions, 'maxVersion', 'repositoryPHID');
 
-    try {
-      $commit->openTransaction();
-        $commit->save();
-        $data->setCommitID($commit->getID());
-        $data->save();
-      $commit->saveTransaction();
-
-      $this->insertTask($repository, $commit);
-
-      queryfx(
-        $repository->establishConnection('w'),
-        'INSERT INTO %T (repositoryID, size, lastCommitID, epoch)
-          VALUES (%d, 1, %d, %d)
-          ON DUPLICATE KEY UPDATE
-            size = size + 1,
-            lastCommitID =
-              IF(VALUES(epoch) > epoch, VALUES(lastCommitID), lastCommitID),
-            epoch = IF(VALUES(epoch) > epoch, VALUES(epoch), epoch)',
-        PhabricatorRepository::TABLE_SUMMARY,
-        $repository->getID(),
-        $commit->getID(),
-        $epoch);
-
-      if ($this->repair) {
-        // Normally, the query should throw a duplicate key exception. If we
-        // reach this in repair mode, we've actually performed a repair.
-        $this->log("Repaired commit '{$commit_identifier}'.");
+    $unsynchronized_phids = array();
+    foreach ($max_versions as $repository_phid => $max_version) {
+      $our_version = idx($our_versions, $repository_phid);
+      if (($our_version === null) || ($our_version < $max_version)) {
+        $unsynchronized_phids[] = $repository_phid;
       }
-
-      $this->setCache($repository, $commit_identifier);
-
-      PhutilEventEngine::dispatchEvent(
-        new PhabricatorEvent(
-          PhabricatorEventType::TYPE_DIFFUSION_DIDDISCOVERCOMMIT,
-          array(
-            'repository'  => $repository,
-            'commit'      => $commit,
-          )));
-
-    } catch (AphrontQueryDuplicateKeyException $ex) {
-      $commit->killTransaction();
-      // Ignore. This can happen because we discover the same new commit
-      // more than once when looking at history, or because of races or
-      // data inconsistency or cosmic radiation; in any case, we're still
-      // in a good state if we ignore the failure.
-      $this->setCache($repository, $commit_identifier);
-    }
-  }
-
-  private function updateCommit(
-    PhabricatorRepository $repository,
-    $commit_identifier,
-    $branch) {
-
-    $commit = id(new PhabricatorRepositoryCommit())->loadOneWhere(
-      'repositoryID = %d AND commitIdentifier = %s',
-      $repository->getID(),
-      $commit_identifier);
-
-    if (!$commit) {
-      // This can happen if the phabricator DB doesn't have the commit info,
-      // or the commit is so big that phabricator couldn't parse it. In this
-      // case we just ignore it.
-      return;
     }
 
-    $data = id(new PhabricatorRepositoryCommitData())->loadOneWhere(
-      'commitID = %d',
-      $commit->getID());
-    if (!$data) {
-      $data = new PhabricatorRepositoryCommitData();
-      $data->setCommitID($commit->getID());
-    }
-    $branches = $data->getCommitDetail('seenOnBranches', array());
-    $branches[] = $branch;
-    $data->setCommitDetail('seenOnBranches', $branches);
-    $data->save();
-
-    $this->insertTask(
-      $repository,
-      $commit,
-      array(
-        'only' => true
-      ));
-  }
-
-  private function insertTask(
-    PhabricatorRepository $repository,
-    PhabricatorRepositoryCommit $commit,
-    $data = array()) {
-
-    $vcs = $repository->getVersionControlSystem();
-    switch ($vcs) {
-      case PhabricatorRepositoryType::REPOSITORY_TYPE_GIT:
-        $class = 'PhabricatorRepositoryGitCommitMessageParserWorker';
-        break;
-      case PhabricatorRepositoryType::REPOSITORY_TYPE_SVN:
-        $class = 'PhabricatorRepositorySvnCommitMessageParserWorker';
-        break;
-      case PhabricatorRepositoryType::REPOSITORY_TYPE_MERCURIAL:
-        $class = 'PhabricatorRepositoryMercurialCommitMessageParserWorker';
-        break;
-      default:
-        throw new Exception("Unknown repository type '{$vcs}'!");
+    if (!$unsynchronized_phids) {
+      return array();
     }
 
-    $data['commitID'] = $commit->getID();
-
-    PhabricatorWorker::scheduleTask($class, $data);
-  }
-
-
-  private function setCache(
-    PhabricatorRepository $repository,
-    $commit_identifier) {
-
-    $key = $this->getCacheKey($repository, $commit_identifier);
-    $this->commitCache[$key] = true;
-  }
-
-  private function getCache(
-    PhabricatorRepository $repository,
-    $commit_identifier) {
-
-    $key = $this->getCacheKey($repository, $commit_identifier);
-    return idx($this->commitCache, $key, false);
-  }
-
-  private function getCacheKey(
-    PhabricatorRepository $repository,
-    $commit_identifier) {
-
-    return $repository->getID().':'.$commit_identifier;
-  }
-
-  private function checkIfRepositoryIsFullyImported(
-    PhabricatorRepository $repository) {
-
-    // Check if the repository has the "Importing" flag set. We want to clear
-    // the flag if we can.
-    $importing = $repository->getDetail('importing');
-    if (!$importing) {
-      // This repository isn't marked as "Importing", so we're done.
-      return;
-    }
-
-    // Look for any commit which hasn't imported.
-    $unparsed_commit = queryfx_one(
-      $repository->establishConnection('r'),
-      'SELECT * FROM %T WHERE repositoryID = %d AND importStatus != %d
-        LIMIT 1',
-      id(new PhabricatorRepositoryCommit())->getTableName(),
-      $repository->getID(),
-      PhabricatorRepositoryCommit::IMPORTED_ALL);
-    if ($unparsed_commit) {
-      // We found a commit which still needs to import, so we can't clear the
-      // flag.
-      return;
-    }
-
-    // Clear the "importing" flag.
-    $repository->openTransaction();
-      $repository->beginReadLocking();
-        $repository = $repository->reload();
-        $repository->setDetail('importing', false);
-        $repository->save();
-      $repository->endReadLocking();
-    $repository->saveTransaction();
-  }
-
-/* -(  Git Implementation  )------------------------------------------------- */
-
-
-  /**
-   * @task git
-   */
-  private function executeGitDiscover(
-    PhabricatorRepository $repository) {
-
-    if (!$repository->isHosted()) {
-      list($remotes) = $repository->execxLocalCommand(
-        'remote show -n origin');
-
-      $matches = null;
-      if (!preg_match('/^\s*Fetch URL:\s*(.*?)\s*$/m', $remotes, $matches)) {
-        throw new Exception(
-          "Expected 'Fetch URL' in 'git remote show -n origin'.");
-      }
-
-      self::executeGitVerifySameOrigin(
-        $matches[1],
-        $repository->getRemoteURI(),
-        $repository->getLocalPath());
-    }
-
-    $refs = id(new DiffusionLowLevelGitRefQuery())
-      ->setRepository($repository)
-      ->withIsOriginBranch(true)
+    return id(new PhabricatorRepositoryQuery())
+      ->setViewer($viewer)
+      ->withPHIDs($unsynchronized_phids)
       ->execute();
-
-    $branches = mpull($refs, 'getCommitIdentifier', 'getShortName');
-
-    if (!$branches) {
-      // This repository has no branches at all, so we don't need to do
-      // anything. Generally, this means the repository is empty.
-      return;
-    }
-
-    $callsign = $repository->getCallsign();
-
-    $tracked_something = false;
-
-    $this->log("Discovering commits in repository '{$callsign}'...");
-    foreach ($branches as $name => $commit) {
-      $this->log("Examining branch '{$name}', at {$commit}.");
-      if (!$repository->shouldTrackBranch($name)) {
-        $this->log("Skipping, branch is untracked.");
-        continue;
-      }
-
-      $tracked_something = true;
-
-      if ($this->isKnownCommit($repository, $commit)) {
-        $this->log("Skipping, HEAD is known.");
-        continue;
-      }
-
-      $this->log("Looking for new commits.");
-      $this->executeGitDiscoverCommit($repository, $commit, $name, false);
-    }
-
-    if (!$tracked_something) {
-      $repo_name = $repository->getName();
-      $repo_callsign = $repository->getCallsign();
-      throw new Exception(
-        "Repository r{$repo_callsign} '{$repo_name}' has no tracked branches! ".
-        "Verify that your branch filtering settings are correct.");
-    }
-
-
-    $this->log("Discovering commits on autoclose branches...");
-    foreach ($branches as $name => $commit) {
-      $this->log("Examining branch '{$name}', at {$commit}'.");
-      if (!$repository->shouldTrackBranch($name)) {
-        $this->log("Skipping, branch is untracked.");
-        continue;
-      }
-
-      if (!$repository->shouldAutocloseBranch($name)) {
-        $this->log("Skipping, branch is not autoclose.");
-        continue;
-      }
-
-      if ($this->isKnownCommitOnAnyAutocloseBranch($repository, $commit)) {
-        $this->log("Skipping, commit is known on an autoclose branch.");
-        continue;
-      }
-
-      $this->log("Looking for new autoclose commits.");
-      $this->executeGitDiscoverCommit($repository, $commit, $name, true);
-    }
   }
-
-
-  /**
-   * @task git
-   */
-  private function executeGitDiscoverCommit(
-    PhabricatorRepository $repository,
-    $commit,
-    $branch,
-    $autoclose) {
-
-    $discover = array($commit);
-    $insert = array($commit);
-
-    $seen_parent = array();
-
-    $stream = new PhabricatorGitGraphStream($repository, $commit);
-
-    while (true) {
-      $target = array_pop($discover);
-      $parents = $stream->getParents($target);
-      foreach ($parents as $parent) {
-        if (isset($seen_parent[$parent])) {
-          // We end up in a loop here somehow when we parse Arcanist if we
-          // don't do this. TODO: Figure out why and draw a pretty diagram
-          // since it's not evident how parsing a DAG with this causes the
-          // loop to stop terminating.
-          continue;
-        }
-        $seen_parent[$parent] = true;
-        if ($autoclose) {
-          $known = $this->isKnownCommitOnAnyAutocloseBranch(
-            $repository,
-            $parent);
-        } else {
-          $known = $this->isKnownCommit($repository, $parent);
-        }
-        if (!$known) {
-          $this->log("Discovered commit '{$parent}'.");
-          $discover[] = $parent;
-          $insert[] = $parent;
-        }
-      }
-      if (empty($discover)) {
-        break;
-      }
-    }
-
-    $n = count($insert);
-    if ($autoclose) {
-      $this->log("Found {$n} new autoclose commits on branch '{$branch}'.");
-    } else {
-      $this->log("Found {$n} new commits on branch '{$branch}'.");
-    }
-
-    while (true) {
-      $target = array_pop($insert);
-      $epoch = $stream->getCommitDate($target);
-      $epoch = trim($epoch);
-
-      if ($autoclose) {
-        $this->updateCommit($repository, $target, $branch);
-      } else {
-        $this->recordCommit($repository, $target, $epoch, $branch);
-      }
-
-      if (empty($insert)) {
-        break;
-      }
-    }
-  }
-
-
-  /**
-   * @task git
-   */
-  public static function executeGitVerifySameOrigin($remote, $expect, $where) {
-    $remote_path = self::getPathFromGitURI($remote);
-    $expect_path = self::getPathFromGitURI($expect);
-
-    $remote_match = self::executeGitNormalizePath($remote_path);
-    $expect_match = self::executeGitNormalizePath($expect_path);
-
-    if ($remote_match != $expect_match) {
-      throw new Exception(
-        "Working copy at '{$where}' has a mismatched origin URL. It has ".
-        "origin URL '{$remote}' (with remote path '{$remote_path}'), but the ".
-        "configured URL '{$expect}' (with remote path '{$expect_path}') is ".
-        "expected. Refusing to proceed because this may indicate that the ".
-        "working copy is actually some other repository.");
-    }
-  }
-
-  private static function getPathFromGitURI($raw_uri) {
-    $uri = new PhutilURI($raw_uri);
-    if ($uri->getProtocol()) {
-      return $uri->getPath();
-    }
-
-    $uri = new PhutilGitURI($raw_uri);
-    if ($uri->getDomain()) {
-      return $uri->getPath();
-    }
-
-    return $raw_uri;
-  }
-
-
-  /**
-   * @task git
-   */
-  private static function executeGitNormalizePath($path) {
-    // Strip away "/" and ".git", so similar paths correctly match.
-
-    $path = trim($path, '/');
-    $path = preg_replace('/\.git$/', '', $path);
-    return $path;
-  }
-
 
 }

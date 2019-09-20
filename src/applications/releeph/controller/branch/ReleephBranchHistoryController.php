@@ -1,50 +1,41 @@
 <?php
 
-final class ReleephBranchHistoryController extends ReleephProjectController {
+final class ReleephBranchHistoryController extends ReleephBranchController {
 
-  private $id;
-
-  public function willProcessRequest(array $data) {
-    $this->id = $data['branchID'];
-    parent::willProcessRequest($data);
+  public function shouldAllowPublic() {
+    return true;
   }
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $id = $request->getURIData('branchID');
 
     $branch = id(new ReleephBranchQuery())
       ->setViewer($viewer)
-      ->withIDs(array($this->id))
+      ->withIDs(array($id))
       ->executeOne();
     if (!$branch) {
       return new Aphront404Response();
     }
+    $this->setBranch($branch);
 
-    $xactions = id(new ReleephBranchTransactionQuery())
-      ->setViewer($viewer)
-      ->withObjectPHIDs(array($branch->getPHID()))
-      ->execute();
-
-    $timeline = id(new PhabricatorApplicationTransactionView())
-      ->setUser($viewer)
-      ->setObjectPHID($branch->getPHID())
-      ->setTransactions($xactions);
+    $timeline = $this->buildTransactionTimeline(
+      $branch,
+      new ReleephBranchTransactionQuery());
+    $timeline
+      ->setShouldTerminate(true);
 
     $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('History')));
+    $crumbs->addTextCrumb(pht('History'));
+    $crumbs->setBorder(true);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $timeline,
-      ),
-      array(
-        'title' => pht('Branch History'),
-        'device' => true,
-      ));
+    $title = pht('Branch History');
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($timeline);
+
   }
 
 }

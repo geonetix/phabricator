@@ -16,8 +16,10 @@ final class PhabricatorExternalAccount extends PhabricatorUserDAO
   protected $accountURI;
   protected $profileImagePHID;
   protected $properties = array();
+  protected $providerConfigPHID;
 
   private $profileImageFile = self::ATTACHABLE;
+  private $providerConfig = self::ATTACHABLE;
 
   public function getProfileImageFile() {
     return $this->assertAttached($this->profileImageFile);
@@ -30,23 +32,39 @@ final class PhabricatorExternalAccount extends PhabricatorUserDAO
 
   public function generatePHID() {
     return PhabricatorPHID::generateNewPHID(
-      PhabricatorPeoplePHIDTypeExternal::TYPECONST);
+      PhabricatorPeopleExternalPHIDType::TYPECONST);
   }
 
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID => true,
       self::CONFIG_SERIALIZATION => array(
         'properties' => self::SERIALIZATION_JSON,
       ),
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'userPHID' => 'phid?',
+        'accountType' => 'text16',
+        'accountDomain' => 'text64',
+        'accountSecret' => 'text?',
+        'accountID' => 'text64',
+        'displayName' => 'text255?',
+        'username' => 'text255?',
+        'realName' => 'text255?',
+        'email' => 'text255?',
+        'emailVerified' => 'bool',
+        'profileImagePHID' => 'phid?',
+        'accountURI' => 'text255?',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'account_details' => array(
+          'columns' => array('accountType', 'accountDomain', 'accountID'),
+          'unique' => true,
+        ),
+        'key_user' => array(
+          'columns' => array('userPHID'),
+        ),
+      ),
     ) + parent::getConfiguration();
-  }
-
-  public function getPhabricatorUser() {
-    $tmp_usr = id(new PhabricatorUser())
-      ->makeEphemeral()
-      ->setPHID($this->getPHID());
-    return $tmp_usr;
   }
 
   public function getProviderKey() {
@@ -70,18 +88,44 @@ final class PhabricatorExternalAccount extends PhabricatorUserDAO
   }
 
   public function isUsableForLogin() {
-    $key = $this->getProviderKey();
-    $provider = PhabricatorAuthProvider::getEnabledProviderByKey($key);
-
-    if (!$provider) {
+    $config = $this->getProviderConfig();
+    if (!$config->getIsEnabled()) {
       return false;
     }
 
+    $provider = $config->getProvider();
     if (!$provider->shouldAllowLogin()) {
       return false;
     }
 
     return true;
+  }
+
+  public function getDisplayName() {
+    if (strlen($this->displayName)) {
+      return $this->displayName;
+    }
+
+    // TODO: Figure out how much identifying information we're going to show
+    // to users about external accounts. For now, just show a string which is
+    // clearly not an error, but don't disclose any identifying information.
+
+    $map = array(
+      'email' => pht('Email User'),
+    );
+
+    $type = $this->getAccountType();
+
+    return idx($map, $type, pht('"%s" User', $type));
+  }
+
+  public function attachProviderConfig(PhabricatorAuthProviderConfig $config) {
+    $this->providerConfig = $config;
+    return $this;
+  }
+
+  public function getProviderConfig() {
+    return $this->assertAttached($this->providerConfig);
   }
 
 
@@ -91,11 +135,17 @@ final class PhabricatorExternalAccount extends PhabricatorUserDAO
   public function getCapabilities() {
     return array(
       PhabricatorPolicyCapability::CAN_VIEW,
+      PhabricatorPolicyCapability::CAN_EDIT,
     );
   }
 
   public function getPolicy($capability) {
-    return PhabricatorPolicies::POLICY_NOONE;
+    switch ($capability) {
+      case PhabricatorPolicyCapability::CAN_VIEW:
+        return PhabricatorPolicies::getMostOpenPolicy();
+      case PhabricatorPolicyCapability::CAN_EDIT:
+        return PhabricatorPolicies::POLICY_NOONE;
+    }
   }
 
   public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
@@ -103,8 +153,13 @@ final class PhabricatorExternalAccount extends PhabricatorUserDAO
   }
 
   public function describeAutomaticCapability($capability) {
-    // TODO: (T603) This is complicated.
-    return null;
+    switch ($capability) {
+      case PhabricatorPolicyCapability::CAN_VIEW:
+        return null;
+      case PhabricatorPolicyCapability::CAN_EDIT:
+        return pht(
+          'External accounts can only be edited by the account owner.');
+    }
   }
 
 }

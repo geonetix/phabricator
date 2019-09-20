@@ -15,6 +15,18 @@ final class PHUIFeedStoryView extends AphrontView {
   private $projects = array();
   private $actions = array();
   private $chronologicalKey;
+  private $tags;
+  private $authorIcon;
+  private $showTimestamp = true;
+
+  public function setTags($tags) {
+    $this->tags = $tags;
+    return $this;
+  }
+
+  public function getTags() {
+    return $this->tags;
+  }
 
   public function setChronologicalKey($chronological_key) {
     $this->chronologicalKey = $chronological_key;
@@ -30,6 +42,10 @@ final class PHUIFeedStoryView extends AphrontView {
     return $this;
   }
 
+  public function getTitle() {
+    return $this->title;
+  }
+
   public function setEpoch($epoch) {
     $this->epoch = $epoch;
     return $this;
@@ -38,6 +54,10 @@ final class PHUIFeedStoryView extends AphrontView {
   public function setImage($image) {
     $this->image = $image;
     return $this;
+  }
+
+  public function getImage() {
+    return $this->image;
   }
 
   public function setImageHref($image_href) {
@@ -64,9 +84,27 @@ final class PHUIFeedStoryView extends AphrontView {
     return $this;
   }
 
+  public function setAuthorIcon($author_icon) {
+    $this->authorIcon = $author_icon;
+    return $this;
+  }
+
+  public function getAuthorIcon() {
+    return $this->authorIcon;
+  }
+
   public function setTokenBar(array $tokens) {
     $this->tokenBar = $tokens;
     return $this;
+  }
+
+  public function setShowTimestamp($show_timestamp) {
+    $this->showTimestamp = $show_timestamp;
+    return $this;
+  }
+
+  public function getShowTimestamp() {
+    return $this->showTimestamp;
   }
 
   public function addProject($project) {
@@ -90,7 +128,8 @@ final class PHUIFeedStoryView extends AphrontView {
         ),
         array(
           $title,
-          $text));
+          $text,
+        ));
     $this->appendChild($copy);
     return $this;
   }
@@ -99,13 +138,45 @@ final class PHUIFeedStoryView extends AphrontView {
     return $this->href;
   }
 
-  public function renderNotification() {
+  public function renderNotification($user) {
     $classes = array(
       'phabricator-notification',
     );
 
     if (!$this->viewed) {
       $classes[] = 'phabricator-notification-unread';
+    }
+
+    if ($this->getShowTimestamp()) {
+      if ($this->epoch) {
+        if ($user) {
+          $marker = id(new PHUIIconView())
+            ->setIcon('fa-circle')
+            ->addClass('phabricator-notification-status');
+          $date = phabricator_datetime($this->epoch, $user);
+          $foot = phutil_tag(
+            'span',
+            array(
+              'class' => 'phabricator-notification-date',
+            ),
+            $date);
+            $foot = phutil_tag(
+              'div',
+              array(
+                'class' => 'phabricator-notification-foot',
+              ),
+              array(
+                $marker,
+                $date,
+              ));
+        } else {
+          $foot = null;
+        }
+      } else {
+        $foot = pht('No time specified.');
+      }
+    } else {
+      $foot = null;
     }
 
     return javelin_tag(
@@ -117,34 +188,39 @@ final class PHUIFeedStoryView extends AphrontView {
           'href' => $this->getHref(),
         ),
       ),
-      $this->title);
+      array($this->title, $foot));
   }
 
   public function render() {
 
     require_celerity_resource('phui-feed-story-css');
-    Javelin::initBehavior('phabricator-hovercards');
-    $oneline = !$this->hasChildren();
+    Javelin::initBehavior('phui-hovercards');
 
     $body = null;
     $foot = null;
-    $image_style = null;
-    $actor = '';
+
+    $actor = new PHUIIconView();
+    $actor->addClass('phui-feed-story-actor');
+
+    $author_icon = $this->getAuthorIcon();
 
     if ($this->image) {
-      $actor = new PHUIIconView();
-      $actor->setImage($this->image);
       $actor->addClass('phui-feed-story-actor-image');
-      if ($this->imageHref) {
-        $actor->setHref($this->imageHref);
-      }
+      $actor->setImage($this->image);
+    } else if ($author_icon) {
+      $actor->addClass('phui-feed-story-actor-icon');
+      $actor->setIcon($author_icon);
+    }
+
+    if ($this->imageHref) {
+      $actor->setHref($this->imageHref);
     }
 
     if ($this->epoch) {
       // TODO: This is really bad; when rendering through Conduit and via
       // renderText() we don't have a user.
-      if ($this->user) {
-        $foot = phabricator_datetime($this->epoch, $this->user);
+      if ($this->hasViewer()) {
+        $foot = phabricator_datetime($this->epoch, $this->getViewer());
       } else {
         $foot = null;
       }
@@ -163,21 +239,8 @@ final class PHUIFeedStoryView extends AphrontView {
 
     $icon = null;
     if ($this->appIcon) {
-      $icon = new PHUIIconView();
-      $icon->setSpriteIcon($this->appIcon);
-      $icon->setSpriteSheet(PHUIIconView::SPRITE_APPS);
-    }
-
-    $ol_foot = null;
-    if ($oneline) {
-      $ol_foot = phutil_tag(
-        'div',
-          array(
-            'class' => 'phui-feed-story-oneline-foot'
-          ),
-          array(
-            $icon,
-            $foot));
+      $icon = id(new PHUIIconView())
+        ->setIcon($this->appIcon);
     }
 
     $action_list = array();
@@ -186,15 +249,15 @@ final class PHUIFeedStoryView extends AphrontView {
       $action_list[] = phutil_tag(
         'li',
           array(
-          'class' => 'phui-feed-story-action-item'
-        ),
-        $action);
+            'class' => 'phui-feed-story-action-item',
+          ),
+          $action);
     }
     if (!empty($action_list)) {
       $icons = phutil_tag(
         'ul',
           array(
-            'class' => 'phui-feed-story-action-list'
+            'class' => 'phui-feed-story-action-list',
           ),
           $action_list);
     }
@@ -205,17 +268,16 @@ final class PHUIFeedStoryView extends AphrontView {
         'class' => 'phui-feed-story-head',
       ),
       array(
-        (!$oneline ? $actor : null),
+        $actor,
         nonempty($this->title, pht('Untitled Story')),
         $icons,
-        $ol_foot
       ));
 
     if (!empty($this->tokenBar)) {
       $tokenview = phutil_tag(
         'div',
           array(
-            'class' => 'phui-feed-token-bar'
+            'class' => 'phui-feed-token-bar',
           ),
         $this->tokenBar);
       $this->appendChild($tokenview);
@@ -226,44 +288,37 @@ final class PHUIFeedStoryView extends AphrontView {
       $body = phutil_tag(
         'div',
         array(
-          'class' => 'phui-feed-story-body',
+          'class' => 'phui-feed-story-body phabricator-remarkup',
         ),
         $body_content);
     }
 
-    if ($oneline) {
-      $foot = null;
-    } else {
-      $foot = phutil_tag(
-        'div',
-        array(
-          'class' => 'phui-feed-story-foot',
-        ),
-        array(
-          $icon,
-          $foot));
+    $tags = null;
+    if ($this->tags) {
+      $tags = array(
+        " \xC2\xB7 ",
+        $this->tags,
+      );
     }
 
+    $foot = phutil_tag(
+      'div',
+      array(
+        'class' => 'phui-feed-story-foot',
+      ),
+      array(
+        $icon,
+        $foot,
+        $tags,
+      ));
+
     $classes = array('phui-feed-story');
-    if ($oneline) {
-      $classes[] = 'phui-feed-story-oneline';
-    }
 
     return id(new PHUIBoxView())
       ->addClass(implode(' ', $classes))
-      ->setShadow(true)
+      ->setBorder(true)
       ->addMargin(PHUI::MARGIN_MEDIUM_BOTTOM)
       ->appendChild(array($head, $body, $foot));
   }
 
-  public function setAppIconFromPHID($phid) {
-    switch (phid_get_type($phid)) {
-      case PholioPHIDTypeMock::TYPECONST:
-        $this->setAppIcon("pholio-dark");
-        break;
-      case PhabricatorMacroPHIDTypeMacro::TYPECONST:
-        $this->setAppIcon("macro-dark");
-        break;
-    }
-  }
 }

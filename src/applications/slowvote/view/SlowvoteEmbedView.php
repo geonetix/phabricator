@@ -1,18 +1,9 @@
 <?php
 
-/**
- * @group slowvote
- */
 final class SlowvoteEmbedView extends AphrontView {
 
   private $poll;
   private $handles;
-  private $headless;
-
-  public function setHeadless($headless) {
-    $this->headless = $headless;
-    return $this;
-  }
 
   public function setPoll(PhabricatorSlowvotePoll $poll) {
     $this->poll = $poll;
@@ -25,7 +16,7 @@ final class SlowvoteEmbedView extends AphrontView {
 
   public function render() {
     if (!$this->poll) {
-      throw new Exception("Call setPoll() before render()!");
+      throw new PhutilInvalidStateException('setPoll');
     }
 
     $poll = $this->poll;
@@ -48,11 +39,6 @@ final class SlowvoteEmbedView extends AphrontView {
     }
 
     require_celerity_resource('phabricator-slowvote-css');
-    require_celerity_resource('javelin-behavior-slowvote-embed');
-
-    $config = array(
-      'pollID' => $poll->getID());
-    Javelin::initBehavior('slowvote-embed', $config);
 
     $user_choices = $poll->getViewerChoices($this->getUser());
     $user_choices = mpull($user_choices, 'getOptionID', 'getOptionID');
@@ -66,47 +52,28 @@ final class SlowvoteEmbedView extends AphrontView {
     $link_to_slowvote = phutil_tag(
       'a',
       array(
-        'href' => '/V'.$poll->getID()
+        'href' => '/V'.$poll->getID(),
       ),
       $poll->getQuestion());
 
-    if ($this->headless) {
-      $header = null;
-    } else {
-      $header = phutil_tag(
+    $header = id(new PHUIHeaderView())
+      ->setHeader($link_to_slowvote);
+
+    $description = $poll->getDescription();
+    if (strlen($description)) {
+      $description = new PHUIRemarkupView($this->getUser(), $description);
+      $description = phutil_tag(
         'div',
         array(
-          'class' => 'slowvote-header',
+          'class' => 'slowvote-description',
         ),
-        phutil_tag(
-          'div',
-          array(
-            'class' => 'slowvote-header-content',
-          ),
-          array(
-            'V'.$poll->getID(),
-            ' ',
-            $link_to_slowvote)));
-
-      $description = null;
-      if ($poll->getDescription()) {
-        $description = PhabricatorMarkupEngine::renderOneObject(
-          id(new PhabricatorMarkupOneOff())->setContent(
-            $poll->getDescription()),
-          'default',
-          $this->getUser());
-        $description = phutil_tag(
-          'div',
-          array(
-            'class' => 'slowvote-description',
-          ),
-          $description);
-      }
-
-      $header = array(
-        $header,
         $description);
     }
+
+    $header = array(
+      $header,
+      $description,
+    );
 
     $vis = $poll->getResponseVisibility();
     if ($this->areResultsVisible()) {
@@ -128,24 +95,28 @@ final class SlowvoteEmbedView extends AphrontView {
       ),
       $quip);
 
-    $submit = phutil_tag(
-      'div',
-      array(
-        'class' => 'slowvote-footer',
-      ),
-      phutil_tag(
+    if ($poll->getIsClosed()) {
+      $submit = null;
+    } else {
+      $submit = phutil_tag(
         'div',
         array(
-          'class' => 'slowvote-footer-content',
+          'class' => 'slowvote-footer',
         ),
-        array(
-          $hint,
-          phutil_tag(
-            'button',
-            array(
-            ),
-            pht('Engage in Deliberations')),
-        )));
+        phutil_tag(
+          'div',
+          array(
+            'class' => 'slowvote-footer-content',
+          ),
+          array(
+            $hint,
+            phutil_tag(
+              'button',
+              array(
+              ),
+              pht('Engage in Deliberations')),
+          )));
+    }
 
     $body = phabricator_form(
       $this->getUser(),
@@ -164,16 +135,22 @@ final class SlowvoteEmbedView extends AphrontView {
         $submit,
       ));
 
-    return javelin_tag(
+    $embed = javelin_tag(
       'div',
       array(
         'class' => 'slowvote-embed',
         'sigil' => 'slowvote-embed',
         'meta' => array(
-          'pollID' => $poll->getID()
-        )
+          'pollID' => $poll->getID(),
+        ),
       ),
-      array($header, $body));
+      array($body));
+
+    return id(new PHUIObjectBoxView())
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->setHeader($header)
+      ->appendChild($embed)
+      ->addClass('slowvote-poll-view');
   }
 
   private function renderLabel(PhabricatorSlowvoteOption $option, $selected) {
@@ -209,9 +186,9 @@ final class SlowvoteEmbedView extends AphrontView {
               ),
               array(
                 $this->renderControl($option, $selected),
+                $status,
               )),
           )),
-        $status,
         $voters,
       ));
   }
@@ -251,6 +228,8 @@ final class SlowvoteEmbedView extends AphrontView {
       PhabricatorSlowvotePoll::METHOD_APPROVAL => 'checkbox',
     );
 
+    $closed = $this->getPoll()->getIsClosed();
+
     return phutil_tag(
       'input',
       array(
@@ -258,6 +237,7 @@ final class SlowvoteEmbedView extends AphrontView {
         'name' => 'vote[]',
         'value' => $option->getID(),
         'checked' => ($selected ? 'checked' : null),
+        'disabled' => ($closed ? 'disabled' : null),
       ));
   }
 

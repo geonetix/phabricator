@@ -1,14 +1,11 @@
 <?php
 
-/**
- * @group maniphest
- */
 final class ManiphestTaskListView extends ManiphestView {
 
   private $tasks;
   private $handles;
   private $showBatchControls;
-  private $showSubpriorityControls;
+  private $noDataString;
 
   public function setTasks(array $tasks) {
     assert_instances_of($tasks, 'ManiphestTask');
@@ -27,68 +24,99 @@ final class ManiphestTaskListView extends ManiphestView {
     return $this;
   }
 
-  public function setShowSubpriorityControls($show_subpriority_controls) {
-    $this->showSubpriorityControls = $show_subpriority_controls;
+  public function setNoDataString($text) {
+    $this->noDataString = $text;
     return $this;
   }
 
   public function render() {
     $handles = $this->handles;
 
+    require_celerity_resource('maniphest-task-summary-css');
+
     $list = new PHUIObjectItemListView();
-    $list->setCards(true);
-    $list->setFlush(true);
+
+    if ($this->noDataString) {
+      $list->setNoDataString($this->noDataString);
+    } else {
+      $list->setNoDataString(pht('No tasks.'));
+    }
 
     $status_map = ManiphestTaskStatus::getTaskStatusMap();
     $color_map = ManiphestTaskPriority::getColorMap();
+    $priority_map = ManiphestTaskPriority::getTaskPriorityMap();
 
     if ($this->showBatchControls) {
       Javelin::initBehavior('maniphest-list-editor');
     }
 
     foreach ($this->tasks as $task) {
-      $item = new PHUIObjectItemView();
-      $item->setObjectName('T'.$task->getID());
-      $item->setHeader($task->getTitle());
-      $item->setHref('/T'.$task->getID());
+      $item = id(new PHUIObjectItemView())
+        ->setUser($this->getUser())
+        ->setObject($task)
+        ->setObjectName('T'.$task->getID())
+        ->setHeader($task->getTitle())
+        ->setHref('/T'.$task->getID());
 
       if ($task->getOwnerPHID()) {
-        $owner = idx($handles, $task->getOwnerPHID());
-        // TODO: This should be guaranteed, see T3817.
-        if ($owner) {
-          $item->addByline(pht('Assigned: %s', $owner->renderLink()));
-        }
+        $owner = $handles[$task->getOwnerPHID()];
+        $item->addByline(pht('Assigned: %s', $owner->renderLink()));
       }
 
       $status = $task->getStatus();
-      if ($status != ManiphestTaskStatus::STATUS_OPEN) {
-        $item->addFootIcon(
-          ($status == ManiphestTaskStatus::STATUS_CLOSED_RESOLVED)
-            ? 'enable-white'
-            : 'delete-white',
-          idx($status_map, $status, 'Unknown'));
+      $pri = idx($priority_map, $task->getPriority());
+      $status_name = idx($status_map, $task->getStatus());
+      $tooltip = pht('%s, %s', $status_name, $pri);
+
+      $icon = ManiphestTaskStatus::getStatusIcon($task->getStatus());
+      $color = idx($color_map, $task->getPriority(), 'grey');
+      if ($task->isClosed()) {
+        $item->setDisabled(true);
+        $color = 'grey';
       }
 
-      $item->setBarColor(idx($color_map, $task->getPriority(), 'grey'));
+      $item->setStatusIcon($icon.' '.$color, $tooltip);
 
-      $item->addIcon(
-        'none',
-        phabricator_datetime($task->getDateModified(), $this->getUser()));
+      if ($task->isClosed()) {
+        $closed_epoch = $task->getClosedEpoch();
 
-      if ($this->showSubpriorityControls) {
-        $item->setGrippable(true);
+        // We don't expect a task to be closed without a closed epoch, but
+        // recover if we find one. This can happen with older objects or with
+        // lipsum test data.
+        if (!$closed_epoch) {
+          $closed_epoch = $task->getDateModified();
+        }
+
+        $item->addIcon(
+          'fa-check-square-o grey',
+          phabricator_datetime($closed_epoch, $this->getUser()));
+      } else {
+        $item->addIcon(
+          'none',
+          phabricator_datetime($task->getDateModified(), $this->getUser()));
       }
-      if ($this->showSubpriorityControls || $this->showBatchControls) {
+
+      if ($this->showBatchControls) {
         $item->addSigil('maniphest-task');
       }
 
-      $projects_view = new ManiphestTaskProjectsView();
-      $projects_view->setHandles(
-        array_select_keys(
-          $handles,
-          $task->getProjectPHIDs()));
+      $subtype = $task->newSubtypeObject();
+      if ($subtype && $subtype->hasTagView()) {
+        $subtype_tag = $subtype->newTagView()
+          ->setSlimShady(true);
+        $item->addAttribute($subtype_tag);
+      }
 
-      $item->addAttribute($projects_view);
+      $project_handles = array_select_keys(
+        $handles,
+        array_reverse($task->getProjectPHIDs()));
+
+      $item->addAttribute(
+        id(new PHUIHandleTagListView())
+          ->setLimit(4)
+          ->setNoDataString(pht('No Projects'))
+          ->setSlim(true)
+          ->setHandles($project_handles));
 
       $item->setMetadata(
         array(
@@ -96,17 +124,44 @@ final class ManiphestTaskListView extends ManiphestView {
         ));
 
       if ($this->showBatchControls) {
+        $href = new PhutilURI('/maniphest/task/edit/'.$task->getID().'/');
         $item->addAction(
           id(new PHUIListItemView())
-            ->setIcon('edit')
+            ->setIcon('fa-pencil')
             ->addSigil('maniphest-edit-task')
-            ->setHref('/maniphest/task/edit/'.$task->getID().'/'));
+            ->setHref($href));
       }
 
       $list->addItem($item);
     }
 
     return $list;
+  }
+
+  public static function loadTaskHandles(
+    PhabricatorUser $viewer,
+    array $tasks) {
+    assert_instances_of($tasks, 'ManiphestTask');
+
+    $phids = array();
+    foreach ($tasks as $task) {
+      $assigned_phid = $task->getOwnerPHID();
+      if ($assigned_phid) {
+        $phids[] = $assigned_phid;
+      }
+      foreach ($task->getProjectPHIDs() as $project_phid) {
+        $phids[] = $project_phid;
+      }
+    }
+
+    if (!$phids) {
+      return array();
+    }
+
+    return id(new PhabricatorHandleQuery())
+      ->setViewer($viewer)
+      ->withPHIDs($phids)
+      ->execute();
   }
 
 }

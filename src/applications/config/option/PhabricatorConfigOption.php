@@ -1,8 +1,7 @@
 <?php
 
 final class PhabricatorConfigOption
-  extends Phobject
-  implements PhabricatorMarkupInterface {
+  extends Phobject {
 
   private $key;
   private $default;
@@ -14,8 +13,8 @@ final class PhabricatorConfigOption
   private $group;
   private $examples;
   private $locked;
+  private $lockedMessage;
   private $hidden;
-  private $masked;
   private $baseClass;
   private $customData;
   private $customObject;
@@ -27,26 +26,6 @@ final class PhabricatorConfigOption
 
   public function getBaseClass() {
     return $this->baseClass;
-  }
-
-  public function setMasked($masked) {
-    $this->masked = $masked;
-    return $this;
-  }
-
-  public function getMasked() {
-    if ($this->masked) {
-      return true;
-    }
-
-    if ($this->getHidden()) {
-      return true;
-    }
-
-    return idx(
-      PhabricatorEnv::getEnvConfig('config.mask'),
-      $this->getKey(),
-      false);
   }
 
   public function setHidden($hidden) {
@@ -83,6 +62,22 @@ final class PhabricatorConfigOption
       PhabricatorEnv::getEnvConfig('config.lock'),
       $this->getKey(),
       false);
+  }
+
+  public function setLockedMessage($message) {
+    $this->lockedMessage = $message;
+    return $this;
+  }
+
+  public function getLockedMessage() {
+    if ($this->lockedMessage !== null) {
+      return $this->lockedMessage;
+    }
+    return pht(
+      'This configuration is locked and can not be edited from the web '.
+      'interface. Use %s in %s to edit it.',
+      phutil_tag('tt', array(), './bin/config'),
+      phutil_tag('tt', array(), 'phabricator/'));
   }
 
   public function addExample($value, $description) {
@@ -128,8 +123,7 @@ final class PhabricatorConfigOption
       return $this->enumOptions;
     }
 
-    throw new Exception(
-      'Call setEnumOptions() before trying to access them!');
+    throw new PhutilInvalidStateException('setEnumOptions');
   }
 
   public function setKey($key) {
@@ -180,6 +174,12 @@ final class PhabricatorConfigOption
     return $this->type;
   }
 
+  public function newOptionType() {
+    $type_key = $this->getType();
+    $type_map = PhabricatorConfigType::getAllTypes();
+    return idx($type_map, $type_key);
+  }
+
   public function isCustomType() {
     return !strncmp($this->getType(), 'custom:', 7);
   }
@@ -187,7 +187,7 @@ final class PhabricatorConfigOption
   public function getCustomObject() {
     if (!$this->customObject) {
       if (!$this->isCustomType()) {
-        throw new Exception("This option does not have a custom type!");
+        throw new Exception(pht('This option does not have a custom type!'));
       }
       $this->customObject = newv(substr($this->getType(), 7), array());
     }
@@ -203,43 +203,13 @@ final class PhabricatorConfigOption
     return $this;
   }
 
-/* -(  PhabricatorMarkupInterface  )----------------------------------------- */
-
-  public function getMarkupFieldKey($field) {
-    return $this->getKey().':'.$field;
-  }
-
-  public function newMarkupEngine($field) {
-    return PhabricatorMarkupEngine::newMarkupEngine(array());
-  }
-
-  public function getMarkupText($field) {
-    switch ($field) {
-      case 'description':
-        $text = $this->getDescription();
-        break;
-      case 'summary':
-        $text = $this->getSummary();
-        break;
+  public function newDescriptionRemarkupView(PhabricatorUser $viewer) {
+    $description = $this->getDescription();
+    if (!strlen($description)) {
+      return null;
     }
 
-    // TODO: We should probably implement this as a real Markup rule, but
-    // markup rules are a bit of a mess right now and it doesn't hurt us to
-    // fake this.
-    $text = preg_replace(
-      '/{{([^}]+)}}/',
-      '[[/config/edit/\\1/ | \\1]]',
-      $text);
-
-    return $text;
-  }
-
-  public function didMarkupText($field, $output, PhutilMarkupEngine $engine) {
-    return $output;
-  }
-
-  public function shouldUseMarkupCache($field) {
-    return false;
+    return new PHUIRemarkupView($viewer, $description);
   }
 
 }

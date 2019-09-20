@@ -4,25 +4,38 @@ final class PhabricatorAuthLoginController
   extends PhabricatorAuthController {
 
   private $providerKey;
+  private $extraURIData;
   private $provider;
 
   public function shouldRequireLogin() {
     return false;
   }
 
-  public function willProcessRequest(array $data) {
-    $this->providerKey = $data['pkey'];
+  public function shouldAllowRestrictedParameter($parameter_name) {
+    // Whitelist the OAuth 'code' parameter.
+
+    if ($parameter_name == 'code') {
+      return true;
+    }
+
+    return parent::shouldAllowRestrictedParameter($parameter_name);
   }
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+  public function getExtraURIData() {
+    return $this->extraURIData;
+  }
+
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
+    $this->providerKey = $request->getURIData('pkey');
+    $this->extraURIData = $request->getURIData('extra');
 
     $response = $this->loadProvider();
     if ($response) {
       return $response;
     }
 
+    $invite = $this->loadInvite();
     $provider = $this->provider;
 
     try {
@@ -53,7 +66,9 @@ final class PhabricatorAuthLoginController
 
     if (!$account) {
       throw new Exception(
-        "Auth provider failed to load an account from processLoginRequest()!");
+        pht(
+          'Auth provider failed to load an account from %s!',
+          'processLoginRequest()'));
     }
 
     if ($account->getUserPHID()) {
@@ -79,8 +94,8 @@ final class PhabricatorAuthLoginController
       } else {
         return $this->renderError(
           pht(
-            'The external account ("%s") you just used to login is alerady '.
-            'associated with another Phabricator user account. Login to the '.
+            'The external account ("%s") you just used to log in is already '.
+            'associated with another Phabricator user account. Log in to the '.
             'other Phabricator account and unlink the external account before '.
             'linking it to a new Phabricator account.',
             $provider->getProviderName()));
@@ -89,7 +104,7 @@ final class PhabricatorAuthLoginController
       // The account is not yet attached to a Phabricator user, so this is
       // either a registration or an account link request.
       if (!$viewer->isLoggedIn()) {
-        if ($provider->shouldAllowRegistration()) {
+        if ($provider->shouldAllowRegistration() || $invite) {
           return $this->processRegisterUser($account);
         } else {
           return $this->renderError(
@@ -100,6 +115,27 @@ final class PhabricatorAuthLoginController
               $provider->getProviderName()));
         }
       } else {
+
+        // If the user already has a linked account of this type, prevent them
+        // from linking a second account. This can happen if they swap logins
+        // and then refresh the account link. See T6707. We will eventually
+        // allow this after T2549.
+        $existing_accounts = id(new PhabricatorExternalAccountQuery())
+          ->setViewer($viewer)
+          ->withUserPHIDs(array($viewer->getPHID()))
+          ->withAccountTypes(array($account->getAccountType()))
+          ->execute();
+        if ($existing_accounts) {
+          return $this->renderError(
+            pht(
+              'Your Phabricator account is already connected to an external '.
+              'account on this provider ("%s"), but you are currently logged '.
+              'in to the provider with a different account. Log out of the '.
+              'external service, then log back in with the correct account '.
+              'before refreshing the account link.',
+              $provider->getProviderName()));
+        }
+
         if ($provider->shouldAllowAccountLink()) {
           return $this->processLinkUser($account);
         } else {
@@ -149,7 +185,7 @@ final class PhabricatorAuthLoginController
     $next_uri) {
 
     if ($account->getUserPHID()) {
-      throw new Exception("Account is already registered or linked.");
+      throw new Exception(pht('Account is already registered or linked.'));
     }
 
     // Regenerate the registration secret key, set it on the external account,
@@ -160,13 +196,15 @@ final class PhabricatorAuthLoginController
     $registration_key = Filesystem::readRandomCharacters(32);
     $account->setProperty(
       'registrationKey',
-      PhabricatorHash::digest($registration_key));
+      PhabricatorHash::weakDigest($registration_key));
 
     $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
       $account->save();
     unset($unguarded);
 
-    $this->getRequest()->setCookie('phreg', $registration_key);
+    $this->getRequest()->setTemporaryCookie(
+      PhabricatorCookies::COOKIE_REGISTRATION,
+      $registration_key);
 
     return id(new AphrontRedirectResponse())->setURI($next_uri);
   }
@@ -178,7 +216,7 @@ final class PhabricatorAuthLoginController
     if (!$provider) {
       return $this->renderError(
         pht(
-          'The account you are attempting to login with uses a nonexistent '.
+          'The account you are attempting to log in with uses a nonexistent '.
           'or disabled authentication provider (with key "%s"). An '.
           'administrator may have recently disabled this provider.',
           $this->providerKey));
@@ -202,30 +240,18 @@ final class PhabricatorAuthLoginController
     $crumbs = $this->buildApplicationCrumbs();
 
     if ($this->getRequest()->getUser()->isLoggedIn()) {
-      $crumbs->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName(pht('Link Account'))
-          ->setHref($provider->getSettingsURI()));
+      $crumbs->addTextCrumb(pht('Link Account'), $provider->getSettingsURI());
     } else {
-      $crumbs->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName(pht('Login'))
-          ->setHref($this->getApplicationURI('start/')));
+      $crumbs->addTextCrumb(pht('Log In'), $this->getApplicationURI('start/'));
     }
 
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName($provider->getProviderName()));
+    $crumbs->addTextCrumb($provider->getProviderName());
+    $crumbs->setBorder(true);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $content,
-      ),
-      array(
-        'title' => pht('Login'),
-        'device' => true,
-      ));
+    return $this->newPage()
+      ->setTitle(pht('Log In'))
+      ->setCrumbs($crumbs)
+      ->appendChild($content);
   }
 
   public function buildProviderErrorResponse(
@@ -233,9 +259,8 @@ final class PhabricatorAuthLoginController
     $message) {
 
     $message = pht(
-      'Authentication provider ("%s") encountered an error during login. %s',
-      $provider->getProviderName(),
-      $message);
+      'Authentication provider ("%s") encountered an error while attempting '.
+      'to log in. %s', $provider->getProviderName(), $message);
 
     return $this->renderError($message);
   }

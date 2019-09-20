@@ -11,6 +11,14 @@ abstract class PhabricatorWorkingCopyTestCase extends PhabricatorTestCase {
   }
 
   protected function buildBareRepository($callsign) {
+    $existing_repository = id(new PhabricatorRepositoryQuery())
+      ->withCallsigns(array($callsign))
+      ->setViewer(PhabricatorUser::getOmnipotentUser())
+      ->executeOne();
+    if ($existing_repository) {
+      $existing_repository->delete();
+    }
+
     $data_dir = dirname(__FILE__).'/data/';
 
     $types = array(
@@ -29,14 +37,21 @@ abstract class PhabricatorWorkingCopyTestCase extends PhabricatorTestCase {
 
     if (!$hits) {
       throw new Exception(
-        "No test data for callsign '{$callsign}'. Expected an archive ".
-        "like '{$callsign}.git.tgz' in '{$data_dir}'.");
+        pht(
+          "No test data for callsign '%s'. Expected an archive ".
+          "like '%s' in '%s'.",
+          $callsign,
+          "{$callsign}.git.tgz",
+          $data_dir));
     }
 
     if (count($hits) > 1) {
       throw new Exception(
-        "Expected exactly one archive matching callsign '{$callsign}', ".
-        "found too many: ".implode(', ', $hits));
+        pht(
+          "Expected exactly one archive matching callsign '%s', ".
+          "found too many: %s",
+          $callsign,
+          implode(', ', $hits)));
     }
 
     $path = head($hits);
@@ -50,13 +65,12 @@ abstract class PhabricatorWorkingCopyTestCase extends PhabricatorTestCase {
       ->setCallsign($callsign)
       ->setName(pht('Test Repo "%s"', $callsign))
       ->setVersionControlSystem($vcs_type)
-      ->setDetail('local-path', dirname($local).'/'.$callsign)
+      ->setLocalPath(dirname($local).'/'.$callsign)
       ->setDetail('remote-uri', 'file://'.$dir->getPath().'/');
 
     $this->didConstructRepository($repo);
 
     $repo->save();
-    $repo->makeEphemeral();
 
     // Keep the disk resources around until we exit.
     $this->dirs[] = $dir;
@@ -76,9 +90,18 @@ abstract class PhabricatorWorkingCopyTestCase extends PhabricatorTestCase {
       ->setRepository($repository)
       ->pullRepository();
 
-    $this->pulled[$callsign] = true;
+    return $repository;
+  }
+
+  protected function buildDiscoveredRepository($callsign) {
+    $repository = $this->buildPulledRepository($callsign);
+
+    id(new PhabricatorRepositoryDiscoveryEngine())
+      ->setRepository($repository)
+      ->discoverCommits();
 
     return $repository;
   }
+
 
 }

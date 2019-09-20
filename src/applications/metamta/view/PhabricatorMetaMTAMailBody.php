@@ -5,11 +5,33 @@
  *
  * @task compose  Composition
  * @task render   Rendering
- * @group metamta
  */
-final class PhabricatorMetaMTAMailBody {
+final class PhabricatorMetaMTAMailBody extends Phobject {
 
   private $sections = array();
+  private $htmlSections = array();
+  private $attachments = array();
+
+  private $viewer;
+  private $contextObject;
+
+  public function getViewer() {
+    return $this->viewer;
+  }
+
+  public function setViewer($viewer) {
+    $this->viewer = $viewer;
+    return $this;
+  }
+
+  public function setContextObject($context_object) {
+    $this->contextObject = $context_object;
+    return $this;
+  }
+
+  public function getContextObject() {
+    return $this->contextObject;
+  }
 
 
 /* -(  Composition  )-------------------------------------------------------- */
@@ -24,8 +46,50 @@ final class PhabricatorMetaMTAMailBody {
    */
   public function addRawSection($text) {
     if (strlen($text)) {
-      $this->sections[] = rtrim($text);
+      $text = rtrim($text);
+      $this->sections[] = $text;
+      $this->htmlSections[] = phutil_escape_html_newlines(
+        phutil_tag('div', array(), $text));
     }
+    return $this;
+  }
+
+  public function addRemarkupSection($header, $text) {
+    try {
+      $engine = $this->newMarkupEngine()
+        ->setMode(PhutilRemarkupEngine::MODE_TEXT);
+
+      $styled_text = $engine->markupText($text);
+      $this->addPlaintextSection($header, $styled_text);
+    } catch (Exception $ex) {
+      phlog($ex);
+      $this->addTextSection($header, $text);
+    }
+
+    try {
+      $mail_engine = $this->newMarkupEngine()
+        ->setMode(PhutilRemarkupEngine::MODE_HTML_MAIL);
+
+      $html = $mail_engine->markupText($text);
+      $this->addHTMLSection($header, $html);
+    } catch (Exception $ex) {
+      phlog($ex);
+      $this->addHTMLSection($header, $text);
+    }
+
+    return $this;
+  }
+
+  public function addRawPlaintextSection($text) {
+    if (strlen($text)) {
+      $text = rtrim($text);
+      $this->sections[] = $text;
+    }
+    return $this;
+  }
+
+  public function addRawHTMLSection($html) {
+    $this->htmlSections[] = phutil_safe_html($html);
     return $this;
   }
 
@@ -41,49 +105,62 @@ final class PhabricatorMetaMTAMailBody {
    * @return this
    * @task compose
    */
-  public function addTextSection($header, $text) {
-    $this->sections[] = $header."\n".$this->indent($text);
+  public function addTextSection($header, $section) {
+    if ($section instanceof PhabricatorMetaMTAMailSection) {
+      $plaintext = $section->getPlaintext();
+      $html = $section->getHTML();
+    } else {
+      $plaintext = $section;
+      $html = phutil_escape_html_newlines(phutil_tag('div', array(), $section));
+    }
+
+    $this->addPlaintextSection($header, $plaintext);
+    $this->addHTMLSection($header, $html);
+    return $this;
+  }
+
+  public function addPlaintextSection($header, $text, $indent = true) {
+    if ($indent) {
+      $text = $this->indent($text);
+    }
+    $this->sections[] = $header."\n".$text;
+    return $this;
+  }
+
+  public function addHTMLSection($header, $html_fragment) {
+    if ($header !== null) {
+      $header = phutil_tag('strong', array(), $header);
+    }
+
+    $this->htmlSections[] = array(
+      phutil_tag(
+        'div',
+        array(),
+        array(
+          $header,
+          phutil_tag('div', array(), $html_fragment),
+        )),
+    );
+    return $this;
+  }
+
+  public function addLinkSection($header, $link) {
+    $html = phutil_tag('a', array('href' => $link), $link);
+    $this->addPlaintextSection($header, $link);
+    $this->addHTMLSection($header, $html);
     return $this;
   }
 
 
   /**
-   * Add a Herald section with a rule management URI and a transcript URI.
+   * Add an attachment.
    *
-   * @param string URI to rule transcripts.
+   * @param PhabricatorMailAttachment Attachment.
    * @return this
    * @task compose
    */
-  public function addHeraldSection($xscript_uri) {
-    if (!PhabricatorEnv::getEnvConfig('metamta.herald.show-hints')) {
-      return $this;
-    }
-
-    $this->addTextSection(
-      pht('WHY DID I GET THIS EMAIL?'),
-      PhabricatorEnv::getProductionURI($xscript_uri));
-
-    return $this;
-  }
-
-
-  /**
-   * Add a section with reply handler instructions.
-   *
-   * @param string Reply handler instructions.
-   * @return this
-   * @task compose
-   */
-  public function addReplySection($instructions) {
-    if (!PhabricatorEnv::getEnvConfig('metamta.reply.show-hints')) {
-      return $this;
-    }
-    if (!strlen($instructions)) {
-      return $this;
-    }
-
-    $this->addTextSection(pht('REPLY HANDLER ACTIONS'), $instructions);
-
+  public function addAttachment(PhabricatorMailAttachment $attachment) {
+    $this->attachments[] = $attachment;
     return $this;
   }
 
@@ -101,6 +178,22 @@ final class PhabricatorMetaMTAMailBody {
     return implode("\n\n", $this->sections)."\n";
   }
 
+  public function renderHTML() {
+    $br = phutil_tag('br');
+    $body = phutil_implode_html($br, $this->htmlSections);
+    return (string)hsprintf('%s', array($body, $br));
+  }
+
+  /**
+   * Retrieve attachments.
+   *
+   * @return list<PhabricatorMailAttachment> Attachments.
+   * @task render
+   */
+  public function getAttachments() {
+    return $this->attachments;
+  }
+
 
   /**
    * Indent a block of text for rendering under a section heading.
@@ -111,6 +204,20 @@ final class PhabricatorMetaMTAMailBody {
    */
   private function indent($text) {
     return rtrim("  ".str_replace("\n", "\n  ", $text));
+  }
+
+
+  private function newMarkupEngine() {
+    $engine = PhabricatorMarkupEngine::newMarkupEngine(array())
+      ->setConfig('viewer', $this->getViewer())
+      ->setConfig('uri.base', PhabricatorEnv::getProductionURI('/'));
+
+    $context = $this->getContextObject();
+    if ($context) {
+      $engine->setConfig('contextObject', $context);
+    }
+
+    return $engine;
   }
 
 }

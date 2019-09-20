@@ -5,14 +5,21 @@
  */
 final class DifferentialRevisionListView extends AphrontView {
 
-  private $revisions;
-  private $flags = array();
-  private $drafts = array();
-  private $handles;
-  private $fields;
-  private $highlightAge;
+  private $revisions = array();
   private $header;
   private $noDataString;
+  private $noBox;
+  private $background = null;
+  private $unlandedDependencies = array();
+
+  public function setUnlandedDependencies(array $unlanded_dependencies) {
+    $this->unlandedDependencies = $unlanded_dependencies;
+    return $this;
+  }
+
+  public function getUnlandedDependencies() {
+    return $this->unlandedDependencies;
+  }
 
   public function setNoDataString($no_data_string) {
     $this->noDataString = $no_data_string;
@@ -24,111 +31,75 @@ final class DifferentialRevisionListView extends AphrontView {
     return $this;
   }
 
-  public function setFields(array $fields) {
-    assert_instances_of($fields, 'DifferentialFieldSpecification');
-    $this->fields = $fields;
-    return $this;
-  }
-
   public function setRevisions(array $revisions) {
     assert_instances_of($revisions, 'DifferentialRevision');
     $this->revisions = $revisions;
     return $this;
   }
 
-  public function setHighlightAge($bool) {
-    $this->highlightAge = $bool;
+  public function setNoBox($box) {
+    $this->noBox = $box;
     return $this;
   }
 
-  public function getRequiredHandlePHIDs() {
-    $phids = array();
-    foreach ($this->fields as $field) {
-      foreach ($this->revisions as $revision) {
-        $phids[] = $field->getRequiredHandlePHIDsForRevisionList($revision);
-      }
-    }
-    return array_mergev($phids);
-  }
-
-  public function setHandles(array $handles) {
-    assert_instances_of($handles, 'PhabricatorObjectHandle');
-    $this->handles = $handles;
-    return $this;
-  }
-
-  public function loadAssets() {
-    $user = $this->user;
-    if (!$user) {
-      throw new Exception("Call setUser() before loadAssets()!");
-    }
-    if ($this->revisions === null) {
-      throw new Exception("Call setRevisions() before loadAssets()!");
-    }
-
-    $this->flags = id(new PhabricatorFlagQuery())
-      ->setViewer($user)
-      ->withOwnerPHIDs(array($user->getPHID()))
-      ->withObjectPHIDs(mpull($this->revisions, 'getPHID'))
-      ->execute();
-
-    $this->drafts = id(new DifferentialRevisionQuery())
-      ->setViewer($user)
-      ->withIDs(mpull($this->revisions, 'getID'))
-      ->withDraftRepliesByAuthors(array($user->getPHID()))
-      ->execute();
-
+  public function setBackground($background) {
+    $this->background = $background;
     return $this;
   }
 
   public function render() {
+    $viewer = $this->getViewer();
 
-    $user = $this->user;
-    if (!$user) {
-      throw new Exception("Call setUser() before render()!");
+    $this->initBehavior('phabricator-tooltips', array());
+    $this->requireResource('aphront-tooltip-css');
+
+    $reviewer_limit = 7;
+
+    $reviewer_phids = array();
+    $reviewer_more = array();
+    $handle_phids = array();
+    foreach ($this->revisions as $key => $revision) {
+      $reviewers = $revision->getReviewers();
+
+      // Don't show reviewers who have resigned. The "Reviewers" constraint
+      // does not respect these reviewers and they largely don't count as
+      // reviewers.
+      foreach ($reviewers as $reviewer_key => $reviewer) {
+        if ($reviewer->isResigned()) {
+          unset($reviewers[$reviewer_key]);
+        }
+      }
+
+      if (count($reviewers) > $reviewer_limit) {
+        $reviewers = array_slice($reviewers, 0, $reviewer_limit);
+        $reviewer_more[$key] = true;
+      } else {
+        $reviewer_more[$key] = false;
+      }
+
+      $phids = mpull($reviewers, 'getReviewerPHID');
+
+      $reviewer_phids[$key] = $phids;
+      foreach ($phids as $phid) {
+        $handle_phids[$phid] = $phid;
+      }
+
+      $author_phid = $revision->getAuthorPHID();
+      $handle_phids[$author_phid] = $author_phid;
     }
 
-    $fresh = PhabricatorEnv::getEnvConfig('differential.days-fresh');
-    if ($fresh) {
-      $fresh = PhabricatorCalendarHoliday::getNthBusinessDay(
-        time(),
-        -$fresh);
-    }
-
-    $stale = PhabricatorEnv::getEnvConfig('differential.days-stale');
-    if ($stale) {
-      $stale = PhabricatorCalendarHoliday::getNthBusinessDay(
-        time(),
-        -$stale);
-    }
-
-    Javelin::initBehavior('phabricator-tooltips', array());
-    require_celerity_resource('aphront-tooltip-css');
-
-    $flagged = mpull($this->flags, null, 'getObjectPHID');
-
-    foreach ($this->fields as $field) {
-      $field->setHandles($this->handles);
-    }
+    $handles = $viewer->loadHandles($handle_phids);
 
     $list = new PHUIObjectItemListView();
-    $list->setCards(true);
-
-    $do_not_display_age = array(
-      ArcanistDifferentialRevisionStatus::CLOSED => true,
-      ArcanistDifferentialRevisionStatus::ABANDONED => true,
-    );
-
-    foreach ($this->revisions as $revision) {
+    foreach ($this->revisions as $key => $revision) {
       $item = id(new PHUIObjectItemView())
-        ->setUser($user);
+        ->setViewer($viewer);
 
-      $rev_fields = array();
       $icons = array();
 
       $phid = $revision->getPHID();
-      if (isset($flagged[$phid])) {
-        $flag = $flagged[$phid];
+      $flag = $revision->getFlag($viewer);
+      if ($flag) {
         $flag_class = PhabricatorFlagColor::getCSSClass($flag->getColor());
         $icons['flag'] = phutil_tag(
           'div',
@@ -137,51 +108,25 @@ final class DifferentialRevisionListView extends AphrontView {
           ),
           '');
       }
-      if (array_key_exists($revision->getID(), $this->drafts)) {
-        $icons['draft'] = true;
-      }
 
       $modified = $revision->getDateModified();
-
-      $status = $revision->getStatus();
-      $show_age = ($fresh || $stale) &&
-                  $this->highlightAge &&
-                  empty($do_not_display_age[$status]);
-
-
-      $object_age = PHUIObjectItemView::AGE_FRESH;
-      foreach ($this->fields as $field) {
-        if ($show_age) {
-          if ($field instanceof DifferentialDateModifiedFieldSpecification) {
-            if ($stale && $modified < $stale) {
-              $object_age = PHUIObjectItemView::AGE_OLD;
-            } else if ($fresh && $modified < $fresh) {
-              $object_age = PHUIObjectItemView::AGE_STALE;
-            }
-          }
-        }
-
-        $rev_header = $field->renderHeaderForRevisionList();
-        $rev_fields[$rev_header] = $field
-          ->renderValueForRevisionList($revision);
-      }
-
-      $status_name =
-        ArcanistDifferentialRevisionStatus::getNameForRevisionStatus($status);
 
       if (isset($icons['flag'])) {
         $item->addHeadIcon($icons['flag']);
       }
 
-      $item->setObjectName('D'.$revision->getID());
-      $item->setHeader(phutil_tag('a',
-        array('href' => '/D'.$revision->getID()),
-        $revision->getTitle()));
+      $item->setObjectName($revision->getMonogram());
+      $item->setHeader($revision->getTitle());
+      $item->setHref($revision->getURI());
 
-      if (isset($icons['draft'])) {
+      $size = $this->renderRevisionSize($revision);
+      if ($size !== null) {
+        $item->addAttribute($size);
+      }
+
+      if ($revision->getHasDraft($viewer)) {
         $draft = id(new PHUIIconView())
-          ->setSpriteSheet(PHUIIconView::SPRITE_ICONS)
-          ->setSpriteIcon('file-grey')
+          ->setIcon('fa-comment yellow')
           ->addSigil('has-tooltip')
           ->setMetadata(
             array(
@@ -190,70 +135,137 @@ final class DifferentialRevisionListView extends AphrontView {
         $item->addAttribute($draft);
       }
 
-      $item->addAttribute($status_name);
-
-      // Author
-      $author_handle = $this->handles[$revision->getAuthorPHID()];
+      $author_handle = $handles[$revision->getAuthorPHID()];
       $item->addByline(pht('Author: %s', $author_handle->renderLink()));
 
-      // Reviewers
-      $item->addAttribute(pht('Reviewers: %s', $rev_fields['Reviewers']));
-
-      $item->setEpoch($revision->getDateModified(), $object_age);
-
-      // First remove the fields we already have
-      $count = 7;
-      $rev_fields = array_slice($rev_fields, $count);
-
-      // Then add each one of them
-      // TODO: Add render-to-foot-icon support
-      foreach ($rev_fields as $header => $field) {
-        $item->addAttribute(pht('%s: %s', $header, $field));
+      $unlanded = idx($this->unlandedDependencies, $phid);
+      if ($unlanded) {
+        $item->addAttribute(
+          array(
+            id(new PHUIIconView())->setIcon('fa-chain-broken', 'red'),
+            ' ',
+            pht('Open Dependencies'),
+          ));
       }
 
-      switch ($status) {
-        case ArcanistDifferentialRevisionStatus::NEEDS_REVIEW:
-          break;
-        case ArcanistDifferentialRevisionStatus::NEEDS_REVISION:
-          $item->setBarColor('red');
-          break;
-        case ArcanistDifferentialRevisionStatus::ACCEPTED:
-          $item->setBarColor('green');
-          break;
-        case ArcanistDifferentialRevisionStatus::CLOSED:
-          $item->setDisabled(true);
-          break;
-        case ArcanistDifferentialRevisionStatus::ABANDONED:
-          $item->setBarColor('black');
-          break;
+      $more = null;
+      if ($reviewer_more[$key]) {
+        $more = pht(', ...');
+      } else {
+        $more = null;
       }
+
+      if ($reviewer_phids[$key]) {
+        $item->addAttribute(
+          array(
+            pht('Reviewers:'),
+            ' ',
+            $viewer->renderHandleList($reviewer_phids[$key])
+              ->setAsInline(true),
+            $more,
+          ));
+      } else {
+        $item->addAttribute(phutil_tag('em', array(), pht('No Reviewers')));
+      }
+
+      $item->setEpoch($revision->getDateModified());
+
+      if ($revision->isClosed()) {
+        $item->setDisabled(true);
+      }
+
+      $icon = $revision->getStatusIcon();
+      $color = $revision->getStatusIconColor();
+
+      $item->setStatusIcon(
+        "{$icon} {$color}",
+        $revision->getStatusDisplayName());
 
       $list->addItem($item);
     }
 
-    $list->setHeader($this->header);
     $list->setNoDataString($this->noDataString);
+
+
+    if ($this->header && !$this->noBox) {
+      $list->setFlush(true);
+      $list = id(new PHUIObjectBoxView())
+        ->setBackground($this->background)
+        ->setObjectList($list);
+
+      if ($this->header instanceof PHUIHeaderView) {
+        $list->setHeader($this->header);
+      } else {
+        $list->setHeaderText($this->header);
+      }
+    } else {
+      $list->setHeader($this->header);
+    }
 
     return $list;
   }
 
-  public static function getDefaultFields(PhabricatorUser $user) {
-    $selector = DifferentialFieldSelector::newSelector();
-    $fields = $selector->getFieldSpecifications();
-    foreach ($fields as $key => $field) {
-      $field->setUser($user);
-      if (!$field->shouldAppearOnRevisionList()) {
-        unset($fields[$key]);
+  private function renderRevisionSize(DifferentialRevision $revision) {
+    if (!$revision->hasLineCounts()) {
+      return null;
+    }
+
+    $size = array();
+
+    $glyphs = $revision->getRevisionScaleGlyphs();
+    $plus_count = 0;
+    for ($ii = 0; $ii < 7; $ii++) {
+      $c = $glyphs[$ii];
+
+      switch ($c) {
+        case '+':
+          $size[] = id(new PHUIIconView())
+            ->setIcon('fa-plus');
+          $plus_count++;
+          break;
+        case '-':
+          $size[] = id(new PHUIIconView())
+            ->setIcon('fa-minus');
+          break;
+        default:
+          $size[] = id(new PHUIIconView())
+            ->setIcon('fa-square-o invisible');
+          break;
       }
     }
 
-    if (!$fields) {
-      throw new Exception(
-        "Phabricator configuration has no fields that appear on the list ".
-        "interface!");
+    $n = $revision->getAddedLineCount() + $revision->getRemovedLineCount();
+
+    $classes = array();
+    $classes[] = 'differential-revision-size';
+
+    $tip = array();
+    $tip[] = pht('%s Lines', new PhutilNumber($n));
+
+    if ($plus_count <= 1) {
+      $classes[] = 'differential-revision-small';
+      $tip[] = pht('Smaller Change');
     }
 
-    return $selector->sortFieldsForRevisionList($fields);
+    if ($plus_count >= 4) {
+      $classes[] = 'differential-revision-large';
+      $tip[] = pht('Larger Change');
+    }
+
+    $tip = phutil_implode_html(" \xC2\xB7 ", $tip);
+
+    return javelin_tag(
+      'span',
+      array(
+        'class' => implode(' ', $classes),
+        'sigil' => 'has-tooltip',
+        'meta' => array(
+          'tip' => $tip,
+          'align' => 'E',
+          'size' => 400,
+        ),
+      ),
+      $size);
   }
 
 }

@@ -4,7 +4,7 @@
  * @task config     Configuring Repository Engines
  * @task internal   Internals
  */
-abstract class PhabricatorRepositoryEngine {
+abstract class PhabricatorRepositoryEngine extends Phobject {
 
   private $repository;
   private $verbose;
@@ -23,7 +23,7 @@ abstract class PhabricatorRepositoryEngine {
    */
   protected function getRepository() {
     if ($this->repository === null) {
-      throw new Exception("Call setRepository() to provide a repository!");
+      throw new PhutilInvalidStateException('setRepository');
     }
 
     return $this->repository;
@@ -47,6 +47,29 @@ abstract class PhabricatorRepositoryEngine {
   }
 
 
+  public function getViewer() {
+    return PhabricatorUser::getOmnipotentUser();
+  }
+
+  protected function newRepositoryLock(
+    PhabricatorRepository $repository,
+    $lock_key,
+    $lock_device_only) {
+
+    $lock_parts = array(
+      'repositoryPHID' => $repository->getPHID(),
+    );
+
+    if ($lock_device_only) {
+      $device = AlmanacKeys::getLiveDevice();
+      if ($device) {
+        $lock_parts['devicePHID'] = $device->getPHID();
+      }
+    }
+
+    return PhabricatorGlobalLock::newLock($lock_key, $lock_parts);
+  }
+
   /**
    * @task internal
    */
@@ -54,7 +77,7 @@ abstract class PhabricatorRepositoryEngine {
     if ($this->getVerbose()) {
       $console = PhutilConsole::getConsole();
       $argv = func_get_args();
-      $argv[0] = $argv[0]."\n";
+      array_unshift($argv, "%s\n");
       call_user_func_array(array($console, 'writeOut'), $argv);
     }
     return $this;

@@ -1,9 +1,14 @@
 <?php
 
-/**
- * @group phriction
- */
 abstract class PhrictionController extends PhabricatorController {
+
+  private $showingWelcomeDocument = false;
+
+  public function setShowingWelcomeDocument($show_welcome) {
+    $this->showingWelcomeDocument = $show_welcome;
+    return $this;
+
+  }
 
   public function buildSideNavView($for_app = false) {
     $user = $this->getRequest()->getUser();
@@ -16,7 +21,7 @@ abstract class PhrictionController extends PhabricatorController {
       $nav->addFilter('/phriction/', pht('Index'));
     }
 
-    id(new PhrictionSearchEngine())
+    id(new PhrictionDocumentSearchEngine())
       ->setViewer($user)
       ->addNavigationItems($nav->getMenu());
 
@@ -29,7 +34,7 @@ abstract class PhrictionController extends PhabricatorController {
     return $this->buildSideNavView(true)->getMenu();
   }
 
-  public function buildApplicationCrumbs() {
+  protected function buildApplicationCrumbs() {
     $crumbs = parent::buildApplicationCrumbs();
 
     if (get_class($this) != 'PhrictionListController') {
@@ -37,15 +42,17 @@ abstract class PhrictionController extends PhabricatorController {
         id(new PHUIListItemView())
           ->setName(pht('Index'))
           ->setHref('/phriction/')
-          ->setIcon('transcript'));
+          ->setIcon('fa-home'));
     }
 
-    $crumbs->addAction(
-      id(new PHUIListItemView())
-        ->setName(pht('New Document'))
-        ->setHref('/phriction/new/?slug='.$this->getDocumentSlug())
-        ->setWorkflow(true)
-        ->setIcon('create'));
+    if (!$this->showingWelcomeDocument) {
+      $crumbs->addAction(
+        id(new PHUIListItemView())
+          ->setName(pht('New Document'))
+          ->setHref('/phriction/new/?slug='.$this->getDocumentSlug())
+          ->setWorkflow(true)
+          ->setIcon('fa-plus-square'));
+    }
 
     return $crumbs;
   }
@@ -56,9 +63,10 @@ abstract class PhrictionController extends PhabricatorController {
     $ancestral_slugs[] = $slug;
     if ($ancestral_slugs) {
       $empty_slugs = array_fill_keys($ancestral_slugs, null);
-      $ancestors = id(new PhrictionDocument())->loadAllWhere(
-        'slug IN (%Ls)',
-        $ancestral_slugs);
+      $ancestors = id(new PhrictionDocumentQuery())
+        ->setViewer($this->getRequest()->getUser())
+        ->withSlugs($ancestral_slugs)
+        ->execute();
       $ancestors = mpull($ancestors, null, 'getSlug');
 
       $ancestor_phids = mpull($ancestors, 'getPHID');
@@ -82,7 +90,7 @@ abstract class PhrictionController extends PhabricatorController {
 
     $breadcrumbs = array();
     foreach ($ancestor_handles as $ancestor_handle) {
-      $breadcrumbs[] = id(new PhabricatorCrumbView())
+      $breadcrumbs[] = id(new PHUICrumbView())
         ->setName($ancestor_handle->getName())
         ->setHref($ancestor_handle->getUri());
     }

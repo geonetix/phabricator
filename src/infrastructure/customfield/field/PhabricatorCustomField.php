@@ -1,30 +1,41 @@
 <?php
 
 /**
- * @task apps       Building Applications with Custom Fields
- * @task core       Core Properties and Field Identity
- * @task proxy      Field Proxies
- * @task context    Contextual Data
- * @task storage    Field Storage
- * @task appsearch  Integration with ApplicationSearch
- * @task appxaction Integration with ApplicationTransactions
- * @task edit       Integration with edit views
- * @task view       Integration with property views
- * @task list       Integration with list views
+ * @task apps         Building Applications with Custom Fields
+ * @task core         Core Properties and Field Identity
+ * @task proxy        Field Proxies
+ * @task context      Contextual Data
+ * @task render       Rendering Utilities
+ * @task storage      Field Storage
+ * @task edit         Integration with Edit Views
+ * @task view         Integration with Property Views
+ * @task list         Integration with List views
+ * @task appsearch    Integration with ApplicationSearch
+ * @task appxaction   Integration with ApplicationTransactions
+ * @task xactionmail  Integration with Transaction Mail
+ * @task globalsearch Integration with Global Search
+ * @task herald       Integration with Herald
  */
-abstract class PhabricatorCustomField {
+abstract class PhabricatorCustomField extends Phobject {
 
   private $viewer;
   private $object;
   private $proxy;
 
   const ROLE_APPLICATIONTRANSACTIONS  = 'ApplicationTransactions';
+  const ROLE_TRANSACTIONMAIL          = 'ApplicationTransactions.mail';
   const ROLE_APPLICATIONSEARCH        = 'ApplicationSearch';
   const ROLE_STORAGE                  = 'storage';
   const ROLE_DEFAULT                  = 'default';
   const ROLE_EDIT                     = 'edit';
   const ROLE_VIEW                     = 'view';
   const ROLE_LIST                     = 'list';
+  const ROLE_GLOBALSEARCH             = 'GlobalSearch';
+  const ROLE_CONDUIT                  = 'conduit';
+  const ROLE_HERALD                   = 'herald';
+  const ROLE_EDITENGINE = 'EditEngine';
+  const ROLE_HERALDACTION = 'herald.action';
+  const ROLE_EXPORT = 'export';
 
 
 /* -(  Building Applications with Custom Fields  )--------------------------- */
@@ -51,17 +62,34 @@ abstract class PhabricatorCustomField {
 
       $spec = $object->getCustomFieldSpecificationForRole($role);
       if (!is_array($spec)) {
-        $obj_class = get_class($object);
         throw new Exception(
-          "Expected an array from getCustomFieldSpecificationForRole() for ".
-          "object of class '{$obj_class}'.");
+          pht(
+            "Expected an array from %s for object of class '%s'.",
+            'getCustomFieldSpecificationForRole()',
+            get_class($object)));
       }
 
-      $fields = PhabricatorCustomField::buildFieldList($base_class, $spec);
+      $fields = self::buildFieldList(
+        $base_class,
+        $spec,
+        $object);
+
+      $fields = self::adjustCustomFieldsForObjectSubtype(
+        $object,
+        $role,
+        $fields);
 
       foreach ($fields as $key => $field) {
+        // NOTE: We perform this filtering in "buildFieldList()", but may need
+        // to filter again after subtype adjustment.
+        if (!$field->isFieldEnabled()) {
+          unset($fields[$key]);
+          continue;
+        }
+
         if (!$field->shouldEnableForRole($role)) {
           unset($fields[$key]);
+          continue;
         }
       }
 
@@ -94,24 +122,30 @@ abstract class PhabricatorCustomField {
   /**
    * @task apps
    */
-  public static function buildFieldList($base_class, array $spec) {
-    $field_objects = id(new PhutilSymbolLoader())
+  public static function buildFieldList(
+    $base_class,
+    array $spec,
+    $object,
+    array $options = array()) {
+
+    $field_objects = id(new PhutilClassMapQuery())
       ->setAncestorClass($base_class)
-      ->loadObjects();
+      ->execute();
 
     $fields = array();
-    $from_map = array();
     foreach ($field_objects as $field_object) {
-      $current_class = get_class($field_object);
-      foreach ($field_object->createFields() as $field) {
+      $field_object = clone $field_object;
+      foreach ($field_object->createFields($object) as $field) {
         $key = $field->getFieldKey();
         if (isset($fields[$key])) {
-          $original_class = $from_map[$key];
           throw new Exception(
-            "Both '{$original_class}' and '{$current_class}' define a custom ".
-            "field with field key '{$key}'. Field keys must be unique.");
+            pht(
+              "Both '%s' and '%s' define a custom field with ".
+              "field key '%s'. Field keys must be unique.",
+              get_class($fields[$key]),
+              get_class($field),
+              $key));
         }
-        $from_map[$key] = $current_class;
         $fields[$key] = $field;
       }
     }
@@ -124,13 +158,18 @@ abstract class PhabricatorCustomField {
 
     $fields = array_select_keys($fields, array_keys($spec)) + $fields;
 
-    foreach ($spec as $key => $config) {
-      if (empty($fields[$key])) {
-        continue;
-      }
-      if (!empty($config['disabled'])) {
-        if ($fields[$key]->canDisableField()) {
-          unset($fields[$key]);
+    if (empty($options['withDisabled'])) {
+      foreach ($fields as $key => $field) {
+        if (isset($spec[$key]['disabled'])) {
+          $is_disabled = $spec[$key]['disabled'];
+        } else {
+          $is_disabled = $field->shouldDisableByDefault();
+        }
+
+        if ($is_disabled) {
+          if ($field->canDisableField()) {
+            unset($fields[$key]);
+          }
         }
       }
     }
@@ -159,6 +198,13 @@ abstract class PhabricatorCustomField {
       $field_key_is_incomplete = true);
   }
 
+  public function getModernFieldKey() {
+    if ($this->proxy) {
+      return $this->proxy->getModernFieldKey();
+    }
+    return $this->getFieldKey();
+  }
+
 
   /**
    * Return a human-readable field name.
@@ -170,7 +216,7 @@ abstract class PhabricatorCustomField {
     if ($this->proxy) {
       return $this->proxy->getFieldName();
     }
-    return $this->getFieldKey();
+    return $this->getModernFieldKey();
   }
 
 
@@ -197,10 +243,11 @@ abstract class PhabricatorCustomField {
    * For general implementations, the general field implementation can return
    * multiple field instances here.
    *
+   * @param object The object to create fields for.
    * @return list<PhabricatorCustomField> List of fields.
    * @task core
    */
-  public function createFields() {
+  public function createFields($object) {
     return array($this);
   }
 
@@ -236,9 +283,9 @@ abstract class PhabricatorCustomField {
    * @task core
    */
   public function shouldEnableForRole($role) {
-    if ($this->proxy) {
-      return $this->proxy->shouldEnableForRole($role);
-    }
+
+    // NOTE: All of these calls proxy individually, so we don't need to
+    // proxy this call as a whole.
 
     switch ($role) {
       case self::ROLE_APPLICATIONTRANSACTIONS:
@@ -253,10 +300,25 @@ abstract class PhabricatorCustomField {
         return $this->shouldAppearInPropertyView();
       case self::ROLE_LIST:
         return $this->shouldAppearInListView();
+      case self::ROLE_GLOBALSEARCH:
+        return $this->shouldAppearInGlobalSearch();
+      case self::ROLE_CONDUIT:
+        return $this->shouldAppearInConduitDictionary();
+      case self::ROLE_TRANSACTIONMAIL:
+        return $this->shouldAppearInTransactionMail();
+      case self::ROLE_HERALD:
+        return $this->shouldAppearInHerald();
+      case self::ROLE_HERALDACTION:
+        return $this->shouldAppearInHeraldActions();
+      case self::ROLE_EDITENGINE:
+        return $this->shouldAppearInEditView() ||
+               $this->shouldAppearInEditEngine();
+      case self::ROLE_EXPORT:
+        return $this->shouldAppearInDataExport();
       case self::ROLE_DEFAULT:
         return true;
       default:
-        throw new Exception("Unknown field role '{$role}'!");
+        throw new Exception(pht("Unknown field role '%s'!", $role));
     }
   }
 
@@ -272,6 +334,10 @@ abstract class PhabricatorCustomField {
    */
   public function canDisableField() {
     return true;
+  }
+
+  public function shouldDisableByDefault() {
+    return false;
   }
 
 
@@ -347,6 +413,7 @@ abstract class PhabricatorCustomField {
    * Sets the object this field belongs to.
    *
    * @param PhabricatorCustomFieldInterface The object this field belongs to.
+   * @return this
    * @task context
    */
   final public function setObject(PhabricatorCustomFieldInterface $object) {
@@ -357,6 +424,21 @@ abstract class PhabricatorCustomField {
 
     $this->object = $object;
     $this->didSetObject($object);
+    return $this;
+  }
+
+
+  /**
+   * Read object data into local field storage, if applicable.
+   *
+   * @param PhabricatorCustomFieldInterface The object this field belongs to.
+   * @return this
+   * @task context
+   */
+  public function readValueFromObject(PhabricatorCustomFieldInterface $object) {
+    if ($this->proxy) {
+      $this->proxy->readValueFromObject($object);
+    }
     return $this;
   }
 
@@ -428,6 +510,26 @@ abstract class PhabricatorCustomField {
   }
 
 
+/* -(  Rendering Utilities  )------------------------------------------------ */
+
+
+  /**
+   * @task render
+   */
+  protected function renderHandleList(array $handles) {
+    if (!$handles) {
+      return null;
+    }
+
+    $out = array();
+    foreach ($handles as $handle) {
+      $out[] = $handle->renderHovercardLink();
+    }
+
+    return phutil_implode_html(phutil_tag('br'), $out);
+  }
+
+
 /* -(  Storage  )------------------------------------------------------------ */
 
 
@@ -462,9 +564,7 @@ abstract class PhabricatorCustomField {
    * @task storage
    */
   public function newStorageObject() {
-    if ($this->proxy) {
-      return $this->proxy->newStorageObject();
-    }
+    // NOTE: This intentionally isn't proxied, to avoid call cycles.
     throw new PhabricatorCustomFieldImplementationIncompleteException($this);
   }
 
@@ -509,6 +609,13 @@ abstract class PhabricatorCustomField {
       return $this->proxy->setValueFromStorage($value);
     }
     throw new PhabricatorCustomFieldImplementationIncompleteException($this);
+  }
+
+  public function didSetValueFromStorage() {
+    if ($this->proxy) {
+      return $this->proxy->didSetValueFromStorage();
+    }
+    return $this;
   }
 
 
@@ -557,6 +664,28 @@ abstract class PhabricatorCustomField {
       return $this->proxy->buildFieldIndexes();
     }
     return array();
+  }
+
+
+  /**
+   * Return an index against which this field can be meaningfully ordered
+   * against to implement ApplicationSearch.
+   *
+   * This should be a single index, normally built using
+   * @{method:newStringIndex} and @{method:newNumericIndex}.
+   *
+   * The value of the index is not used.
+   *
+   * Return null from this method if the field can not be ordered.
+   *
+   * @return PhabricatorCustomFieldIndexStorage A single index to order by.
+   * @task appsearch
+   */
+  public function buildOrderIndex() {
+    if ($this->proxy) {
+      return $this->proxy->buildOrderIndex();
+    }
+    return null;
   }
 
 
@@ -672,46 +801,25 @@ abstract class PhabricatorCustomField {
 
 
   /**
-   * Append search controls to the interface. If you need handles, use
-   * @{method:getRequiredHandlePHIDsForApplicationSearch} to get them.
+   * Append search controls to the interface.
    *
    * @param PhabricatorApplicationSearchEngine Engine constructing the form.
    * @param AphrontFormView The form to update.
    * @param wild Value from the saved query.
-   * @param list<PhabricatorObjectHandle> List of handles.
    * @return void
    * @task appsearch
    */
   public function appendToApplicationSearchForm(
     PhabricatorApplicationSearchEngine $engine,
     AphrontFormView $form,
-    $value,
-    array $handles) {
+    $value) {
     if ($this->proxy) {
       return $this->proxy->appendToApplicationSearchForm(
         $engine,
         $form,
-        $value,
-        $handles);
+        $value);
     }
     throw new PhabricatorCustomFieldImplementationIncompleteException($this);
-  }
-
-
-  /**
-   * Return a list of PHIDs which @{method:appendToApplicationSearchForm} needs
-   * handles for. This is primarily useful if the field stores PHIDs and you
-   * need to (for example) render a tokenizer control.
-   *
-   * @param wild Value from the saved query.
-   * @return list<phid> List of PHIDs.
-   * @task appsearch
-   */
-  public function getRequiredHandlePHIDsForApplicationSearch($value) {
-    if ($this->proxy) {
-      return $this->proxy->getRequiredHandlePHIDsForApplicationSearch($value);
-    }
-    return array();
   }
 
 
@@ -730,6 +838,28 @@ abstract class PhabricatorCustomField {
       return $this->proxy->shouldAppearInApplicationTransactions();
     }
     return false;
+  }
+
+
+  /**
+   * @task appxaction
+   */
+  public function getApplicationTransactionType() {
+    if ($this->proxy) {
+      return $this->proxy->getApplicationTransactionType();
+    }
+    return PhabricatorTransactions::TYPE_CUSTOMFIELD;
+  }
+
+
+  /**
+   * @task appxaction
+   */
+  public function getApplicationTransactionMetadata() {
+    if ($this->proxy) {
+      return $this->proxy->getApplicationTransactionMetadata();
+    }
+    return array();
   }
 
 
@@ -799,6 +929,18 @@ abstract class PhabricatorCustomField {
       return $this->proxy->applyApplicationTransactionInternalEffects($xaction);
     }
     return;
+  }
+
+
+  /**
+   * @task appxaction
+   */
+  public function getApplicationTransactionRemarkupBlocks(
+    PhabricatorApplicationTransaction $xaction) {
+    if ($this->proxy) {
+      return $this->proxy->getApplicationTransactionRemarkupBlocks($xaction);
+    }
+    return array();
   }
 
 
@@ -887,12 +1029,10 @@ abstract class PhabricatorCustomField {
   }
 
   public function getApplicationTransactionTitleForFeed(
-    PhabricatorApplicationTransaction $xaction,
-    PhabricatorFeedStory $story) {
+    PhabricatorApplicationTransaction $xaction) {
     if ($this->proxy) {
       return $this->proxy->getApplicationTransactionTitleForFeed(
-        $xaction,
-        $story);
+        $xaction);
     }
 
     $author_phid = $xaction->getAuthorPHID();
@@ -904,8 +1044,164 @@ abstract class PhabricatorCustomField {
   }
 
 
+  public function getApplicationTransactionHasChangeDetails(
+    PhabricatorApplicationTransaction $xaction) {
+    if ($this->proxy) {
+      return $this->proxy->getApplicationTransactionHasChangeDetails(
+        $xaction);
+    }
+    return false;
+  }
+
+  public function getApplicationTransactionChangeDetails(
+    PhabricatorApplicationTransaction $xaction,
+    PhabricatorUser $viewer) {
+    if ($this->proxy) {
+      return $this->proxy->getApplicationTransactionChangeDetails(
+        $xaction,
+        $viewer);
+    }
+    return null;
+  }
+
+  public function getApplicationTransactionRequiredHandlePHIDs(
+    PhabricatorApplicationTransaction $xaction) {
+    if ($this->proxy) {
+      return $this->proxy->getApplicationTransactionRequiredHandlePHIDs(
+        $xaction);
+    }
+    return array();
+  }
+
+  public function shouldHideInApplicationTransactions(
+    PhabricatorApplicationTransaction $xaction) {
+    if ($this->proxy) {
+      return $this->proxy->shouldHideInApplicationTransactions($xaction);
+    }
+    return false;
+  }
+
+
+/* -(  Transaction Mail  )--------------------------------------------------- */
+
+
+  /**
+   * @task xactionmail
+   */
+  public function shouldAppearInTransactionMail() {
+    if ($this->proxy) {
+      return $this->proxy->shouldAppearInTransactionMail();
+    }
+    return false;
+  }
+
+
+  /**
+   * @task xactionmail
+   */
+  public function updateTransactionMailBody(
+    PhabricatorMetaMTAMailBody $body,
+    PhabricatorApplicationTransactionEditor $editor,
+    array $xactions) {
+    if ($this->proxy) {
+      return $this->proxy->updateTransactionMailBody($body, $editor, $xactions);
+    }
+    return;
+  }
+
+
 /* -(  Edit View  )---------------------------------------------------------- */
 
+
+  public function getEditEngineFields(PhabricatorEditEngine $engine) {
+    $field = $this->newStandardEditField();
+
+    return array(
+      $field,
+    );
+  }
+
+  protected function newEditField() {
+    $field = id(new PhabricatorCustomFieldEditField())
+      ->setCustomField($this);
+
+    $http_type = $this->getHTTPParameterType();
+    if ($http_type) {
+      $field->setCustomFieldHTTPParameterType($http_type);
+    }
+
+    $conduit_type = $this->getConduitEditParameterType();
+    if ($conduit_type) {
+      $field->setCustomFieldConduitParameterType($conduit_type);
+    }
+
+    $bulk_type = $this->getBulkParameterType();
+    if ($bulk_type) {
+      $field->setCustomFieldBulkParameterType($bulk_type);
+    }
+
+    $comment_action = $this->getCommentAction();
+    if ($comment_action) {
+      $field
+        ->setCustomFieldCommentAction($comment_action)
+        ->setCommentActionLabel(
+          pht(
+            'Change %s',
+            $this->getFieldName()));
+    }
+
+    return $field;
+  }
+
+  protected function newStandardEditField() {
+    if ($this->proxy) {
+      return $this->proxy->newStandardEditField();
+    }
+
+    if ($this->shouldAppearInEditView()) {
+      $form_field = true;
+    } else {
+      $form_field = false;
+    }
+
+    $bulk_label = $this->getBulkEditLabel();
+
+    return $this->newEditField()
+      ->setKey($this->getFieldKey())
+      ->setEditTypeKey($this->getModernFieldKey())
+      ->setLabel($this->getFieldName())
+      ->setBulkEditLabel($bulk_label)
+      ->setDescription($this->getFieldDescription())
+      ->setTransactionType($this->getApplicationTransactionType())
+      ->setIsFormField($form_field)
+      ->setValue($this->getNewValueForApplicationTransactions());
+  }
+
+  protected function getBulkEditLabel() {
+    if ($this->proxy) {
+      return $this->proxy->getBulkEditLabel();
+    }
+
+    return pht('Set "%s" to', $this->getFieldName());
+  }
+
+  public function getBulkParameterType() {
+    return $this->newBulkParameterType();
+  }
+
+  protected function newBulkParameterType() {
+    if ($this->proxy) {
+      return $this->proxy->newBulkParameterType();
+    }
+    return null;
+  }
+
+  protected function getHTTPParameterType() {
+    if ($this->proxy) {
+      return $this->proxy->getHTTPParameterType();
+    }
+    return null;
+  }
 
   /**
    * @task edit
@@ -913,6 +1209,16 @@ abstract class PhabricatorCustomField {
   public function shouldAppearInEditView() {
     if ($this->proxy) {
       return $this->proxy->shouldAppearInEditView();
+    }
+    return false;
+  }
+
+  /**
+   * @task edit
+   */
+  public function shouldAppearInEditEngine() {
+    if ($this->proxy) {
+      return $this->proxy->shouldAppearInEditEngine();
     }
     return false;
   }
@@ -932,9 +1238,31 @@ abstract class PhabricatorCustomField {
   /**
    * @task edit
    */
-  public function renderEditControl() {
+  public function getRequiredHandlePHIDsForEdit() {
     if ($this->proxy) {
-      return $this->proxy->renderEditControl();
+      return $this->proxy->getRequiredHandlePHIDsForEdit();
+    }
+    return array();
+  }
+
+
+  /**
+   * @task edit
+   */
+  public function getInstructionsForEdit() {
+    if ($this->proxy) {
+      return $this->proxy->getInstructionsForEdit();
+    }
+    return null;
+  }
+
+
+  /**
+   * @task edit
+   */
+  public function renderEditControl(array $handles) {
+    if ($this->proxy) {
+      return $this->proxy->renderEditControl($handles);
     }
     throw new PhabricatorCustomFieldImplementationIncompleteException($this);
   }
@@ -968,9 +1296,9 @@ abstract class PhabricatorCustomField {
   /**
    * @task view
    */
-  public function renderPropertyViewValue() {
+  public function renderPropertyViewValue(array $handles) {
     if ($this->proxy) {
-      return $this->proxy->renderPropertyViewValue();
+      return $this->proxy->renderPropertyViewValue($handles);
     }
     throw new PhabricatorCustomFieldImplementationIncompleteException($this);
   }
@@ -984,6 +1312,28 @@ abstract class PhabricatorCustomField {
       return $this->proxy->getStyleForPropertyView();
     }
     return 'property';
+  }
+
+
+  /**
+   * @task view
+   */
+  public function getIconForPropertyView() {
+    if ($this->proxy) {
+      return $this->proxy->getIconForPropertyView();
+    }
+    return null;
+  }
+
+
+  /**
+   * @task view
+   */
+  public function getRequiredHandlePHIDsForPropertyView() {
+    if ($this->proxy) {
+      return $this->proxy->getRequiredHandlePHIDsForPropertyView();
+    }
+    return array();
   }
 
 
@@ -1011,5 +1361,353 @@ abstract class PhabricatorCustomField {
     throw new PhabricatorCustomFieldImplementationIncompleteException($this);
   }
 
+
+/* -(  Global Search  )------------------------------------------------------ */
+
+
+  /**
+   * @task globalsearch
+   */
+  public function shouldAppearInGlobalSearch() {
+    if ($this->proxy) {
+      return $this->proxy->shouldAppearInGlobalSearch();
+    }
+    return false;
+  }
+
+
+  /**
+   * @task globalsearch
+   */
+  public function updateAbstractDocument(
+    PhabricatorSearchAbstractDocument $document) {
+    if ($this->proxy) {
+      return $this->proxy->updateAbstractDocument($document);
+    }
+    return $document;
+  }
+
+
+/* -(  Data Export  )-------------------------------------------------------- */
+
+
+  public function shouldAppearInDataExport() {
+    if ($this->proxy) {
+      return $this->proxy->shouldAppearInDataExport();
+    }
+
+    try {
+      $this->newExportFieldType();
+      return true;
+    } catch (PhabricatorCustomFieldImplementationIncompleteException $ex) {
+      return false;
+    }
+  }
+
+  public function newExportField() {
+    if ($this->proxy) {
+      return $this->proxy->newExportField();
+    }
+
+    return $this->newExportFieldType()
+      ->setLabel($this->getFieldName());
+  }
+
+  public function newExportData() {
+    if ($this->proxy) {
+      return $this->proxy->newExportData();
+    }
+    throw new PhabricatorCustomFieldImplementationIncompleteException($this);
+  }
+
+  protected function newExportFieldType() {
+    if ($this->proxy) {
+      return $this->proxy->newExportFieldType();
+    }
+    throw new PhabricatorCustomFieldImplementationIncompleteException($this);
+  }
+
+
+/* -(  Conduit  )------------------------------------------------------------ */
+
+
+  /**
+   * @task conduit
+   */
+  public function shouldAppearInConduitDictionary() {
+    if ($this->proxy) {
+      return $this->proxy->shouldAppearInConduitDictionary();
+    }
+    return false;
+  }
+
+
+  /**
+   * @task conduit
+   */
+  public function getConduitDictionaryValue() {
+    if ($this->proxy) {
+      return $this->proxy->getConduitDictionaryValue();
+    }
+    throw new PhabricatorCustomFieldImplementationIncompleteException($this);
+  }
+
+
+  public function shouldAppearInConduitTransactions() {
+    if ($this->proxy) {
+      return $this->proxy->shouldAppearInConduitDictionary();
+    }
+    return false;
+  }
+
+  public function getConduitSearchParameterType() {
+    return $this->newConduitSearchParameterType();
+  }
+
+  protected function newConduitSearchParameterType() {
+    if ($this->proxy) {
+      return $this->proxy->newConduitSearchParameterType();
+    }
+    return null;
+  }
+
+  public function getConduitEditParameterType() {
+    return $this->newConduitEditParameterType();
+  }
+
+  protected function newConduitEditParameterType() {
+    if ($this->proxy) {
+      return $this->proxy->newConduitEditParameterType();
+    }
+    return null;
+  }
+
+  public function getCommentAction() {
+    return $this->newCommentAction();
+  }
+
+  protected function newCommentAction() {
+    if ($this->proxy) {
+      return $this->proxy->newCommentAction();
+    }
+    return null;
+  }
+
+
+/* -(  Herald  )------------------------------------------------------------- */
+
+
+  /**
+   * Return `true` to make this field available in Herald.
+   *
+   * @return bool True to expose the field in Herald.
+   * @task herald
+   */
+  public function shouldAppearInHerald() {
+    if ($this->proxy) {
+      return $this->proxy->shouldAppearInHerald();
+    }
+    return false;
+  }
+
+
+  /**
+   * Get the name of the field in Herald. By default, this uses the
+   * normal field name.
+   *
+   * @return string Herald field name.
+   * @task herald
+   */
+  public function getHeraldFieldName() {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldFieldName();
+    }
+    return $this->getFieldName();
+  }
+
+
+  /**
+   * Get the field value for evaluation by Herald.
+   *
+   * @return wild Field value.
+   * @task herald
+   */
+  public function getHeraldFieldValue() {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldFieldValue();
+    }
+    throw new PhabricatorCustomFieldImplementationIncompleteException($this);
+  }
+
+
+  /**
+   * Get the available conditions for this field in Herald.
+   *
+   * @return list<const> List of Herald condition constants.
+   * @task herald
+   */
+  public function getHeraldFieldConditions() {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldFieldConditions();
+    }
+    throw new PhabricatorCustomFieldImplementationIncompleteException($this);
+  }
+
+
+  /**
+   * Get the Herald value type for the given condition.
+   *
+   * @param   const       Herald condition constant.
+   * @return  const|null  Herald value type, or null to use the default.
+   * @task herald
+   */
+  public function getHeraldFieldValueType($condition) {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldFieldValueType($condition);
+    }
+    return null;
+  }
+
+  public function getHeraldFieldStandardType() {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldFieldStandardType();
+    }
+    return null;
+  }
+
+  public function getHeraldDatasource() {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldDatasource();
+    }
+    return null;
+  }
+
+
+  public function shouldAppearInHeraldActions() {
+    if ($this->proxy) {
+      return $this->proxy->shouldAppearInHeraldActions();
+    }
+    return false;
+  }
+
+
+  public function getHeraldActionName() {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldActionName();
+    }
+
+    return null;
+  }
+
+
+  public function getHeraldActionStandardType() {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldActionStandardType();
+    }
+
+    return null;
+  }
+
+
+  public function getHeraldActionDescription($value) {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldActionDescription($value);
+    }
+
+    return null;
+  }
+
+
+  public function getHeraldActionEffectDescription($value) {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldActionEffectDescription($value);
+    }
+
+    return null;
+  }
+
+
+  public function getHeraldActionDatasource() {
+    if ($this->proxy) {
+      return $this->proxy->getHeraldActionDatasource();
+    }
+
+    return null;
+  }
+
+  private static function adjustCustomFieldsForObjectSubtype(
+    PhabricatorCustomFieldInterface $object,
+    $role,
+    array $fields) {
+    assert_instances_of($fields, __CLASS__);
+
+    // We only apply subtype adjustment for some roles. For example, when
+    // writing Herald rules or building a Search interface, we always want to
+    // show all the fields in their default state, so we do not apply any
+    // adjustments.
+    $subtype_roles = array(
+      self::ROLE_EDITENGINE,
+      self::ROLE_VIEW,
+      self::ROLE_EDIT,
+    );
+
+    $subtype_roles = array_fuse($subtype_roles);
+    if (!isset($subtype_roles[$role])) {
+      return $fields;
+    }
+
+    // If the object doesn't support subtypes, we can't possibly make
+    // any adjustments based on subtype.
+    if (!($object instanceof PhabricatorEditEngineSubtypeInterface)) {
+      return $fields;
+    }
+
+    $subtype_map = $object->newEditEngineSubtypeMap();
+    $subtype_key = $object->getEditEngineSubtype();
+    $subtype_object = $subtype_map->getSubtype($subtype_key);
+
+    $map = array();
+    foreach ($fields as $field) {
+      $modern_key = $field->getModernFieldKey();
+      if (!strlen($modern_key)) {
+        continue;
+      }
+
+      $map[$modern_key] = $field;
+    }
+
+    foreach ($map as $field_key => $field) {
+      // For now, only support overriding standard custom fields. In the
+      // future there's no technical or product reason we couldn't let you
+      // override (some properites of) other fields like "Title", but they
+      // don't usually support appropriate "setX()" methods today.
+      if (!($field instanceof PhabricatorStandardCustomField)) {
+        // For fields that are proxies on top of StandardCustomField, which
+        // is how most application custom fields work today, we can reconfigure
+        // the proxied field instead.
+        $field = $field->getProxy();
+        if (!$field || !($field instanceof PhabricatorStandardCustomField)) {
+          continue;
+        }
+      }
+
+      $subtype_config = $subtype_object->getSubtypeFieldConfiguration(
+        $field_key);
+
+      if (!$subtype_config) {
+        continue;
+      }
+
+      if (isset($subtype_config['disabled'])) {
+        $field->setIsEnabled(!$subtype_config['disabled']);
+      }
+
+      if (isset($subtype_config['name'])) {
+        $field->setFieldName($subtype_config['name']);
+      }
+    }
+
+    return $fields;
+  }
 
 }

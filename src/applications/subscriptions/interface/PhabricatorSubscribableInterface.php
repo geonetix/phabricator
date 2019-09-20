@@ -14,3 +14,14 @@ interface PhabricatorSubscribableInterface {
   public function isAutomaticallySubscribed($phid);
 
 }
+
+// TEMPLATE IMPLEMENTATION /////////////////////////////////////////////////////
+
+/* -(  PhabricatorSubscribableInterface  )----------------------------------- */
+/*
+
+  public function isAutomaticallySubscribed($phid) {
+    return false;
+  }
+
+*/

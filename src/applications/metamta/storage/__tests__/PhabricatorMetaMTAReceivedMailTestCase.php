@@ -48,11 +48,19 @@ final class PhabricatorMetaMTAReceivedMailTestCase extends PhabricatorTestCase {
   }
 
   public function testDropUnreceivableMail() {
+    $user = $this->generateNewTestUser()
+      ->save();
+
     $mail = new PhabricatorMetaMTAReceivedMail();
     $mail->setHeaders(
       array(
         'Message-ID' => 'test@example.com',
         'To'         => 'does+not+exist@example.com',
+        'From'        => $user->loadPrimaryEmail()->getAddress(),
+      ));
+    $mail->setBodies(
+      array(
+        'text' => 'test',
       ));
     $mail->save();
 
@@ -64,12 +72,7 @@ final class PhabricatorMetaMTAReceivedMailTestCase extends PhabricatorTestCase {
   }
 
   public function testDropUnknownSenderMail() {
-    $env = PhabricatorEnv::beginScopedEnv();
-    $env->overrideEnvConfig(
-      'metamta.maniphest.public-create-email',
-      'bugs@example.com');
-    $env->overrideEnvConfig('phabricator.allow-email-users', false);
-    $env->overrideEnvConfig('metamta.maniphest.default-public-author', null);
+    $this->setManiphestCreateEmail();
 
     $mail = new PhabricatorMetaMTAReceivedMail();
     $mail->setHeaders(
@@ -77,6 +80,10 @@ final class PhabricatorMetaMTAReceivedMailTestCase extends PhabricatorTestCase {
         'Message-ID' => 'test@example.com',
         'To'         => 'bugs@example.com',
         'From'       => 'does+not+exist@example.com',
+      ));
+    $mail->setBodies(
+      array(
+        'text' => 'test',
       ));
     $mail->save();
 
@@ -89,10 +96,7 @@ final class PhabricatorMetaMTAReceivedMailTestCase extends PhabricatorTestCase {
 
 
   public function testDropDisabledSenderMail() {
-    $env = PhabricatorEnv::beginScopedEnv();
-    $env->overrideEnvConfig(
-      'metamta.maniphest.public-create-email',
-      'bugs@example.com');
+    $this->setManiphestCreateEmail();
 
     $user = $this->generateNewTestUser()
       ->setIsDisabled(true)
@@ -105,6 +109,10 @@ final class PhabricatorMetaMTAReceivedMailTestCase extends PhabricatorTestCase {
         'From'        => $user->loadPrimaryEmail()->getAddress(),
         'To'          => 'bugs@example.com',
       ));
+    $mail->setBodies(
+      array(
+        'text' => 'test',
+      ));
     $mail->save();
 
     $mail->processReceivedMail();
@@ -112,6 +120,17 @@ final class PhabricatorMetaMTAReceivedMailTestCase extends PhabricatorTestCase {
     $this->assertEqual(
       MetaMTAReceivedMailStatus::STATUS_DISABLED_SENDER,
       $mail->getStatus());
+  }
+
+  private function setManiphestCreateEmail() {
+    $maniphest_app = new PhabricatorManiphestApplication();
+    try {
+      id(new PhabricatorMetaMTAApplicationEmail())
+        ->setApplicationPHID($maniphest_app->getPHID())
+        ->setAddress('bugs@example.com')
+        ->setConfigData(array())
+        ->save();
+    } catch (AphrontDuplicateKeyQueryException $ex) {}
   }
 
 }

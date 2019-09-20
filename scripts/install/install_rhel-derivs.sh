@@ -67,12 +67,12 @@ then
   if [ $? -ne 0 ]; then
     echo "It doesn't look like you have the EPEL repo enabled. We are to add it"
     echo "for you, so that we can install git."
-    $SUDO rpm -Uvh http://download.fedoraproject.org/pub/epel/5/i386/epel-release-5-4.noarch.rpm
+    $SUDO rpm -Uvh https://download.fedoraproject.org/pub/epel/5/i386/epel-release-5-4.noarch.rpm
   fi
   YUMCOMMAND="$SUDO yum install httpd git php53 php53-cli php53-mysql php53-process php53-devel php53-gd gcc wget make pcre-devel mysql-server"
 else
   # RHEL 6+ defaults with php 5.3
-  YUMCOMMAND="$SUDO yum install httpd git php php-cli php-mysql php-process php-devel php-gd php-pecl-apc php-pecl-json mysql-server"
+  YUMCOMMAND="$SUDO yum install httpd git php php-cli php-mysql php-process php-devel php-gd php-pecl-apc php-pecl-json php-mbstring mysql-server"
 fi
 
 echo "Dropping to yum to install dependencies..."
@@ -92,7 +92,7 @@ then
   # Now that we've ensured all the devel packages required for pecl/apc are there, let's
   # set up PEAR, and install apc.
   echo "Attempting to install PEAR"
-  wget http://pear.php.net/go-pear.phar
+  wget https://pear.php.net/go-pear.phar
   $SUDO php go-pear.phar && $SUDO pecl install apc
 fi
 
@@ -119,21 +119,21 @@ confirm
 
 if [[ ! -e libphutil ]]
 then
-  git clone git://github.com/facebook/libphutil.git
+  git clone https://github.com/phacility/libphutil.git
 else
   (cd libphutil && git pull --rebase)
 fi
 
 if [[ ! -e arcanist ]]
 then
-  git clone git://github.com/facebook/arcanist.git
+  git clone https://github.com/phacility/arcanist.git
 else
   (cd arcanist && git pull --rebase)
 fi
 
 if [[ ! -e phabricator ]]
 then
-  git clone git://github.com/facebook/phabricator.git
+  git clone https://github.com/phacility/phabricator.git
 else
   (cd phabricator && git pull --rebase)
 fi
@@ -142,4 +142,4 @@ echo
 echo
 echo "Install probably worked mostly correctly. Continue with the 'Configuration Guide':";
 echo
-echo "    http://www.phabricator.com/docs/phabricator/article/Configuration_Guide.html";
+echo "    https://secure.phabricator.com/book/phabricator/article/configuration_guide/";

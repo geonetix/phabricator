@@ -1,228 +1,199 @@
-/**
- * Notification server. Launch with:
- *
- *   sudo node aphlict_server.js --user=aphlict
- *
- * You can also specify `port`, `admin`, `host` and `log`.
- */
+'use strict';
 
-var config = parse_command_line_arguments(process.argv);
+var JX = require('./lib/javelin').JX;
+var http = require('http');
+var https = require('https');
+var util = require('util');
+var fs = require('fs');
 
 function parse_command_line_arguments(argv) {
-  var config = {
-    port : 22280,
-    admin : 22281,
-    host : '127.0.0.1',
-    user : null,
-    log: '/var/log/aphlict.log'
+  var args = {
+    test: false,
+    config: null
   };
 
   for (var ii = 2; ii < argv.length; ii++) {
     var arg = argv[ii];
     var matches = arg.match(/^--([^=]+)=(.*)$/);
     if (!matches) {
-      throw new Error("Unknown argument '"+arg+"'!");
+      throw new Error('Unknown argument "' + arg + '"!');
     }
-    if (!(matches[1] in config)) {
-      throw new Error("Unknown argument '"+matches[1]+"'!");
+    if (!(matches[1] in args)) {
+      throw new Error('Unknown argument "' + matches[1] + '"!');
     }
-    config[matches[1]] = matches[2];
+    args[matches[1]] = matches[2];
   }
 
-  config.port = parseInt(config.port, 10);
-  config.admin = parseInt(config.admin, 10);
-
-  return config;
+  return args;
 }
 
-if (process.getuid() !== 0) {
-  console.log(
-    "ERROR: "+
-    "This server must be run as root because it needs to bind to privileged "+
-    "port 843 to start a Flash policy server. It will downgrade to run as a "+
-    "less-privileged user after binding if you pass a user in the command "+
-    "line arguments with '--user=alincoln'.");
-  process.exit(1);
+function parse_config(args) {
+  var data = fs.readFileSync(args.config);
+  return JSON.parse(data);
 }
 
-var net = require('net');
-var http  = require('http');
-var url = require('url');
-var querystring = require('querystring');
-var fs = require('fs');
+require('./lib/AphlictLog');
 
-// set up log file
-var logfile = fs.createWriteStream(
-  config.log,
-  {
-    flags: 'a',
-    encoding: null,
-    mode: 0666
+var debug = new JX.AphlictLog()
+  .addConsole(console);
+
+var args = parse_command_line_arguments(process.argv);
+var config = parse_config(args);
+
+function set_exit_code(code) {
+  process.on('exit', function() {
+    process.exit(code);
   });
-
-function log(str) {
-  console.log(str);
-  logfile.write(str + '\n');
 }
 
-process.on('uncaughtException', function (err) {
-  log("\n<<< UNCAUGHT EXCEPTION! >>>\n\n" + err);
-  process.exit(1);
+process.on('uncaughtException', function(err) {
+  var context = null;
+  if (err.code == 'EACCES') {
+    context = util.format(
+      'Unable to open file ("%s"). Check that permissions are set ' +
+      'correctly.',
+      err.path);
+  }
+
+  var message = [
+    '\n<<< UNCAUGHT EXCEPTION! >>>',
+  ];
+  if (context) {
+    message.push(context);
+  }
+  message.push(err.stack);
+
+  debug.log(message.join('\n\n'));
+  set_exit_code(1);
 });
 
-log('----- ' + (new Date()).toLocaleString() + ' -----\n');
-
-function getFlashPolicy() {
-  return [
-    '<?xml version="1.0"?>',
-    '<!DOCTYPE cross-domain-policy SYSTEM ' +
-      '"http://www.macromedia.com/xml/dtds/cross-domain-policy.dtd">',
-    '<cross-domain-policy>',
-    '<allow-access-from domain="*" to-ports="'+config.port+'"/>',
-    '</cross-domain-policy>'
-  ].join('\n');
+try {
+  require('ws');
+} catch (ex) {
+  throw new Error(
+    'You need to install the Node.js "ws" module for websocket support. ' +
+    'See "Notifications User Guide: Setup and Configuration" in the ' +
+    'documentation for instructions. ' + ex.toString());
 }
 
-net.createServer(function(socket) {
-  socket.write(getFlashPolicy() + '\0');
-  socket.end();
+// NOTE: Require these only after checking for the "ws" module, since they
+// depend on it.
 
-  log('[' + socket.remoteAddress + '] Sent Flash Policy');
+require('./lib/AphlictAdminServer');
+require('./lib/AphlictClientServer');
+require('./lib/AphlictPeerList');
+require('./lib/AphlictPeer');
 
-  socket.on('error', function (e) {
-    log('Error in policy server: ' + e);
-  });
-}).listen(843);
+var ii;
 
-
-function write_json(socket, data) {
-  var serial = JSON.stringify(data);
-  var length = Buffer.byteLength(serial, 'utf8');
-  length = length.toString();
-  while (length.length < 8) {
-    length = '0' + length;
-  }
-  socket.write(length + serial);
+var logs = config.logs || [];
+for (ii = 0; ii < logs.length; ii++) {
+  debug.addLog(logs[ii].path);
 }
 
+var servers = [];
+for (ii = 0; ii < config.servers.length; ii++) {
+  var spec = config.servers[ii];
 
-var clients = {};
-var current_connections = 0;
-// According to the internet up to 2^53 can
-// be stored in javascript, this is less than that
-var MAX_ID = 9007199254740991;//2^53 -1
+  spec.listen = spec.listen || '0.0.0.0';
 
-// If we get one connections per millisecond this will
-// be fine as long as someone doesn't maintain a
-// connection for longer than 6854793 years.  If
-// you want to write something pretty be my guest
-
-function generate_id() {
-  if (typeof generate_id.current_id == 'undefined' ||
-      generate_id.current_id > MAX_ID) {
-    generate_id.current_id = 0;
-  }
-  return generate_id.current_id++;
-}
-
-var send_server = net.createServer(function(socket) {
-  var client_id = generate_id();
-  var client_name = '[' + socket.remoteAddress + '] [#' + client_id + '] ';
-
-  clients[client_id] = socket;
-  current_connections++;
-  log(client_name + 'connected\t\t(' +
-    current_connections + ' current connections)');
-
-  socket.on('close', function() {
-    delete clients[client_id];
-    current_connections--;
-    log(client_name + 'closed\t\t(' +
-      current_connections + ' current connections)');
-  });
-
-  socket.on('timeout', function() {
-    log(client_name + 'timed out!');
-  });
-
-  socket.on('end', function() {
-    log(client_name + 'ended the connection');
-    // node automatically closes half-open connections
-  });
-
-  socket.on('error', function (e) {
-    log(client_name + 'Uncaught error in send server: ' + e);
-  });
-}).listen(config.port);
-
-
-var messages_out = 0;
-var messages_in = 0;
-var start_time = new Date().getTime();
-
-var receive_server = http.createServer(function(request, response) {
-  response.writeHead(200, {'Content-Type' : 'text/plain'});
-
-  // Publishing a notification.
-  if (request.method == 'POST') {
-    var body = '';
-
-    request.on('data', function (data) {
-      body += data;
-    });
-
-    request.on('end', function () {
-      ++messages_in;
-
-      var data = querystring.parse(body);
-      log('notification: ' + JSON.stringify(data));
-      broadcast(data);
-      response.end();
-    });
-  } else if (request.url == '/status/') {
-    request.on('data', function(data) {
-      // We just ignore the request data, but newer versions of Node don't
-      // get to 'end' if we don't process the data. See T2953.
-    });
-
-    request.on('end', function() {
-      var status = {
-        'uptime': (new Date().getTime() - start_time),
-        'clients.active': current_connections,
-        'clients.total': generate_id.current_id || 0,
-        'messages.in': messages_in,
-        'messages.out': messages_out,
-        'log': config.log
-      };
-
-      response.write(JSON.stringify(status));
-      response.end();
-    });
-  } else {
-    response.statusCode = 400;
-    response.write('400 Bad Request');
-    response.end();
+  if (spec['ssl.key']) {
+    spec['ssl.key'] = fs.readFileSync(spec['ssl.key']);
   }
 
-}).listen(config.admin, config.host);
-
-function broadcast(data) {
-  for (var client_id in clients) {
-    try {
-      write_json(clients[client_id], data);
-      ++messages_out;
-      log('wrote to client ' + client_id);
-    } catch (error) {
-      delete clients[client_id];
-      current_connections--;
-      log('ERROR: could not write to client ' + client_id);
+  if (spec['ssl.cert']){
+    spec['ssl.cert'] = fs.readFileSync(spec['ssl.cert']);
+    if (spec['ssl.chain']){
+      spec['ssl.cert'] += "\n" + fs.readFileSync(spec['ssl.chain']);
     }
   }
+
+  servers.push(spec);
 }
 
-// If we're configured to drop permissions, get rid of them now that we've
-// bound to the ports we need and opened logfiles.
-if (config.user) {
-  process.setuid(config.user);
+// If we're just doing a configuration test, exit here before starting any
+// servers.
+if (args.test) {
+  debug.log('Configuration test OK.');
+  set_exit_code(0);
+  return;
 }
 
+debug.log('Starting servers (service PID %d).', process.pid);
+
+for (ii = 0; ii < logs.length; ii++) {
+  debug.log('Logging to "%s".', logs[ii].path);
+}
+
+var aphlict_servers = [];
+var aphlict_clients = [];
+var aphlict_admins = [];
+for (ii = 0; ii < servers.length; ii++) {
+  var server = servers[ii];
+  var is_client = (server.type == 'client');
+
+  var http_server;
+  if (server['ssl.key']) {
+    var https_config = {
+      key: server['ssl.key'],
+      cert: server['ssl.cert'],
+    };
+
+    http_server = https.createServer(https_config);
+  } else {
+    http_server = http.createServer();
+  }
+
+  var aphlict_server;
+  if (is_client) {
+    aphlict_server = new JX.AphlictClientServer(http_server);
+  } else {
+    aphlict_server = new JX.AphlictAdminServer(http_server);
+  }
+
+  aphlict_server.setLogger(debug);
+  aphlict_server.listen(server.port, server.listen);
+
+  debug.log(
+    'Started %s server (Port %d, %s).',
+    server.type,
+    server.port,
+    server['ssl.key'] ? 'With SSL' : 'No SSL');
+
+  aphlict_servers.push(aphlict_server);
+
+  if (is_client) {
+    aphlict_clients.push(aphlict_server);
+  } else {
+    aphlict_admins.push(aphlict_server);
+  }
+}
+
+var peer_list = new JX.AphlictPeerList();
+
+debug.log(
+  'This server has fingerprint "%s".',
+  peer_list.getFingerprint());
+
+var cluster = config.cluster || [];
+for (ii = 0; ii < cluster.length; ii++) {
+  var peer = cluster[ii];
+
+  var peer_client = new JX.AphlictPeer()
+    .setHost(peer.host)
+    .setPort(peer.port)
+    .setProtocol(peer.protocol);
+
+  peer_list.addPeer(peer_client);
+}
+
+for (ii = 0; ii < aphlict_admins.length; ii++) {
+  var admin_server = aphlict_admins[ii];
+  admin_server.setClientServers(aphlict_clients);
+  admin_server.setPeerList(peer_list);
+}
+
+for (ii = 0; ii < aphlict_clients.length; ii++) {
+  var client_server = aphlict_clients[ii];
+  client_server.setAdminServers(aphlict_admins);
+}

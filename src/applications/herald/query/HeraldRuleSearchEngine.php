@@ -1,102 +1,102 @@
 <?php
 
-final class HeraldRuleSearchEngine
-  extends PhabricatorApplicationSearchEngine {
+final class HeraldRuleSearchEngine extends PhabricatorApplicationSearchEngine {
 
-  public function buildSavedQueryFromRequest(AphrontRequest $request) {
-    $saved = new PhabricatorSavedQuery();
-
-    $saved->setParameter(
-      'authorPHIDs',
-      $this->readUsersFromRequest($request, 'authors'));
-
-    $saved->setParameter('contentType', $request->getStr('contentType'));
-    $saved->setParameter('ruleType', $request->getStr('ruleType'));
-    $saved->setParameter(
-      'disabled',
-      $this->readBoolFromRequest($request, 'disabled'));
-
-    return $saved;
+  public function getResultTypeDescription() {
+    return pht('Herald Rules');
   }
 
-  public function buildQueryFromSavedQuery(PhabricatorSavedQuery $saved) {
-    $query = id(new HeraldRuleQuery());
+  public function getApplicationClassName() {
+    return 'PhabricatorHeraldApplication';
+  }
 
-    $author_phids = $saved->getParameter('authorPHIDs');
-    if ($author_phids) {
-      $query->withAuthorPHIDs($author_phids);
+  public function newQuery() {
+    return id(new HeraldRuleQuery())
+      ->needValidateAuthors(true);
+  }
+
+  protected function buildCustomSearchFields() {
+    $viewer = $this->requireViewer();
+
+    $rule_types = HeraldRuleTypeConfig::getRuleTypeMap();
+    $content_types = HeraldAdapter::getEnabledAdapterMap($viewer);
+
+    return array(
+      id(new PhabricatorUsersSearchField())
+        ->setLabel(pht('Authors'))
+        ->setKey('authorPHIDs')
+        ->setAliases(array('author', 'authors', 'authorPHID'))
+        ->setDescription(
+          pht('Search for rules with given authors.')),
+      id(new PhabricatorSearchCheckboxesField())
+        ->setKey('ruleTypes')
+        ->setAliases(array('ruleType'))
+        ->setLabel(pht('Rule Type'))
+        ->setDescription(
+          pht('Search for rules of given types.'))
+        ->setOptions($rule_types),
+      id(new PhabricatorSearchCheckboxesField())
+        ->setKey('contentTypes')
+        ->setLabel(pht('Content Type'))
+        ->setDescription(
+          pht('Search for rules affecting given types of content.'))
+        ->setOptions($content_types),
+      id(new PhabricatorSearchThreeStateField())
+        ->setLabel(pht('Active Rules'))
+        ->setKey('active')
+        ->setOptions(
+          pht('(Show All)'),
+          pht('Show Only Active Rules'),
+          pht('Show Only Inactive Rules')),
+      id(new PhabricatorSearchThreeStateField())
+        ->setLabel(pht('Disabled Rules'))
+        ->setKey('disabled')
+        ->setOptions(
+          pht('(Show All)'),
+          pht('Show Only Disabled Rules'),
+          pht('Show Only Enabled Rules')),
+      id(new PhabricatorPHIDsSearchField())
+        ->setLabel(pht('Affected Objects'))
+        ->setKey('affectedPHIDs')
+        ->setAliases(array('affectedPHID')),
+    );
+  }
+
+  protected function buildQueryFromParameters(array $map) {
+    $query = $this->newQuery();
+
+    if ($map['authorPHIDs']) {
+      $query->withAuthorPHIDs($map['authorPHIDs']);
     }
 
-    $content_type = $saved->getParameter('contentType');
-    $content_type = idx($this->getContentTypeValues(), $content_type);
-    if ($content_type) {
-      $query->withContentTypes(array($content_type));
+    if ($map['contentTypes']) {
+      $query->withContentTypes($map['contentTypes']);
     }
 
-    $rule_type = $saved->getParameter('ruleType');
-    $rule_type = idx($this->getRuleTypeValues(), $rule_type);
-    if ($rule_type) {
-      $query->withRuleTypes(array($rule_type));
+    if ($map['ruleTypes']) {
+      $query->withRuleTypes($map['ruleTypes']);
     }
 
-    $disabled = $saved->getParameter('disabled');
-    if ($disabled !== null) {
-      $query->withDisabled($disabled);
+    if ($map['disabled'] !== null) {
+      $query->withDisabled($map['disabled']);
+    }
+
+    if ($map['active'] !== null) {
+      $query->withActive($map['active']);
+    }
+
+    if ($map['affectedPHIDs']) {
+      $query->withAffectedObjectPHIDs($map['affectedPHIDs']);
     }
 
     return $query;
-  }
-
-  public function buildSearchForm(
-    AphrontFormView $form,
-    PhabricatorSavedQuery $saved_query) {
-
-    $phids = $saved_query->getParameter('authorPHIDs', array());
-    $author_handles = id(new PhabricatorHandleQuery())
-      ->setViewer($this->requireViewer())
-      ->withPHIDs($phids)
-      ->execute();
-
-    $content_type = $saved_query->getParameter('contentType');
-    $rule_type = $saved_query->getParameter('ruleType');
-
-    $form
-      ->appendChild(
-        id(new AphrontFormTokenizerControl())
-          ->setDatasource('/typeahead/common/users/')
-          ->setName('authors')
-          ->setLabel(pht('Authors'))
-          ->setValue($author_handles))
-      ->appendChild(
-        id(new AphrontFormSelectControl())
-          ->setName('contentType')
-          ->setLabel(pht('Content Type'))
-          ->setValue($content_type)
-          ->setOptions($this->getContentTypeOptions()))
-      ->appendChild(
-        id(new AphrontFormSelectControl())
-          ->setName('ruleType')
-          ->setLabel(pht('Rule Type'))
-          ->setValue($rule_type)
-          ->setOptions($this->getRuleTypeOptions()))
-      ->appendChild(
-        id(new AphrontFormSelectControl())
-          ->setName('disabled')
-          ->setLabel(pht('Rule Status'))
-          ->setValue($this->getBoolFromQuery($saved_query, 'disabled'))
-          ->setOptions(
-            array(
-              '' => pht('Show Enabled and Disabled Rules'),
-              'false' => pht('Show Only Enabled Rules'),
-              'true' => pht('Show Only Disabled Rules'),
-            )));
   }
 
   protected function getURI($path) {
     return '/herald/'.$path;
   }
 
-  public function getBuiltinQueryNames() {
+  protected function getBuiltinQueryNames() {
     $names = array();
 
     if ($this->requireViewer()->isLoggedIn()) {
@@ -110,7 +110,6 @@ final class HeraldRuleSearchEngine
   }
 
   public function buildSavedQueryFromBuiltin($query_key) {
-
     $query = $this->newSavedQuery();
     $query->setQueryKey($query_key);
 
@@ -120,7 +119,8 @@ final class HeraldRuleSearchEngine
       case 'all':
         return $query;
       case 'active':
-        return $query->setParameter('disabled', false);
+        return $query
+          ->setParameter('active', true);
       case 'authored':
         return $query
           ->setParameter('authorPHIDs', array($viewer_phid))
@@ -130,26 +130,43 @@ final class HeraldRuleSearchEngine
     return parent::buildSavedQueryFromBuiltin($query_key);
   }
 
-  private function getContentTypeOptions() {
-    return array(
-      '' => pht('(All Content Types)'),
-    ) + HeraldAdapter::getEnabledAdapterMap($this->requireViewer());
+  protected function renderResultList(
+    array $rules,
+    PhabricatorSavedQuery $query,
+    array $handles) {
+    assert_instances_of($rules, 'HeraldRule');
+    $viewer = $this->requireViewer();
+
+    $list = id(new HeraldRuleListView())
+      ->setViewer($viewer)
+      ->setRules($rules)
+      ->newObjectList();
+
+    $result = new PhabricatorApplicationSearchResultView();
+    $result->setObjectList($list);
+    $result->setNoDataString(pht('No rules found.'));
+
+    return $result;
   }
 
-  private function getContentTypeValues() {
-    return array_fuse(
-      array_keys(
-        HeraldAdapter::getEnabledAdapterMap($this->requireViewer())));
-  }
+  protected function getNewUserBody() {
+    $create_button = id(new PHUIButtonView())
+      ->setTag('a')
+      ->setText(pht('Create Herald Rule'))
+      ->setHref('/herald/create/')
+      ->setColor(PHUIButtonView::GREEN);
 
-  private function getRuleTypeOptions() {
-    return array(
-      '' => pht('(All Rule Types)'),
-    ) + HeraldRuleTypeConfig::getRuleTypeMap();
-  }
+    $icon = $this->getApplication()->getIcon();
+    $app_name =  $this->getApplication()->getName();
+    $view = id(new PHUIBigInfoView())
+      ->setIcon($icon)
+      ->setTitle(pht('Welcome to %s', $app_name))
+      ->setDescription(
+        pht('A flexible rules engine that can notify and act on '.
+            'other actions such as tasks, diffs, and commits.'))
+      ->addAction($create_button);
 
-  private function getRuleTypeValues() {
-    return array_fuse(array_keys(HeraldRuleTypeConfig::getRuleTypeMap()));
+      return $view;
   }
 
 }

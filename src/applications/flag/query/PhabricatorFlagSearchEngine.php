@@ -3,6 +3,14 @@
 final class PhabricatorFlagSearchEngine
   extends PhabricatorApplicationSearchEngine {
 
+  public function getResultTypeDescription() {
+    return pht('Flags');
+  }
+
+  public function getApplicationClassName() {
+    return 'PhabricatorFlagsApplication';
+  }
+
   public function buildSavedQueryFromRequest(AphrontRequest $request) {
     $saved = new PhabricatorSavedQuery();
     $saved->setParameter('colors', $request->getArr('colors'));
@@ -63,7 +71,7 @@ final class PhabricatorFlagSearchEngine
     return '/flag/'.$path;
   }
 
-  public function getBuiltinQueryNames() {
+  protected function getBuiltinQueryNames() {
     $names = array(
       'all' => pht('Flagged'),
     );
@@ -92,11 +100,13 @@ final class PhabricatorFlagSearchEngine
   }
 
   private function getObjectFilterOptions() {
-    $objects = id(new PhutilSymbolLoader())
+    $objects = id(new PhutilClassMapQuery())
       ->setAncestorClass('PhabricatorFlaggableInterface')
-      ->loadObjects();
+      ->execute();
+
     $all_types = PhabricatorPHIDType::getAllTypes();
     $options = array();
+
     foreach ($objects as $object) {
       $phid = $object->generatePHID();
       $phid_type = phid_get_type($phid);
@@ -108,11 +118,77 @@ final class PhabricatorFlagSearchEngine
     // sort it alphabetically...
     asort($options);
     $default_option = array(
-      0 => pht('All Object Types'));
+      0 => pht('All Object Types'),
+    );
     // ...and stick the default option on front
     $options = array_merge($default_option, $options);
 
     return $options;
   }
+
+  protected function renderResultList(
+    array $flags,
+    PhabricatorSavedQuery $query,
+    array $handles) {
+    assert_instances_of($flags, 'PhabricatorFlag');
+
+    $viewer = $this->requireViewer();
+
+    $list = id(new PHUIObjectItemListView())
+      ->setUser($viewer);
+    foreach ($flags as $flag) {
+      $id = $flag->getID();
+      $phid = $flag->getObjectPHID();
+
+      $class = PhabricatorFlagColor::getCSSClass($flag->getColor());
+
+      $flag_icon = phutil_tag(
+        'div',
+        array(
+          'class' => 'phabricator-flag-icon '.$class,
+        ),
+        '');
+
+      $item = id(new PHUIObjectItemView())
+        ->addHeadIcon($flag_icon)
+        ->setHeader($flag->getHandle()->getFullName())
+        ->setHref($flag->getHandle()->getURI());
+
+      $status_open = PhabricatorObjectHandle::STATUS_OPEN;
+      if ($flag->getHandle()->getStatus() != $status_open) {
+        $item->setDisabled(true);
+      }
+
+      $item->addAction(
+        id(new PHUIListItemView())
+          ->setIcon('fa-pencil')
+          ->setHref($this->getApplicationURI("edit/{$phid}/"))
+          ->setWorkflow(true));
+
+      $item->addAction(
+        id(new PHUIListItemView())
+          ->setIcon('fa-times')
+          ->setHref($this->getApplicationURI("delete/{$id}/"))
+          ->setWorkflow(true));
+
+      if ($flag->getNote()) {
+        $item->addAttribute($flag->getNote());
+      }
+
+      $item->addIcon(
+        'none',
+        phabricator_datetime($flag->getDateCreated(), $viewer));
+
+      $list->addItem($item);
+    }
+
+    $result = new PhabricatorApplicationSearchResultView();
+    $result->setObjectList($list);
+    $result->setNoDataString(pht('No flags found.'));
+
+    return $result;
+
+  }
+
 
 }

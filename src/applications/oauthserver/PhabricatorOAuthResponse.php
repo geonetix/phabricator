@@ -1,8 +1,5 @@
 <?php
 
-/*
-* @group oauthserver
-*/
 final class PhabricatorOAuthResponse extends AphrontResponse {
 
   private $state;
@@ -39,7 +36,7 @@ final class PhabricatorOAuthResponse extends AphrontResponse {
     $base_uri     = $this->getClientURI();
     $query_params = $this->buildResponseDict();
     foreach ($query_params as $key => $value) {
-      $base_uri->setQueryParam($key, $value);
+      $base_uri->replaceQueryParam($key, $value);
     }
     return $base_uri;
   }
@@ -47,6 +44,7 @@ final class PhabricatorOAuthResponse extends AphrontResponse {
   private function getError() {
     return $this->error;
   }
+
   public function setError($error) {
     // errors sometimes redirect to the client (302) but otherwise
     // the spec says all code 400
@@ -60,14 +58,14 @@ final class PhabricatorOAuthResponse extends AphrontResponse {
   private function getErrorDescription() {
     return $this->errorDescription;
   }
+
   public function setErrorDescription($error_description) {
     $this->errorDescription = $error_description;
     return $this;
   }
 
   public function __construct() {
-    $this->setHTTPResponseCode(200);      // assume the best
-    return $this;
+    $this->setHTTPResponseCode(200); // assume the best
   }
 
   public function getHeaders() {
@@ -104,4 +102,5 @@ final class PhabricatorOAuthResponse extends AphrontResponse {
   public function buildResponseString() {
     return $this->encodeJSONForHTTPResponse($this->buildResponseDict());
   }
+
 }

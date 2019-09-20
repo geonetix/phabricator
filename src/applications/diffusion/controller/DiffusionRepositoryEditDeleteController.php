@@ -1,58 +1,47 @@
 <?php
 
 final class DiffusionRepositoryEditDeleteController
-  extends DiffusionRepositoryEditController {
+  extends DiffusionRepositoryManageController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
-    $drequest = $this->diffusionRequest;
-    $repository = $drequest->getRepository();
-
-    $repository = id(new PhabricatorRepositoryQuery())
-      ->setViewer($viewer)
-      ->requireCapabilities(
-        array(
-          PhabricatorPolicyCapability::CAN_VIEW,
-          PhabricatorPolicyCapability::CAN_EDIT,
-        ))
-      ->withIDs(array($repository->getID()))
-      ->executeOne();
-    if (!$repository) {
-      return new Aphront404Response();
+  public function handleRequest(AphrontRequest $request) {
+    $response = $this->loadDiffusionContextForEdit();
+    if ($response) {
+      return $response;
     }
 
-    $edit_uri = $this->getRepositoryControllerURI($repository, 'edit/');
+    $viewer = $this->getViewer();
+    $drequest = $this->getDiffusionRequest();
+    $repository = $drequest->getRepository();
 
-    $dialog = new AphrontDialogView();
-    $text_1 = pht(
-      'If you really want to delete the repository, run this command from '.
-      'the command line:');
-    $command = csprintf(
-      'phabricator/ $ ./bin/repository delete %s',
-      $repository->getCallsign());
-    $text_2 = pht('Repositories touch many objects and as such deletes are '.
-                  'prohibitively expensive to run from the web UI.');
-    $body = phutil_tag(
-      'div',
-      array(
-        'class' => 'phabricator-remarkup',
-      ),
-      array(
-        phutil_tag('p', array(), $text_1),
-        phutil_tag('p', array(),
-          phutil_tag('tt', array(), $command)),
-        phutil_tag('p', array(), $text_2),
-      ));
+    $panel_uri = id(new DiffusionRepositoryBasicsManagementPanel())
+      ->setRepository($repository)
+      ->getPanelURI();
 
-    $dialog = id(new AphrontDialogView())
-      ->setUser($request->getUser())
-      ->setTitle(pht('Really want to delete the repository?'))
-      ->appendChild($body)
-      ->addCancelButton($edit_uri, pht('Okay'));
+    $doc_uri = PhabricatorEnv::getDoclink(
+      'Permanently Destroying Data');
 
-    return id(new AphrontDialogResponse())->setDialog($dialog);
+    return $this->newDialog()
+      ->setTitle(pht('Delete Repository'))
+      ->appendParagraph(
+        pht(
+          'To permanently destroy this repository, run this command from '.
+          'the command line:'))
+      ->appendCommand(
+        csprintf(
+          'phabricator/ $ ./bin/remove destroy %R',
+          $repository->getMonogram()))
+      ->appendParagraph(
+        pht(
+          'Repositories can not be permanently destroyed from the web '.
+          'interface. See %s in the documentation for more information.',
+          phutil_tag(
+            'a',
+            array(
+              'href' => $doc_uri,
+              'target' => '_blank',
+            ),
+            pht('Permanently Destroying Data'))))
+      ->addCancelButton($panel_uri, pht('Close'));
   }
-
 
 }

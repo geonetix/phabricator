@@ -1,15 +1,12 @@
 <?php
 
-final class HeraldEffect {
+final class HeraldEffect extends Phobject {
 
-  protected $objectPHID;
-  protected $action;
-  protected $target;
-
-  protected $ruleID;
-  protected $effector;
-
-  protected $reason;
+  private $objectPHID;
+  private $action;
+  private $target;
+  private $rule;
+  private $reason;
 
   public function setObjectPHID($object_phid) {
     $this->objectPHID = $object_phid;
@@ -38,22 +35,13 @@ final class HeraldEffect {
     return $this->target;
   }
 
-  public function setRuleID($rule_id) {
-    $this->ruleID = $rule_id;
+  public function setRule(HeraldRule $rule) {
+    $this->rule = $rule;
     return $this;
   }
 
-  public function getRuleID() {
-    return $this->ruleID;
-  }
-
-  public function setEffector($effector) {
-    $this->effector = $effector;
-    return $this;
-  }
-
-  public function getEffector() {
-    return $this->effector;
+  public function getRule() {
+    return $this->rule;
   }
 
   public function setReason($reason) {
@@ -66,4 +54,3 @@ final class HeraldEffect {
   }
 
 }
-

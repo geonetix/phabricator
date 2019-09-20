@@ -6,7 +6,7 @@ require_once $root.'/scripts/__init_script__.php';
 
 $args = new PhutilArgumentParser($argv);
 
-$args->setTagline('documentation generator');
+$args->setTagline(pht('documentation generator'));
 $args->setSynopsis(<<<EOHELP
 **diviner** __command__ [__options__]
   Generate documentation.
@@ -14,9 +14,8 @@ EOHELP
 );
 $args->parseStandardArguments();
 
-$args->parseWorkflows(
-  array(
-    new DivinerGenerateWorkflow(),
-    new DivinerAtomizeWorkflow(),
-    new PhutilHelpArgumentWorkflow(),
-  ));
+$workflows = id(new PhutilClassMapQuery())
+  ->setAncestorClass('DivinerWorkflow')
+  ->execute();
+$workflows[] = new PhutilHelpArgumentWorkflow();
+$args->parseWorkflows($workflows);

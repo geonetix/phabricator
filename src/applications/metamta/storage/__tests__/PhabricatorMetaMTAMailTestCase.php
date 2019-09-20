@@ -17,10 +17,10 @@ final class PhabricatorMetaMTAMailTestCase extends PhabricatorTestCase {
     $mail = new PhabricatorMetaMTAMail();
     $mail->addTos(array($phid));
 
-    $mailer = new PhabricatorMailImplementationTestAdapter();
-    $mail->sendNow($force = true, $mailer);
+    $mailer = new PhabricatorMailTestAdapter();
+    $mail->sendWithMailers(array($mailer));
     $this->assertEqual(
-      PhabricatorMetaMTAMail::STATUS_SENT,
+      PhabricatorMailOutboundStatus::STATUS_SENT,
       $mail->getStatus());
 
 
@@ -28,11 +28,15 @@ final class PhabricatorMetaMTAMailTestCase extends PhabricatorTestCase {
     $mail = new PhabricatorMetaMTAMail();
     $mail->addTos(array($phid));
 
-    $mailer = new PhabricatorMailImplementationTestAdapter();
+    $mailer = new PhabricatorMailTestAdapter();
     $mailer->setFailTemporarily(true);
-    $mail->sendNow($force = true, $mailer);
+    try {
+      $mail->sendWithMailers(array($mailer));
+    } catch (Exception $ex) {
+      // Ignore.
+    }
     $this->assertEqual(
-      PhabricatorMetaMTAMail::STATUS_QUEUE,
+      PhabricatorMailOutboundStatus::STATUS_QUEUE,
       $mail->getStatus());
 
 
@@ -40,11 +44,15 @@ final class PhabricatorMetaMTAMailTestCase extends PhabricatorTestCase {
     $mail = new PhabricatorMetaMTAMail();
     $mail->addTos(array($phid));
 
-    $mailer = new PhabricatorMailImplementationTestAdapter();
+    $mailer = new PhabricatorMailTestAdapter();
     $mailer->setFailPermanently(true);
-    $mail->sendNow($force = true, $mailer);
+    try {
+      $mail->sendWithMailers(array($mailer));
+    } catch (Exception $ex) {
+      // Ignore.
+    }
     $this->assertEqual(
-      PhabricatorMetaMTAMail::STATUS_FAIL,
+      PhabricatorMailOutboundStatus::STATUS_FAIL,
       $mail->getStatus());
   }
 
@@ -52,80 +60,115 @@ final class PhabricatorMetaMTAMailTestCase extends PhabricatorTestCase {
     $user = $this->generateNewTestUser();
     $phid = $user->getPHID();
 
-    $prefs = $user->loadPreferences();
-
-    $mailer = new PhabricatorMailImplementationTestAdapter();
+    $mailer = new PhabricatorMailTestAdapter();
 
     $mail = new PhabricatorMetaMTAMail();
     $mail->addTos(array($phid));
 
-    $this->assertEqual(
-      true,
+    $this->assertTrue(
       in_array($phid, $mail->buildRecipientList()),
-      '"To" is a recipient.');
+      pht('"To" is a recipient.'));
 
 
-    // Test that the "No Self Mail" preference works correctly.
+    // Test that the "No Self Mail" and "No Mail" preferences work correctly.
     $mail->setFrom($phid);
 
-    $this->assertEqual(
-      true,
+    $this->assertTrue(
       in_array($phid, $mail->buildRecipientList()),
-      '"From" does not exclude recipients by default.');
+      pht('"From" does not exclude recipients by default.'));
 
-    $prefs->setPreference(
-      PhabricatorUserPreferences::PREFERENCE_NO_SELF_MAIL,
+    $user = $this->writeSetting(
+      $user,
+      PhabricatorEmailSelfActionsSetting::SETTINGKEY,
       true);
-    $prefs->save();
 
-    $this->assertEqual(
-      false,
+    $this->assertFalse(
       in_array($phid, $mail->buildRecipientList()),
-      '"From" excludes recipients with no-self-mail set.');
+      pht('"From" excludes recipients with no-self-mail set.'));
 
-    $prefs->unsetPreference(
-      PhabricatorUserPreferences::PREFERENCE_NO_SELF_MAIL);
-    $prefs->save();
+    $user = $this->writeSetting(
+      $user,
+      PhabricatorEmailSelfActionsSetting::SETTINGKEY,
+      null);
 
-    $this->assertEqual(
-      true,
+    $this->assertTrue(
       in_array($phid, $mail->buildRecipientList()),
-      '"From" does not exclude recipients by default.');
+      pht('"From" does not exclude recipients by default.'));
 
+    $user = $this->writeSetting(
+      $user,
+      PhabricatorEmailNotificationsSetting::SETTINGKEY,
+      true);
+
+    $this->assertFalse(
+      in_array($phid, $mail->buildRecipientList()),
+      pht('"From" excludes recipients with no-mail set.'));
+
+    $mail->setForceDelivery(true);
+
+    $this->assertTrue(
+      in_array($phid, $mail->buildRecipientList()),
+      pht('"From" includes no-mail recipients when forced.'));
+
+    $mail->setForceDelivery(false);
+
+    $user = $this->writeSetting(
+      $user,
+      PhabricatorEmailNotificationsSetting::SETTINGKEY,
+      null);
+
+    $this->assertTrue(
+      in_array($phid, $mail->buildRecipientList()),
+      pht('"From" does not exclude recipients by default.'));
 
     // Test that explicit exclusion works correctly.
     $mail->setExcludeMailRecipientPHIDs(array($phid));
 
-    $this->assertEqual(
-      false,
+    $this->assertFalse(
       in_array($phid, $mail->buildRecipientList()),
-      'Explicit exclude excludes recipients.');
+      pht('Explicit exclude excludes recipients.'));
 
     $mail->setExcludeMailRecipientPHIDs(array());
 
 
     // Test that mail tag preferences exclude recipients.
-    $prefs->setPreference(
-      PhabricatorUserPreferences::PREFERENCE_MAILTAGS,
+    $user = $this->writeSetting(
+      $user,
+      PhabricatorEmailTagsSetting::SETTINGKEY,
       array(
         'test-tag' => false,
       ));
-    $prefs->save();
 
     $mail->setMailTags(array('test-tag'));
 
-    $this->assertEqual(
-      false,
+    $this->assertFalse(
       in_array($phid, $mail->buildRecipientList()),
-      'Tag preference excludes recipients.');
+      pht('Tag preference excludes recipients.'));
 
-    $prefs->unsetPreference(PhabricatorUserPreferences::PREFERENCE_MAILTAGS);
-    $prefs->save();
+    $user = $this->writeSetting(
+      $user,
+      PhabricatorEmailTagsSetting::SETTINGKEY,
+      null);
 
-    $this->assertEqual(
-      true,
+    $this->assertTrue(
       in_array($phid, $mail->buildRecipientList()),
       'Recipients restored after tag preference removed.');
+
+    $email = id(new PhabricatorUserEmail())->loadOneWhere(
+      'userPHID = %s AND isPrimary = 1',
+      $phid);
+
+    $email->setIsVerified(0)->save();
+
+    $this->assertFalse(
+      in_array($phid, $mail->buildRecipientList()),
+      pht('Mail not sent to unverified address.'));
+
+    $email->setIsVerified(1)->save();
+
+    $this->assertTrue(
+      in_array($phid, $mail->buildRecipientList()),
+      pht('Mail sent to verified address.'));
   }
 
   public function testThreadIDHeaders() {
@@ -139,19 +182,29 @@ final class PhabricatorMetaMTAMailTestCase extends PhabricatorTestCase {
     $supports_message_id,
     $is_first_mail) {
 
-    $mailer = new PhabricatorMailImplementationTestAdapter(
-      array(
-        'supportsMessageIDHeader' => $supports_message_id,
-      ));
+    $user = $this->generateNewTestUser();
+    $phid = $user->getPHID();
 
-    $thread_id = '<somethread-12345@somedomain.tld>';
+    $mailer = new PhabricatorMailTestAdapter();
 
-    $mail = new PhabricatorMetaMTAMail();
-    $mail->setThreadID($thread_id, $is_first_mail);
-    $mail->sendNow($force = true, $mailer);
+    $mailer->setSupportsMessageID($supports_message_id);
+
+    $thread_id = 'somethread-12345';
+
+    $mail = id(new PhabricatorMetaMTAMail())
+      ->setThreadID($thread_id, $is_first_mail)
+      ->addTos(array($phid))
+      ->sendWithMailers(array($mailer));
 
     $guts = $mailer->getGuts();
-    $dict = ipull($guts['headers'], 1, 0);
+
+    $headers = idx($guts, 'headers', array());
+
+    $dict = array();
+    foreach ($headers as $header) {
+      list($name, $value) = $header;
+      $dict[$name] = $value;
+    }
 
     if ($is_first_mail && $supports_message_id) {
       $expect_message_id = true;
@@ -163,25 +216,207 @@ final class PhabricatorMetaMTAMailTestCase extends PhabricatorTestCase {
       $expect_references = true;
     }
 
-    $case = "<message-id = ".($supports_message_id ? 'Y' : 'N').", ".
-            "first = ".($is_first_mail ? 'Y' : 'N').">";
+    $case = '<message-id = '.($supports_message_id ? 'Y' : 'N').', '.
+            'first = '.($is_first_mail ? 'Y' : 'N').'>';
 
-    $this->assertEqual(
-      true,
+    $this->assertTrue(
       isset($dict['Thread-Index']),
-      "Expect Thread-Index header for case {$case}.");
+      pht('Expect Thread-Index header for case %s.', $case));
     $this->assertEqual(
       $expect_message_id,
       isset($dict['Message-ID']),
-      "Expectation about existence of Message-ID header for case {$case}.");
+      pht(
+        'Expectation about existence of Message-ID header for case %s.',
+        $case));
     $this->assertEqual(
       $expect_in_reply_to,
       isset($dict['In-Reply-To']),
-      "Expectation about existence of In-Reply-To header for case {$case}.");
+      pht(
+        'Expectation about existence of In-Reply-To header for case %s.',
+        $case));
     $this->assertEqual(
       $expect_references,
       isset($dict['References']),
-      "Expectation about existence of References header for case {$case}.");
+      pht(
+        'Expectation about existence of References header for case %s.',
+        $case));
+  }
+
+  private function writeSetting(PhabricatorUser $user, $key, $value) {
+    $preferences = PhabricatorUserPreferences::loadUserPreferences($user);
+
+    $editor = id(new PhabricatorUserPreferencesEditor())
+      ->setActor($user)
+      ->setContentSource($this->newContentSource())
+      ->setContinueOnNoEffect(true)
+      ->setContinueOnMissingFields(true);
+
+    $xactions = array();
+    $xactions[] = $preferences->newTransaction($key, $value);
+    $editor->applyTransactions($preferences, $xactions);
+
+    return id(new PhabricatorPeopleQuery())
+      ->setViewer($user)
+      ->withIDs(array($user->getID()))
+      ->executeOne();
+  }
+
+  public function testMailerFailover() {
+    $user = $this->generateNewTestUser();
+    $phid = $user->getPHID();
+
+    $status_sent = PhabricatorMailOutboundStatus::STATUS_SENT;
+    $status_queue = PhabricatorMailOutboundStatus::STATUS_QUEUE;
+    $status_fail = PhabricatorMailOutboundStatus::STATUS_FAIL;
+
+    $mailer1 = id(new PhabricatorMailTestAdapter())
+      ->setKey('mailer1');
+
+    $mailer2 = id(new PhabricatorMailTestAdapter())
+      ->setKey('mailer2');
+
+    $mailers = array(
+      $mailer1,
+      $mailer2,
+    );
+
+    // Send mail with both mailers active. The first mailer should be used.
+    $mail = id(new PhabricatorMetaMTAMail())
+      ->addTos(array($phid))
+      ->sendWithMailers($mailers);
+    $this->assertEqual($status_sent, $mail->getStatus());
+    $this->assertEqual('mailer1', $mail->getMailerKey());
+
+
+    // If the first mailer fails, the mail should be sent with the second
+    // mailer. Since we transmitted the mail, this doesn't raise an exception.
+    $mailer1->setFailTemporarily(true);
+
+    $mail = id(new PhabricatorMetaMTAMail())
+      ->addTos(array($phid))
+      ->sendWithMailers($mailers);
+    $this->assertEqual($status_sent, $mail->getStatus());
+    $this->assertEqual('mailer2', $mail->getMailerKey());
+
+
+    // If both mailers fail, the mail should remain in queue.
+    $mailer2->setFailTemporarily(true);
+
+    $mail = id(new PhabricatorMetaMTAMail())
+      ->addTos(array($phid));
+
+    $caught = null;
+    try {
+      $mail->sendWithMailers($mailers);
+    } catch (Exception $ex) {
+      $caught = $ex;
+    }
+
+    $this->assertTrue($caught instanceof Exception);
+    $this->assertEqual($status_queue, $mail->getStatus());
+    $this->assertEqual(null, $mail->getMailerKey());
+
+    $mailer1->setFailTemporarily(false);
+    $mailer2->setFailTemporarily(false);
+
+
+    // If the first mailer fails permanently, the mail should fail even though
+    // the second mailer isn't configured to fail.
+    $mailer1->setFailPermanently(true);
+
+    $mail = id(new PhabricatorMetaMTAMail())
+      ->addTos(array($phid));
+
+    $caught = null;
+    try {
+      $mail->sendWithMailers($mailers);
+    } catch (Exception $ex) {
+      $caught = $ex;
+    }
+
+    $this->assertTrue($caught instanceof Exception);
+    $this->assertEqual($status_fail, $mail->getStatus());
+    $this->assertEqual(null, $mail->getMailerKey());
+  }
+
+  public function testMailSizeLimits() {
+    $env = PhabricatorEnv::beginScopedEnv();
+    $env->overrideEnvConfig('metamta.email-body-limit', 1024 * 512);
+
+    $user = $this->generateNewTestUser();
+    $phid = $user->getPHID();
+
+    $string_1kb = str_repeat('x', 1024);
+    $html_1kb = str_repeat('y', 1024);
+    $string_1mb = str_repeat('x', 1024 * 1024);
+    $html_1mb = str_repeat('y', 1024 * 1024);
+
+    // First, send a mail with a small text body and a small HTML body to make
+    // sure the basics work properly.
+    $mail = id(new PhabricatorMetaMTAMail())
+      ->addTos(array($phid))
+      ->setBody($string_1kb)
+      ->setHTMLBody($html_1kb);
+
+    $mailer = new PhabricatorMailTestAdapter();
+    $mail->sendWithMailers(array($mailer));
+    $this->assertEqual(
+      PhabricatorMailOutboundStatus::STATUS_SENT,
+      $mail->getStatus());
+
+    $text_body = $mailer->getBody();
+    $html_body = $mailer->getHTMLBody();
+
+    $this->assertEqual($string_1kb, $text_body);
+    $this->assertEqual($html_1kb, $html_body);
+
+
+    // Now, send a mail with a large text body and a large HTML body. We expect
+    // the text body to be truncated and the HTML body to be dropped.
+    $mail = id(new PhabricatorMetaMTAMail())
+      ->addTos(array($phid))
+      ->setBody($string_1mb)
+      ->setHTMLBody($html_1mb);
+
+    $mailer = new PhabricatorMailTestAdapter();
+    $mail->sendWithMailers(array($mailer));
+    $this->assertEqual(
+      PhabricatorMailOutboundStatus::STATUS_SENT,
+      $mail->getStatus());
+
+    $text_body = $mailer->getBody();
+    $html_body = $mailer->getHTMLBody();
+
+    // We expect the body was truncated, because it exceeded the body limit.
+    $this->assertTrue(
+      (strlen($text_body) < strlen($string_1mb)),
+      pht('Text Body Truncated'));
+
+    // We expect the HTML body was dropped completely after the text body was
+    // truncated.
+    $this->assertTrue(
+      !strlen($html_body),
+      pht('HTML Body Removed'));
+
+
+    // Next send a mail with a small text body and a large HTML body. We expect
+    // the text body to be intact and the HTML body to be dropped.
+    $mail = id(new PhabricatorMetaMTAMail())
+      ->addTos(array($phid))
+      ->setBody($string_1kb)
+      ->setHTMLBody($html_1mb);
+
+    $mailer = new PhabricatorMailTestAdapter();
+    $mail->sendWithMailers(array($mailer));
+    $this->assertEqual(
+      PhabricatorMailOutboundStatus::STATUS_SENT,
+      $mail->getStatus());
+
+    $text_body = $mailer->getBody();
+    $html_body = $mailer->getHTMLBody();
+
+    $this->assertEqual($string_1kb, $text_body);
+    $this->assertTrue(!strlen($html_body));
   }
 
 }

@@ -3,45 +3,46 @@
 final class PhabricatorMetaMTAWorker
   extends PhabricatorWorker {
 
-  private $message;
-
-  public function getWaitBeforeRetry(PhabricatorWorkerTask $task) {
-    $message = $this->loadMessage();
-    if (!$message) {
-      return null;
-    }
-
-    $wait = max($message->getNextRetry() - time(), 0) + 15;
-    return $wait;
+  public function getMaximumRetryCount() {
+    return 250;
   }
 
-  public function doWork() {
+  public function getWaitBeforeRetry(PhabricatorWorkerTask $task) {
+    return ($task->getFailureCount() * 15);
+  }
+
+  protected function doWork() {
     $message = $this->loadMessage();
-    if (!$message
-        || $message->getStatus() != PhabricatorMetaMTAMail::STATUS_QUEUE) {
+
+    if ($message->getStatus() != PhabricatorMailOutboundStatus::STATUS_QUEUE) {
       return;
     }
-    $id = $message->getID();
-    $message->sendNow();
-    // task failed if the message is still queued
-    // (instead of sent, void, or failed)
-    if ($message->getStatus() == PhabricatorMetaMTAMail::STATUS_QUEUE) {
-      throw new Exception('Failed to send message');
+
+    try {
+      $message->sendNow();
+    } catch (PhabricatorMetaMTAPermanentFailureException $ex) {
+      // If the mailer fails permanently, fail this task permanently.
+      throw new PhabricatorWorkerPermanentFailureException($ex->getMessage());
     }
   }
 
   private function loadMessage() {
-    if (!$this->message) {
-      $message_id = $this->getTaskData();
-      $this->message = id(new PhabricatorMetaMTAMail())->load($message_id);
-      if (!$this->message) {
-        return null;
-      }
+    $message_id = $this->getTaskData();
+    $message = id(new PhabricatorMetaMTAMail())
+      ->load($message_id);
+
+    if (!$message) {
+      throw new PhabricatorWorkerPermanentFailureException(
+        pht(
+          'Unable to load mail message (with ID "%s") while preparing to '.
+          'deliver it.',
+          $message_id));
     }
-    return $this->message;
+
+    return $message;
   }
 
-  public function renderForDisplay() {
+  public function renderForDisplay(PhabricatorUser $viewer) {
     return phutil_tag(
       'pre',
       array(

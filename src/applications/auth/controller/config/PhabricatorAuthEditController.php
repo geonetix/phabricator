@@ -3,19 +3,15 @@
 final class PhabricatorAuthEditController
   extends PhabricatorAuthProviderConfigController {
 
-  private $providerClass;
-  private $configID;
+  public function handleRequest(AphrontRequest $request) {
+    $this->requireApplicationCapability(
+      AuthManageProvidersCapability::CAPABILITY);
 
-  public function willProcessRequest(array $data) {
-    $this->providerClass = idx($data, 'className');
-    $this->configID = idx($data, 'id');
-  }
+    $viewer = $this->getViewer();
+    $provider_class = $request->getStr('provider');
+    $config_id = $request->getURIData('id');
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
-
-    if ($this->configID) {
+    if ($config_id) {
       $config = id(new PhabricatorAuthProviderConfigQuery())
         ->setViewer($viewer)
         ->requireCapabilities(
@@ -23,7 +19,7 @@ final class PhabricatorAuthEditController
             PhabricatorPolicyCapability::CAN_VIEW,
             PhabricatorPolicyCapability::CAN_EDIT,
           ))
-        ->withIDs(array($this->configID))
+        ->withIDs(array($config_id))
         ->executeOne();
       if (!$config) {
         return new Aphront404Response();
@@ -36,9 +32,11 @@ final class PhabricatorAuthEditController
 
       $is_new = false;
     } else {
+      $provider = null;
+
       $providers = PhabricatorAuthProvider::getAllBaseProviders();
       foreach ($providers as $candidate_provider) {
-        if (get_class($candidate_provider) === $this->providerClass) {
+        if (get_class($candidate_provider) === $provider_class) {
           $provider = $candidate_provider;
           break;
         }
@@ -81,10 +79,14 @@ final class PhabricatorAuthEditController
     }
 
     $errors = array();
+    $validation_exception = null;
 
+    $v_login = $config->getShouldAllowLogin();
     $v_registration = $config->getShouldAllowRegistration();
     $v_link = $config->getShouldAllowLink();
     $v_unlink = $config->getShouldAllowUnlink();
+    $v_trust_email = $config->getShouldTrustEmails();
+    $v_auto_login = $config->getShouldAutoLogin();
 
     if ($request->isFormPost()) {
 
@@ -107,6 +109,11 @@ final class PhabricatorAuthEditController
 
         $xactions[] = id(new PhabricatorAuthProviderConfigTransaction())
           ->setTransactionType(
+            PhabricatorAuthProviderConfigTransaction::TYPE_LOGIN)
+          ->setNewValue($request->getInt('allowLogin', 0));
+
+        $xactions[] = id(new PhabricatorAuthProviderConfigTransaction())
+          ->setTransactionType(
             PhabricatorAuthProviderConfigTransaction::TYPE_REGISTRATION)
           ->setNewValue($request->getInt('allowRegistration', 0));
 
@@ -119,6 +126,18 @@ final class PhabricatorAuthEditController
           ->setTransactionType(
             PhabricatorAuthProviderConfigTransaction::TYPE_UNLINK)
           ->setNewValue($request->getInt('allowUnlink', 0));
+
+        $xactions[] = id(new PhabricatorAuthProviderConfigTransaction())
+          ->setTransactionType(
+            PhabricatorAuthProviderConfigTransaction::TYPE_TRUST_EMAILS)
+          ->setNewValue($request->getInt('trustEmails', 0));
+
+        if ($provider->supportsAutoLogin()) {
+          $xactions[] = id(new PhabricatorAuthProviderConfigTransaction())
+            ->setTransactionType(
+              PhabricatorAuthProviderConfigTransaction::TYPE_AUTO_LOGIN)
+            ->setNewValue($request->getInt('autoLogin', 0));
+        }
 
         foreach ($properties as $key => $value) {
           $xactions[] = id(new PhabricatorAuthProviderConfigTransaction())
@@ -135,48 +154,95 @@ final class PhabricatorAuthEditController
         $editor = id(new PhabricatorAuthProviderConfigEditor())
           ->setActor($viewer)
           ->setContentSourceFromRequest($request)
-          ->setContinueOnNoEffect(true)
-          ->applyTransactions($config, $xactions);
+          ->setContinueOnNoEffect(true);
 
+        try {
+          $editor->applyTransactions($config, $xactions);
+          $next_uri = $config->getURI();
 
-        if ($provider->hasSetupStep() && $is_new) {
-          $id = $config->getID();
-          $next_uri = $this->getApplicationURI('config/edit/'.$id.'/');
-        } else {
-          $next_uri = $this->getApplicationURI();
+          return id(new AphrontRedirectResponse())->setURI($next_uri);
+        } catch (Exception $ex) {
+          $validation_exception = $ex;
         }
-
-        return id(new AphrontRedirectResponse())->setURI($next_uri);
       }
     } else {
       $properties = $provider->readFormValuesFromProvider();
       $issues = array();
     }
 
-    if ($errors) {
-      $errors = id(new AphrontErrorView())->setErrors($errors);
-    }
-
     if ($is_new) {
-      $button = pht('Add Provider');
+      if ($provider->hasSetupStep()) {
+        $button = pht('Next Step');
+      } else {
+        $button = pht('Add Provider');
+      }
       $crumb = pht('Add Provider');
-      $title = pht('Add Authentication Provider');
+      $title = pht('Add Auth Provider');
+      $header_icon = 'fa-plus-square';
       $cancel_uri = $this->getApplicationURI('/config/new/');
     } else {
       $button = pht('Save');
       $crumb = pht('Edit Provider');
-      $title = pht('Edit Authentication Provider');
-      $cancel_uri = $this->getApplicationURI();
+      $title = pht('Edit Auth Provider');
+      $header_icon = 'fa-pencil';
+      $cancel_uri = $config->getURI();
     }
 
-    $str_registration = hsprintf(
-      '<strong>%s:</strong> %s',
-      pht('Allow Registration'),
+    $header = id(new PHUIHeaderView())
+      ->setHeader(pht('%s: %s', $title, $provider->getProviderName()))
+      ->setHeaderIcon($header_icon);
+
+    if (!$is_new) {
+      if ($config->getIsEnabled()) {
+        $status_name = pht('Enabled');
+        $status_color = 'green';
+        $status_icon = 'fa-check';
+        $header->setStatus($status_icon, $status_color, $status_name);
+      } else {
+        $status_name = pht('Disabled');
+        $status_color = 'indigo';
+        $status_icon = 'fa-ban';
+        $header->setStatus($status_icon, $status_color, $status_name);
+      }
+    }
+
+    $config_name = 'auth.email-domains';
+    $config_href = '/config/edit/'.$config_name.'/';
+
+    $email_domains = PhabricatorEnv::getEnvConfig($config_name);
+    if ($email_domains) {
+      $registration_warning = pht(
+        'Users will only be able to register with a verified email address '.
+        'at one of the configured [[ %s | %s ]] domains: **%s**',
+        $config_href,
+        $config_name,
+        implode(', ', $email_domains));
+    } else {
+      $registration_warning = pht(
+        "NOTE: Any user who can browse to this install's login page will be ".
+        "able to register a Phabricator account. To restrict who can register ".
+        "an account, configure [[ %s | %s ]].",
+        $config_href,
+        $config_name);
+    }
+
+    $str_login = array(
+      phutil_tag('strong', array(), pht('Allow Login:')),
+      ' ',
+      pht(
+        'Allow users to log in using this provider. If you disable login, '.
+        'users can still use account integrations for this provider.'),
+    );
+
+    $str_registration = array(
+      phutil_tag('strong', array(), pht('Allow Registration:')),
+      ' ',
       pht(
         'Allow users to register new Phabricator accounts using this '.
         'provider. If you disable registration, users can still use this '.
         'provider to log in to existing accounts, but will not be able to '.
-        'create new accounts.'));
+        'create new accounts.'),
+    );
 
     $str_link = hsprintf(
       '<strong>%s:</strong> %s',
@@ -195,40 +261,38 @@ final class PhabricatorAuthEditController
         'existing Phabricator accounts. If you disable this, Phabricator '.
         'accounts will be permanently bound to provider accounts.'));
 
-    $status_tag = id(new PhabricatorTagView())
-      ->setType(PhabricatorTagView::TYPE_STATE);
-    if ($is_new) {
-      $status_tag
-        ->setName(pht('New Provider'))
-        ->setBackgroundColor('blue');
-    } else if ($config->getIsEnabled()) {
-      $status_tag
-        ->setName(pht('Enabled'))
-        ->setBackgroundColor('green');
-    } else {
-      $status_tag
-        ->setName(pht('Disabled'))
-        ->setBackgroundColor('red');
-    }
+    $str_trusted_email = hsprintf(
+      '<strong>%s:</strong> %s',
+      pht('Trust Email Addresses'),
+      pht(
+        'Phabricator will skip email verification for accounts registered '.
+        'through this provider.'));
+    $str_auto_login = hsprintf(
+      '<strong>%s:</strong> %s',
+      pht('Allow Auto Login'),
+      pht(
+        'Phabricator will automatically login with this provider if it is '.
+        'the only available provider.'));
 
     $form = id(new AphrontFormView())
       ->setUser($viewer)
-      ->appendChild(
-        id(new AphrontFormStaticControl())
-          ->setLabel(pht('Provider'))
-          ->setValue($provider->getProviderName()))
-      ->appendChild(
-        id(new AphrontFormStaticControl())
-          ->setLabel(pht('Status'))
-          ->setValue($status_tag))
+      ->addHiddenInput('provider', $provider_class)
       ->appendChild(
         id(new AphrontFormCheckboxControl())
           ->setLabel(pht('Allow'))
+          ->addCheckbox(
+            'allowLogin',
+            1,
+            $str_login,
+            $v_login))
+      ->appendChild(
+        id(new AphrontFormCheckboxControl())
           ->addCheckbox(
             'allowRegistration',
             1,
             $str_registration,
             $v_registration))
+      ->appendRemarkupInstructions($registration_warning)
       ->appendChild(
         id(new AphrontFormCheckboxControl())
           ->addCheckbox(
@@ -244,13 +308,56 @@ final class PhabricatorAuthEditController
             $str_unlink,
             $v_unlink));
 
+    if ($provider->shouldAllowEmailTrustConfiguration()) {
+      $form->appendChild(
+        id(new AphrontFormCheckboxControl())
+          ->addCheckbox(
+            'trustEmails',
+            1,
+            $str_trusted_email,
+            $v_trust_email));
+    }
+
+    if ($provider->supportsAutoLogin()) {
+      $form->appendChild(
+        id(new AphrontFormCheckboxControl())
+          ->addCheckbox(
+            'autoLogin',
+            1,
+            $str_auto_login,
+            $v_auto_login));
+    }
+
     $provider->extendEditForm($request, $form, $properties, $issues);
+
+    $locked_config_key = 'auth.lock-config';
+    $is_locked = PhabricatorEnv::getEnvConfig($locked_config_key);
+
+    $locked_warning = null;
+    if ($is_locked && !$validation_exception) {
+      $message = pht(
+        'Authentication provider configuration is locked, and can not be '.
+        'changed without being unlocked. See the configuration setting %s '.
+        'for details.',
+        phutil_tag(
+          'a',
+          array(
+            'href' => '/config/edit/'.$locked_config_key,
+          ),
+          $locked_config_key));
+      $locked_warning = id(new PHUIInfoView())
+        ->setViewer($viewer)
+        ->setSeverity(PHUIInfoView::SEVERITY_WARNING)
+        ->setErrors(array($message));
+    }
 
     $form
       ->appendChild(
         id(new AphrontFormSubmitControl())
           ->addCancelButton($cancel_uri)
+          ->setDisabled($is_locked)
           ->setValue($button));
+
 
     $help = $provider->getConfigurationHelp();
     if ($help) {
@@ -258,43 +365,34 @@ final class PhabricatorAuthEditController
       $form->appendRemarkupInstructions($help);
     }
 
+    $footer = $provider->renderConfigurationFooter();
+
     $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName($crumb));
-
-    $xaction_view = null;
-    if (!$is_new) {
-      $xactions = id(new PhabricatorAuthProviderConfigTransactionQuery())
-        ->withObjectPHIDs(array($config->getPHID()))
-        ->setViewer($viewer)
-        ->execute();
-
-      foreach ($xactions as $xaction) {
-        $xaction->setProvider($provider);
-      }
-
-      $xaction_view = id(new PhabricatorApplicationTransactionView())
-        ->setUser($viewer)
-        ->setObjectPHID($config->getPHID())
-        ->setTransactions($xactions);
-    }
+    $crumbs->addTextCrumb($crumb);
+    $crumbs->setBorder(true);
 
     $form_box = id(new PHUIObjectBoxView())
-      ->setHeaderText($title)
-      ->setFormError($errors)
+      ->setHeaderText(pht('Provider'))
+      ->setFormErrors($errors)
+      ->setValidationException($validation_exception)
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
       ->setForm($form);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
+
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter(array(
+        $locked_warning,
         $form_box,
-        $xaction_view,
-      ),
-      array(
-        'title' => $title,
-        'device' => true,
+        $footer,
       ));
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
+
   }
 
 }

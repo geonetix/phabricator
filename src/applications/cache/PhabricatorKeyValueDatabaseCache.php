@@ -7,6 +7,10 @@ final class PhabricatorKeyValueDatabaseCache
   const CACHE_FORMAT_DEFLATE    = 'deflate';
 
   public function setKeys(array $keys, $ttl = null) {
+    if (PhabricatorEnv::isReadOnly()) {
+      return;
+    }
+
     if ($keys) {
       $map = $this->digestKeys(array_keys($keys));
       $conn_w = $this->establishConnection('w');
@@ -19,7 +23,7 @@ final class PhabricatorKeyValueDatabaseCache
 
         $sql[] = qsprintf(
           $conn_w,
-          '(%s, %s, %s, %s, %d, %nd)',
+          '(%s, %s, %s, %B, %d, %nd)',
           $hash,
           $key,
           $format,
@@ -30,19 +34,19 @@ final class PhabricatorKeyValueDatabaseCache
 
       $guard = AphrontWriteGuard::beginScopedUnguardedWrites();
         foreach (PhabricatorLiskDAO::chunkSQL($sql) as $chunk) {
-            queryfx(
-              $conn_w,
-              'INSERT INTO %T
-                (cacheKeyHash, cacheKey, cacheFormat, cacheData,
-                  cacheCreated, cacheExpires) VALUES %Q
-                ON DUPLICATE KEY UPDATE
-                  cacheKey = VALUES(cacheKey),
-                  cacheFormat = VALUES(cacheFormat),
-                  cacheData = VALUES(cacheData),
-                  cacheCreated = VALUES(cacheCreated),
-                  cacheExpires = VALUES(cacheExpires)',
-              $this->getTableName(),
-              $chunk);
+          queryfx(
+            $conn_w,
+            'INSERT INTO %T
+              (cacheKeyHash, cacheKey, cacheFormat, cacheData,
+                cacheCreated, cacheExpires) VALUES %LQ
+              ON DUPLICATE KEY UPDATE
+                cacheKey = VALUES(cacheKey),
+                cacheFormat = VALUES(cacheFormat),
+                cacheData = VALUES(cacheData),
+                cacheCreated = VALUES(cacheCreated),
+                cacheExpires = VALUES(cacheExpires)',
+            $this->getTableName(),
+            $chunk);
         }
       unset($guard);
     }
@@ -94,7 +98,7 @@ final class PhabricatorKeyValueDatabaseCache
         $this->establishConnection('w'),
         'DELETE FROM %T WHERE cacheKeyHash IN (%Ls)',
         $this->getTableName(),
-        $keys);
+        $map);
     }
 
     return $this;
@@ -136,27 +140,18 @@ final class PhabricatorKeyValueDatabaseCache
 
   private function willWriteValue($key, $value) {
     if (!is_string($value)) {
-      throw new Exception("Only strings may be written to the DB cache!");
+      throw new Exception(pht('Only strings may be written to the DB cache!'));
     }
 
     static $can_deflate;
     if ($can_deflate === null) {
-      $can_deflate = function_exists('gzdeflate') &&
-                     PhabricatorEnv::getEnvConfig('cache.enable-deflate');
+      $can_deflate = function_exists('gzdeflate');
     }
 
-    // If the value is larger than 1KB, we have gzdeflate(), we successfully
-    // can deflate it, and it benefits from deflation, store it deflated.
     if ($can_deflate) {
-      $len = strlen($value);
-      if ($len > 1024) {
-        $deflated = gzdeflate($value);
-        if ($deflated !== false) {
-          $deflated_len = strlen($deflated);
-          if ($deflated_len < ($len / 2)) {
-            return array(self::CACHE_FORMAT_DEFLATE, $deflated);
-          }
-        }
+      $deflated = PhabricatorCaches::maybeDeflateData($value);
+      if ($deflated !== null) {
+        return array(self::CACHE_FORMAT_DEFLATE, $deflated);
       }
     }
 
@@ -168,16 +163,9 @@ final class PhabricatorKeyValueDatabaseCache
       case self::CACHE_FORMAT_RAW:
         return $value;
       case self::CACHE_FORMAT_DEFLATE:
-        if (!function_exists('gzinflate')) {
-          throw new Exception("No gzinflate() to read deflated cache.");
-        }
-        $value = gzinflate($value);
-        if ($value === false) {
-          throw new Exception("Failed to deflate cache.");
-        }
-        return $value;
+        return PhabricatorCaches::inflateData($value);
       default:
-        throw new Exception("Unknown cache format.");
+        throw new Exception(pht('Unknown cache format.'));
     }
   }
 

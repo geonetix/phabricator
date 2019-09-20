@@ -1,13 +1,9 @@
 <?php
 
-/**
- * @group pholio
- */
 final class PholioImageUploadController extends PholioController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
 
     $phid = $request->getStr('filePHID');
     $replaces_phid = $request->getStr('replacesPHID');
@@ -26,7 +22,8 @@ final class PholioImageUploadController extends PholioController {
       $title = $file->getName();
     }
 
-    $image = id(new PholioImage())
+    $image = PholioImage::initializeNewImage()
+      ->setAuthorPHID($viewer->getPHID())
       ->attachFile($file)
       ->setName($title)
       ->setDescription($description)

@@ -29,13 +29,24 @@
 abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
 
   private $viewer;
-  private $raisePolicyExceptions;
   private $parentQuery;
   private $rawResultLimit;
   private $capabilities;
   private $workspace = array();
+  private $inFlightPHIDs = array();
   private $policyFilteredPHIDs = array();
-  private $canUseApplication;
+
+  /**
+   * Should we continue or throw an exception when a query result is filtered
+   * by policy rules?
+   *
+   * Values are `true` (raise exceptions), `false` (do not raise exceptions)
+   * and `null` (inherit from parent query, with no exceptions by default).
+   */
+  private $raisePolicyExceptions;
+  private $isOverheated;
+  private $returnPartialResultsOnOverheat;
+  private $disableOverheating;
 
 
 /* -(  Query Configuration  )------------------------------------------------ */
@@ -109,7 +120,7 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
    * @task config
    */
   final public function shouldRaisePolicyExceptions() {
-    return (bool) $this->raisePolicyExceptions;
+    return (bool)$this->raisePolicyExceptions;
   }
 
 
@@ -118,6 +129,16 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
    */
   final public function requireCapabilities(array $capabilities) {
     $this->capabilities = $capabilities;
+    return $this;
+  }
+
+  final public function setReturnPartialResultsOnOverheat($bool) {
+    $this->returnPartialResultsOnOverheat = $bool;
+    return $this;
+  }
+
+  final public function setDisableOverheating($disable_overheating) {
+    $this->disableOverheating = $disable_overheating;
     return $this;
   }
 
@@ -163,7 +184,7 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
     }
 
     if (count($results) > 1) {
-      throw new Exception("Expected a single result!");
+      throw new Exception(pht('Expected a single result!'));
     }
 
     if (!$results) {
@@ -182,11 +203,11 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
    */
   final public function execute() {
     if (!$this->viewer) {
-      throw new Exception("Call setViewer() before execute()!");
+      throw new PhutilInvalidStateException('setViewer');
     }
 
     $parent_query = $this->getParentQuery();
-    if ($parent_query) {
+    if ($parent_query && ($this->raisePolicyExceptions === null)) {
       $this->setRaisePolicyExceptions(
         $parent_query->shouldRaisePolicyExceptions());
     }
@@ -207,6 +228,17 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
 
     $this->willExecute();
 
+    // If we examine and filter significantly more objects than the query
+    // limit, we stop early. This prevents us from looping through a huge
+    // number of records when the viewer can see few or none of them. See
+    // T11773 for some discussion.
+    $this->isOverheated = false;
+
+    // See T13386. If we on an old offset-based paging workflow, we need
+    // to base the overheating limit on both the offset and limit.
+    $overheat_limit = $need * 10;
+    $total_seen = 0;
+
     do {
       if ($need) {
         $this->rawResultLimit = min($need - $count, 1024);
@@ -224,8 +256,13 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
         $page = array();
       }
 
+      $total_seen += count($page);
+
       if ($page) {
         $maybe_visible = $this->willFilterPage($page);
+        if ($maybe_visible) {
+          $maybe_visible = $this->applyWillFilterPageExtensions($maybe_visible);
+        }
       } else {
         $maybe_visible = array();
       }
@@ -248,7 +285,6 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
       }
 
       if ($visible) {
-        $this->putObjectsInWorkspace($this->getWorkspaceMapForPage($visible));
         $visible = $this->didFilterPage($visible);
       }
 
@@ -260,6 +296,13 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
       }
 
       $this->didFilterResults($removed);
+
+      // NOTE: We call "nextPage()" before checking if we've found enough
+      // results because we want to build the internal cursor object even
+      // if we don't need to execute another query: the internal cursor may
+      // be used by a parent query that is using this query to translate an
+      // external cursor into an internal cursor.
+      $this->nextPage($page);
 
       foreach ($visible as $key => $result) {
         ++$count;
@@ -291,7 +334,23 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
         break;
       }
 
-      $this->nextPage($page);
+      if (!$this->disableOverheating) {
+        if ($overheat_limit && ($total_seen >= $overheat_limit)) {
+          $this->isOverheated = true;
+
+          if (!$this->returnPartialResultsOnOverheat) {
+            throw new Exception(
+              pht(
+                'Query (of class "%s") overheated: examined more than %s '.
+                'raw rows without finding %s visible objects.',
+                get_class($this),
+                new PhutilNumber($overheat_limit),
+                new PhutilNumber($need)));
+          }
+
+          break;
+        }
+      }
     } while (true);
 
     $results = $this->didLoadResults($results);
@@ -302,23 +361,52 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
   private function getPolicyFilter() {
     $filter = new PhabricatorPolicyFilter();
     $filter->setViewer($this->viewer);
-    if (!$this->capabilities) {
-      $capabilities = array(
-        PhabricatorPolicyCapability::CAN_VIEW,
-      );
-    } else {
-      $capabilities = $this->capabilities;
-    }
+    $capabilities = $this->getRequiredCapabilities();
     $filter->requireCapabilities($capabilities);
     $filter->raisePolicyExceptions($this->shouldRaisePolicyExceptions());
 
     return $filter;
   }
 
+  protected function getRequiredCapabilities() {
+    if ($this->capabilities) {
+      return $this->capabilities;
+    }
+
+    return array(
+      PhabricatorPolicyCapability::CAN_VIEW,
+    );
+  }
+
+  protected function applyPolicyFilter(array $objects, array $capabilities) {
+    if ($this->shouldDisablePolicyFiltering()) {
+      return $objects;
+    }
+    $filter = $this->getPolicyFilter();
+    $filter->requireCapabilities($capabilities);
+    return $filter->apply($objects);
+  }
+
   protected function didRejectResult(PhabricatorPolicyInterface $object) {
+    // Some objects (like commits) may be rejected because related objects
+    // (like repositories) can not be loaded. In some cases, we may need these
+    // related objects to determine the object policy, so it's expected that
+    // we may occasionally be unable to determine the policy.
+
+    try {
+      $policy = $object->getPolicy(PhabricatorPolicyCapability::CAN_VIEW);
+    } catch (Exception $ex) {
+      $policy = null;
+    }
+
+    // Mark this object as filtered so handles can render "Restricted" instead
+    // of "Unknown".
+    $phid = $object->getPHID();
+    $this->addPolicyFilteredPHIDs(array($phid => $phid));
+
     $this->getPolicyFilter()->rejectObject(
       $object,
-      $object->getPolicy(PhabricatorPolicyCapability::CAN_VIEW),
+      $policy,
       PhabricatorPolicyCapability::CAN_VIEW);
   }
 
@@ -329,6 +417,15 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
     }
     return $this;
   }
+
+
+  public function getIsOverheated() {
+    if ($this->isOverheated === null) {
+      throw new PhutilInvalidStateException('execute');
+    }
+    return $this->isOverheated;
+  }
+
 
   /**
    * Return a map of all object PHIDs which were loaded in the query but
@@ -369,8 +466,8 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
    *
    * **Fully enrich objects pulled from the workspace.** After pulling objects
    * from the workspace, you still need to load and attach any additional
-   * content the query requests. Otherwise, a query might return objects without
-   * requested content.
+   * content the query requests. Otherwise, a query might return objects
+   * without requested content.
    *
    * Generally, you do not need to update the workspace yourself: it is
    * automatically populated as a side effect of objects surviving policy
@@ -382,16 +479,22 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
    * @task workspace
    */
   public function putObjectsInWorkspace(array $objects) {
-    assert_instances_of($objects, 'PhabricatorPolicyInterface');
-
-    $viewer_phid = $this->getViewer()->getPHID();
-
-    // The workspace is scoped per viewer to prevent accidental contamination.
-    if (empty($this->workspace[$viewer_phid])) {
-      $this->workspace[$viewer_phid] = array();
+    $parent = $this->getParentQuery();
+    if ($parent) {
+      $parent->putObjectsInWorkspace($objects);
+      return $this;
     }
 
-    $this->workspace[$viewer_phid] += $objects;
+    assert_instances_of($objects, 'PhabricatorPolicyInterface');
+
+    $viewer_fragment = $this->getViewer()->getCacheFragment();
+
+    // The workspace is scoped per viewer to prevent accidental contamination.
+    if (empty($this->workspace[$viewer_fragment])) {
+      $this->workspace[$viewer_fragment] = array();
+    }
+
+    $this->workspace[$viewer_fragment] += $objects;
 
     return $this;
   }
@@ -403,23 +506,24 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
    * searches both the current query's workspace and the workspaces of parent
    * queries.
    *
-   * @param list<phid> List of PHIDs to retreive.
+   * @param list<phid> List of PHIDs to retrieve.
    * @return this
    * @task workspace
    */
   public function getObjectsFromWorkspace(array $phids) {
-    $viewer_phid = $this->getViewer()->getPHID();
+    $parent = $this->getParentQuery();
+    if ($parent) {
+      return $parent->getObjectsFromWorkspace($phids);
+    }
+
+    $viewer_fragment = $this->getViewer()->getCacheFragment();
 
     $results = array();
     foreach ($phids as $key => $phid) {
-      if (isset($this->workspace[$viewer_phid][$phid])) {
-        $results[$phid] = $this->workspace[$viewer_phid][$phid];
+      if (isset($this->workspace[$viewer_fragment][$phid])) {
+        $results[$phid] = $this->workspace[$viewer_fragment][$phid];
         unset($phids[$key]);
       }
-    }
-
-    if ($phids && $this->getParentQuery()) {
-      $results += $this->getParentQuery()->getObjectsFromWorkspace($phids);
     }
 
     return $results;
@@ -427,23 +531,35 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
 
 
   /**
-   * Convert a result page to a `<phid, PhabricatorPolicyInterface>` map.
+   * Mark PHIDs as in flight.
    *
-   * @param list<PhabricatorPolicyInterface> Objects.
-   * @return map<phid, PhabricatorPolicyInterface> Map of objects which can
-   *   be put into the workspace.
-   * @task workspace
+   * PHIDs which are "in flight" are actively being queried for. Using this
+   * list can prevent infinite query loops by aborting queries which cycle.
+   *
+   * @param list<phid> List of PHIDs which are now in flight.
+   * @return this
    */
-  protected function getWorkspaceMapForPage(array $results) {
-    $map = array();
-    foreach ($results as $result) {
-      $phid = $result->getPHID();
-      if ($phid !== null) {
-        $map[$phid] = $result;
-      }
+  public function putPHIDsInFlight(array $phids) {
+    foreach ($phids as $phid) {
+      $this->inFlightPHIDs[$phid] = $phid;
     }
+    return $this;
+  }
 
-    return $map;
+
+  /**
+   * Get PHIDs which are currently in flight.
+   *
+   * PHIDs which are "in flight" are actively being queried for.
+   *
+   * @return map<phid, phid> PHIDs currently in flight.
+   */
+  public function getPHIDsInFlight() {
+    $results = $this->inFlightPHIDs;
+    if ($this->getParentQuery()) {
+      $results += $this->getParentQuery()->getPHIDsInFlight();
+    }
+    return $results;
   }
 
 
@@ -608,21 +724,61 @@ abstract class PhabricatorPolicyAwareQuery extends PhabricatorOffsetPagedQuery {
    *   execute the query.
    */
   public function canViewerUseQueryApplication() {
-    if ($this->canUseApplication === null) {
-      $class = $this->getQueryApplicationClass();
-      if (!$class) {
-        $this->canUseApplication = true;
-      } else {
-        $result = id(new PhabricatorApplicationQuery())
-          ->setViewer($this->getViewer())
-          ->withClasses(array($class))
-          ->execute();
+    $class = $this->getQueryApplicationClass();
+    if (!$class) {
+      return true;
+    }
 
-        $this->canUseApplication = (bool)$result;
+    $viewer = $this->getViewer();
+    return PhabricatorApplication::isClassInstalledForViewer($class, $viewer);
+  }
+
+  private function applyWillFilterPageExtensions(array $page) {
+    $bridges = array();
+    foreach ($page as $key => $object) {
+      if ($object instanceof DoorkeeperBridgedObjectInterface) {
+        $bridges[$key] = $object;
       }
     }
 
-    return $this->canUseApplication;
+    if ($bridges) {
+      $external_phids = array();
+      foreach ($bridges as $bridge) {
+        $external_phid = $bridge->getBridgedObjectPHID();
+        if ($external_phid) {
+          $external_phids[$key] = $external_phid;
+        }
+      }
+
+      if ($external_phids) {
+        $external_objects = id(new DoorkeeperExternalObjectQuery())
+          ->setViewer($this->getViewer())
+          ->withPHIDs($external_phids)
+          ->execute();
+        $external_objects = mpull($external_objects, null, 'getPHID');
+      } else {
+        $external_objects = array();
+      }
+
+      foreach ($bridges as $key => $bridge) {
+        $external_phid = idx($external_phids, $key);
+        if (!$external_phid) {
+          $bridge->attachBridgedObject(null);
+          continue;
+        }
+
+        $external_object = idx($external_objects, $external_phid);
+        if (!$external_object) {
+          $this->didRejectResult($bridge);
+          unset($page[$key]);
+          continue;
+        }
+
+        $bridge->attachBridgedObject($external_object);
+      }
+    }
+
+    return $page;
   }
 
 }

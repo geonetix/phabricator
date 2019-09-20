@@ -3,25 +3,48 @@
  */
 
 .aphront-list-filter-wrap {
-  border-left: 1px solid {$lightgreyborder};
-  border-right: 1px solid {$lightgreyborder};
-  border-bottom: 1px solid {$greyborder};
-  margin: 0 20px;
+  border: 1px solid {$lightblueborder};
+  margin: 0 16px;
+  background: {$page.content};
+  border-radius: 3px;
 }
 
 .aphront-list-filter-view {
-  background: #fff;
+  padding: 0;
+}
+
+.device-phone .aphront-list-filter-view {
   padding: 0;
 }
 
 .device-phone .aphront-list-filter-wrap {
-  margin: 0 -2px;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  border-top: 1px solid {$lightblueborder};
+  border-bottom: 1px solid {$lightblueborder};
+}
+
+.device-tablet .aphront-list-filter-wrap {
+  margin: 0 8px;
 }
 
 .aphront-list-filter-view-content .phui-form-view {
   border-left: none;
   border-right: none;
   padding: 12px 0 6px;
+}
+
+.device-phone .aphront-list-filter-view-content .phui-form-view {
+  padding: 0 0 4px 4px;
+}
+
+/* When a list filter view contains two consecutive forms, lay them out
+   without much white space in between them so they look more contiugous. At
+   the time of writing, this is used only in the Diffusion repository search
+   UI. */
+.aphront-list-filter-view-content form + form .phui-form-view {
+  margin-top: -18px;
 }
 
 .aphront-list-filter-view-content .phui-form-view .aphront-form-label {
@@ -54,9 +77,9 @@
 }
 
 .device .aphront-list-filter-reveal {
-  width: 98%;
+  width: auto;
   margin: auto;
-  padding: 8px;
+  padding: 4px 8px;
 }
 
 .aphront-list-filter-reveal a {

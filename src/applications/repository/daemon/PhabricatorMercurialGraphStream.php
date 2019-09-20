@@ -5,7 +5,8 @@
  * the Mercurial commit graph with one nonblocking invocation of "hg". See
  * @{class:PhabricatorRepositoryPullLocalDaemon}.
  */
-final class PhabricatorMercurialGraphStream {
+final class PhabricatorMercurialGraphStream
+  extends PhabricatorRepositoryGraphStream {
 
   private $repository;
   private $iterator;
@@ -15,11 +16,13 @@ final class PhabricatorMercurialGraphStream {
   private $local          = array();
   private $localParents   = array();
 
-  public function __construct(PhabricatorRepository $repository) {
+  public function __construct(PhabricatorRepository $repository, $commit) {
     $this->repository = $repository;
 
     $future = $repository->getLocalCommandFuture(
-      "log --template '{rev}\1{node}\1{date}\1{parents}\2'");
+      'log --template %s --rev %s',
+      '{rev}\1{node}\1{date}\1{parents}\2',
+      hgsprintf('reverse(ancestors(%s))', $commit));
 
     $this->iterator = new LinesOfALargeExecFuture($future);
     $this->iterator->setDelimiter("\2");
@@ -97,7 +100,10 @@ final class PhabricatorMercurialGraphStream {
     }
 
     throw new Exception(
-      "No such {$until_type} '{$until_name}' in repository!");
+      pht(
+        "No such %s '%s' in repository!",
+        $until_type,
+        $until_name));
   }
 
 
@@ -107,7 +113,7 @@ final class PhabricatorMercurialGraphStream {
   private function parseParents($parents, $target_rev) {
 
     // The hg '{parents}' token is empty if there is one "natural" parent
-    // (predecessor local commit ID). Othwerwise, it may have one or two
+    // (predecessor local commit ID). Otherwise, it may have one or two
     // parents. The string looks like this:
     //
     //  151:1f6c61a60586 154:1d5f799ebe1e

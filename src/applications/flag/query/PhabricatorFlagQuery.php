@@ -6,6 +6,7 @@ final class PhabricatorFlagQuery
   const GROUP_COLOR = 'color';
   const GROUP_NONE  = 'none';
 
+  private $ids;
   private $ownerPHIDs;
   private $types;
   private $objectPHIDs;
@@ -14,6 +15,11 @@ final class PhabricatorFlagQuery
 
   private $needHandles;
   private $needObjects;
+
+  public function withIDs(array $ids) {
+    $this->ids = $ids;
+    return $this;
+  }
 
   public function withOwnerPHIDs(array $owner_phids) {
     $this->ownerPHIDs = $owner_phids;
@@ -36,7 +42,7 @@ final class PhabricatorFlagQuery
   }
 
   /**
-   * Note this is done in php and not in mySQL, which means its inappropriate
+   * NOTE: this is done in PHP and not in MySQL, which means its inappropriate
    * for large datasets. Pragmatically, this is fine for user flags which are
    * typically well under 100 flags per user.
    */
@@ -65,8 +71,7 @@ final class PhabricatorFlagQuery
       ->executeOne();
   }
 
-
-  public function loadPage() {
+  protected function loadPage() {
     $table = new PhabricatorFlag();
     $conn_r = $table->establishConnection('r');
 
@@ -81,8 +86,7 @@ final class PhabricatorFlagQuery
     return $table->loadAllFromArray($data);
   }
 
-  public function willFilterPage(array $flags) {
-
+  protected function willFilterPage(array $flags) {
     if ($this->needObjects) {
       $objects = id(new PhabricatorObjectQuery())
         ->setViewer($this->getViewer())
@@ -117,52 +121,59 @@ final class PhabricatorFlagQuery
       case self::GROUP_NONE:
         break;
       default:
-        throw new Exception("Unknown groupBy parameter: $this->groupBy");
+        throw new Exception(
+          pht('Unknown groupBy parameter: %s', $this->groupBy));
         break;
     }
 
     return $flags;
   }
 
-  private function buildWhereClause($conn_r) {
+  protected function buildWhereClause(AphrontDatabaseConnection $conn) {
     $where = array();
+
+    if ($this->ids !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'flag.id IN (%Ld)',
+        $this->ids);
+    }
 
     if ($this->ownerPHIDs) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'flag.ownerPHID IN (%Ls)',
         $this->ownerPHIDs);
     }
 
     if ($this->types) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'flag.type IN (%Ls)',
         $this->types);
     }
 
     if ($this->objectPHIDs) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'flag.objectPHID IN (%Ls)',
         $this->objectPHIDs);
     }
 
     if ($this->colors) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'flag.color IN (%Ld)',
         $this->colors);
     }
 
-    $where[] = $this->buildPagingClause($conn_r);
+    $where[] = $this->buildPagingClause($conn);
 
-    return $this->formatWhereClause($where);
+    return $this->formatWhereClause($conn, $where);
   }
 
-
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationFlags';
+    return 'PhabricatorFlagsApplication';
   }
 
 }

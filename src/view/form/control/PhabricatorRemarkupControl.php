@@ -1,11 +1,38 @@
 <?php
 
 final class PhabricatorRemarkupControl extends AphrontFormTextAreaControl {
+
   private $disableMacro = false;
+  private $disableFullScreen = false;
+  private $canPin;
+  private $sendOnEnter = false;
 
   public function setDisableMacros($disable) {
     $this->disableMacro = $disable;
     return $this;
+  }
+
+  public function setDisableFullScreen($disable) {
+    $this->disableFullScreen = $disable;
+    return $this;
+  }
+
+  public function setCanPin($can_pin) {
+    $this->canPin = $can_pin;
+    return $this;
+  }
+
+  public function getCanPin() {
+    return $this->canPin;
+  }
+
+  public function setSendOnEnter($soe) {
+    $this->sendOnEnter = $soe;
+    return $this;
+  }
+
+  public function getSendOnEnter() {
+    return $this->sendOnEnter;
   }
 
   protected function renderInput() {
@@ -15,17 +42,38 @@ final class PhabricatorRemarkupControl extends AphrontFormTextAreaControl {
       $this->setID($id);
     }
 
+    $viewer = $this->getUser();
+    if (!$viewer) {
+      throw new PhutilInvalidStateException('setUser');
+    }
+
     // We need to have this if previews render images, since Ajax can not
     // currently ship JS or CSS.
-    require_celerity_resource('lightbox-attachment-css');
+    require_celerity_resource('phui-lightbox-css');
 
-    Javelin::initBehavior(
-      'aphront-drag-and-drop-textarea',
-      array(
-        'target'          => $id,
-        'activatedClass'  => 'aphront-textarea-drag-and-drop',
-        'uri'             => '/file/dropupload/',
-      ));
+    if (!$this->getDisabled()) {
+      Javelin::initBehavior(
+        'aphront-drag-and-drop-textarea',
+        array(
+          'target' => $id,
+          'activatedClass' => 'aphront-textarea-drag-and-drop',
+          'uri' => '/file/dropupload/',
+          'chunkThreshold' => PhabricatorFileStorageEngine::getChunkThreshold(),
+        ));
+    }
+
+    $root_id = celerity_generate_unique_node_id();
+
+    $user_datasource = new PhabricatorPeopleDatasource();
+    $emoji_datasource = new PhabricatorEmojiDatasource();
+    $proj_datasource = id(new PhabricatorProjectDatasource())
+      ->setParameters(
+        array(
+          'autocomplete' => 1,
+        ));
+
+    $phriction_datasource = new PhrictionDocumentDatasource();
+    $phurl_datasource = new PhabricatorPhurlURLDatasource();
 
     Javelin::initBehavior(
       'phabricator-remarkup-assist',
@@ -35,71 +83,165 @@ final class PhabricatorRemarkupControl extends AphrontFormTextAreaControl {
           'italic text' => pht('italic text'),
           'monospaced text' => pht('monospaced text'),
           'List Item' => pht('List Item'),
+          'Quoted Text' => pht('Quoted Text'),
           'data' => pht('data'),
           'name' => pht('name'),
           'URL' => pht('URL'),
+          'key-help' => pht('Pin or unpin the comment form.'),
+        ),
+        'canPin' => $this->getCanPin(),
+        'disabled' => $this->getDisabled(),
+        'sendOnEnter' => $this->getSendOnEnter(),
+        'rootID' => $root_id,
+        'autocompleteMap' => (object)array(
+          64 => array( // "@"
+            'datasourceURI' => $user_datasource->getDatasourceURI(),
+            'headerIcon' => 'fa-user',
+            'headerText' => pht('Find User:'),
+            'hintText' => $user_datasource->getPlaceholderText(),
+          ),
+          35 => array( // "#"
+            'datasourceURI' => $proj_datasource->getDatasourceURI(),
+            'headerIcon' => 'fa-briefcase',
+            'headerText' => pht('Find Project:'),
+            'hintText' => $proj_datasource->getPlaceholderText(),
+          ),
+          58 => array( // ":"
+            'datasourceURI' => $emoji_datasource->getDatasourceURI(),
+            'headerIcon' => 'fa-smile-o',
+            'headerText' => pht('Find Emoji:'),
+            'hintText' => $emoji_datasource->getPlaceholderText(),
+
+            // Cancel on emoticons like ":3".
+            'ignore' => array(
+              '3',
+              ')',
+              '(',
+              '-',
+              '/',
+            ),
+          ),
+          91 => array( // "["
+            'datasourceURI' => $phriction_datasource->getDatasourceURI(),
+            'headerIcon' => 'fa-book',
+            'headerText' => pht('Find Document:'),
+            'hintText' => $phriction_datasource->getPlaceholderText(),
+            'cancel' => array(
+              ':', // Cancel on "http:" and similar.
+              '|',
+              ']',
+            ),
+            'prefix' => '^\\[',
+          ),
+          40 => array( // "("
+            'datasourceURI' => $phurl_datasource->getDatasourceURI(),
+            'headerIcon' => 'fa-compress',
+            'headerText' => pht('Find Phurl:'),
+            'hintText' => $phurl_datasource->getPlaceholderText(),
+            'cancel' => array(
+              ')',
+            ),
+            'prefix' => '^\\(',
+          ),
         ),
       ));
     Javelin::initBehavior('phabricator-tooltips', array());
 
     $actions = array(
-      'b'     => array(
+      'fa-bold' => array(
         'tip' => pht('Bold'),
+        'nodevice' => true,
       ),
-      'i'     => array(
+      'fa-italic' => array(
         'tip' => pht('Italics'),
+        'nodevice' => true,
       ),
-      'tt'    => array(
+      'fa-text-width' => array(
         'tip' => pht('Monospaced'),
+        'nodevice' => true,
       ),
-      'link'  => array(
+      'fa-link' => array(
         'tip' => pht('Link'),
+        'nodevice' => true,
       ),
       array(
         'spacer' => true,
+        'nodevice' => true,
       ),
-      'ul' => array(
+      'fa-list-ul' => array(
         'tip' => pht('Bulleted List'),
+        'nodevice' => true,
       ),
-      'ol' => array(
+      'fa-list-ol' => array(
         'tip' => pht('Numbered List'),
+        'nodevice' => true,
       ),
-      'code' => array(
+      'fa-code' => array(
         'tip' => pht('Code Block'),
+        'nodevice' => true,
       ),
-      'table' => array(
+      'fa-quote-right' => array(
+        'tip' => pht('Quote'),
+        'nodevice' => true,
+      ),
+      'fa-table' => array(
         'tip' => pht('Table'),
+        'nodevice' => true,
       ),
-      'image' => array(
+      'fa-cloud-upload' => array(
         'tip' => pht('Upload File'),
       ),
     );
 
-    if (!$this->disableMacro and function_exists('imagettftext')) {
+    $can_use_macros =
+      (!$this->disableMacro) &&
+      (function_exists('imagettftext'));
+
+    if ($can_use_macros) {
+      $can_use_macros = PhabricatorApplication::isClassInstalledForViewer(
+        'PhabricatorMacroApplication',
+        $viewer);
+    }
+
+    if ($can_use_macros) {
       $actions[] = array(
         'spacer' => true,
         );
-      $actions['meme'] = array(
+      $actions['fa-meh-o'] = array(
         'tip' => pht('Meme'),
       );
     }
 
-    $actions['help'] = array(
-        'tip' => pht('Help'),
+    $actions['fa-eye'] = array(
+      'tip' => pht('Preview'),
+      'align' => 'right',
+    );
+
+    $actions['fa-book'] = array(
+      'tip' => pht('Help'),
+      'align' => 'right',
+      'href'  => PhabricatorEnv::getDoclink('Remarkup Reference'),
+    );
+
+    $mode_actions = array();
+
+    if (!$this->disableFullScreen) {
+      $mode_actions['fa-arrows-alt'] = array(
+        'tip' => pht('Fullscreen Mode'),
         'align' => 'right',
-        'href'  => PhabricatorEnv::getDoclink(
-          'article/Remarkup_Reference.html'),
       );
+    }
 
-    $actions[] = array(
-      'spacer' => true,
-      'align' => 'right',
-    );
+    if ($this->getCanPin()) {
+      $mode_actions['fa-thumb-tack'] = array(
+        'tip' => pht('Pin Form On Screen'),
+        'align' => 'right',
+      );
+    }
 
-    $actions['fullscreen'] = array(
-      'tip' => pht('Fullscreen Mode'),
-      'align' => 'right',
-    );
+    if ($mode_actions) {
+      $actions += $mode_actions;
+    }
 
     $buttons = array();
     foreach ($actions as $action => $spec) {
@@ -108,6 +250,10 @@ final class PhabricatorRemarkupControl extends AphrontFormTextAreaControl {
 
       if (idx($spec, 'align') == 'right') {
         $classes[] = 'remarkup-assist-right';
+      }
+
+      if (idx($spec, 'nodevice')) {
+        $classes[] = 'remarkup-assist-nodevice';
       }
 
       if (idx($spec, 'spacer')) {
@@ -123,6 +269,10 @@ final class PhabricatorRemarkupControl extends AphrontFormTextAreaControl {
         $classes[] = 'remarkup-assist-button';
       }
 
+      if ($action == 'fa-cloud-upload') {
+        $classes[] = 'remarkup-assist-upload';
+      }
+
       $href = idx($spec, 'href', '#');
       if ($href == '#') {
         $meta = array('action' => $action);
@@ -134,19 +284,31 @@ final class PhabricatorRemarkupControl extends AphrontFormTextAreaControl {
         $target = '_blank';
       }
 
+      $content = null;
+
       $tip = idx($spec, 'tip');
       if ($tip) {
         $meta['tip'] = $tip;
+        $content = javelin_tag(
+          'span',
+          array(
+            'aural' => true,
+          ),
+          $tip);
       }
 
-      require_celerity_resource('sprite-icons-css');
+      $sigils = array();
+      $sigils[] = 'remarkup-assist';
+      if (!$this->getDisabled()) {
+        $sigils[] = 'has-tooltip';
+      }
 
       $buttons[] = javelin_tag(
         'a',
         array(
           'class'       => implode(' ', $classes),
           'href'        => $href,
-          'sigil'       => 'remarkup-assist has-tooltip',
+          'sigil'       => implode(' ', $sigils),
           'meta'        => $meta,
           'mustcapture' => $mustcapture,
           'target'      => $target,
@@ -155,9 +317,10 @@ final class PhabricatorRemarkupControl extends AphrontFormTextAreaControl {
         phutil_tag(
           'div',
           array(
-            'class' => 'remarkup-assist sprite-icons remarkup-assist-'.$action,
+            'class' =>
+              'remarkup-assist phui-icon-view phui-font-fa bluegrey '.$action,
           ),
-          ''));
+          $content));
     }
 
     $buttons = phutil_tag(
@@ -167,18 +330,14 @@ final class PhabricatorRemarkupControl extends AphrontFormTextAreaControl {
       ),
       $buttons);
 
-    $monospaced_textareas = null;
-    $monospaced_textareas_class = null;
-    $user = $this->getUser();
+    $use_monospaced = $viewer->compareUserSetting(
+      PhabricatorMonospacedTextareasSetting::SETTINGKEY,
+      PhabricatorMonospacedTextareasSetting::VALUE_TEXT_MONOSPACED);
 
-    if ($user) {
-      $monospaced_textareas = $user
-        ->loadPreferences()
-        ->getPreference(
-          PhabricatorUserPreferences::PREFERENCE_MONOSPACED_TEXTAREAS);
-      if ($monospaced_textareas == 'enabled') {
-        $monospaced_textareas_class = 'PhabricatorMonospaced';
-      }
+    if ($use_monospaced) {
+      $monospaced_textareas_class = 'PhabricatorMonospaced';
+    } else {
+      $monospaced_textareas_class = null;
     }
 
     $this->setCustomClass(
@@ -188,6 +347,8 @@ final class PhabricatorRemarkupControl extends AphrontFormTextAreaControl {
       'div',
       array(
         'sigil' => 'remarkup-assist-control',
+        'class' => $this->getDisabled() ? 'disabled-control' : null,
+        'id' => $root_id,
       ),
       array(
         $buttons,

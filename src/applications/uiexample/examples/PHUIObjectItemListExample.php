@@ -3,12 +3,13 @@
 final class PHUIObjectItemListExample extends PhabricatorUIExample {
 
   public function getName() {
-    return 'Object Item List';
+    return pht('Object Item List');
   }
 
   public function getDescription() {
-    return hsprintf(
-      'Use <tt>PHUIObjectItemListView</tt> to render lists of objects.');
+    return pht(
+      'Use %s to render lists of objects.',
+      hsprintf('<tt>PHUIObjectItemListView</tt>'));
   }
 
   public function renderExample() {
@@ -22,14 +23,12 @@ final class PHUIObjectItemListExample extends PhabricatorUIExample {
 
     $out = array();
 
-    $head = id(new PHUIHeaderView())
-      ->setHeader(pht('Basic List'));
-
     $list = new PHUIObjectItemListView();
 
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setObjectName('FRUIT1')
+        ->setStatusIcon('fa-apple')
         ->setHeader(pht('Apple'))
         ->setHref('#'));
 
@@ -45,22 +44,22 @@ final class PHUIObjectItemListExample extends PhabricatorUIExample {
         ->setHeader(pht('Cherry'))
         ->setHref('#'));
 
-    $out[] = array($head, $list);
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Basic List')
+      ->setObjectList($list);
 
+    $out[] = $box;
 
-    $head = id(new PHUIHeaderView())
-      ->setHeader(pht('Empty List'));
     $list = new PHUIObjectItemListView();
-
     $list->setNoDataString(pht('This list is empty.'));
 
-    $out[] = array($head, $list);
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Empty List')
+      ->setObjectList($list);
 
+    $out[] = $box;
 
-    $head = id(new PHUIHeaderView())
-      ->setHeader(pht('Stacked List'));
     $list = new PHUIObjectItemListView();
-    $list->setStackable(true);
 
     $list->addItem(
       id(new PHUIObjectItemView())
@@ -79,149 +78,121 @@ final class PHUIObjectItemListExample extends PhabricatorUIExample {
         ->setHeader(pht('Thursday'))
         ->setHref('#'));
 
-    $out[] = array($head, $list);
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Stacked List')
+      ->setObjectList($list);
 
-    $head = id(new PHUIHeaderView())
-      ->setHeader(pht('Plain List'));
+    $out[] = $box;
+
     $list = new PHUIObjectItemListView();
-    $list->setPlain(true);
-
-    $list->addItem(
-      id(new PHUIObjectItemView())
-        ->setHeader(pht('Monday'))
-        ->setSubHead('I love cats')
-        ->setHref('#'));
-    $list->addItem(
-      id(new PHUIObjectItemView())
-        ->setHeader(pht('Tuesday'))
-        ->setSubHead('Cat, cats, cats')
-        ->setHref('#'));
-    $list->addItem(
-      id(new PHUIObjectItemView())
-        ->setHeader(pht('Wednesday'))
-        ->setSubHead('Meow, meow, meow')
-        ->setHref('#'));
-    $list->addItem(
-      id(new PHUIObjectItemView())
-        ->setHeader(pht('Thursday'))
-        ->setSubHead('Every single day')
-        ->setHref('#'));
-
-    $out[] = array($head, $list);
-
-
-    $head = id(new PHUIHeaderView())
-      ->setHeader(pht('Card List'));
-    $list = new PHUIObjectItemListView();
-    $list->setCards(true);
 
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('Business Card'))
-        ->setBarColor('red'));
+        ->setStatusIcon('fa-warning red'));
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('Playing Card'))
-        ->setBarColor('orange')
-        ->addIcon('comment', pht('Royal Flush!')));
+        ->setStatusIcon('fa-warning orange')
+        ->addIcon('fa-comment', pht('Royal Flush!')));
 
     $owner = phutil_tag('a', array('href' => '#'), pht('jackofclubs'));
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('House of Cards'))
-        ->setBarColor('yellow')
+        ->setStatusIcon('fa-warning yellow')
+        ->setDisabled(true)
         ->addByline(pht('Owner: %s', $owner)));
 
     $author = phutil_tag('a', array('href' => '#'), pht('agoat'));
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('Cardigan'))
-        ->setBarColor('green')
-        ->addIcon('highlight', pht('Warm!'))
+        ->setStatusIcon('fa-check green')
+        ->addIcon('fa-star', pht('Warm!'))
         ->addByline(pht('Author: %s', $author)));
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('Cardamom'))
-        ->addFootIcon('highlight-white', 'Spice')
-        ->setBarColor('blue'));
+        ->setStatusIcon('fa-check blue'));
     $list->addItem(
       id(new PHUIObjectItemView())
-        ->setHeader(pht(
-          'The human cardiovascular system includes the heart, lungs, and '.
-          'some other parts; most of these parts are pretty squishy'))
-        ->addFootIcon('search-white', pht('Respiration!'))
+        ->setHeader(
+          pht(
+            'The human cardiovascular system includes the heart, lungs, and '.
+            'some other parts; most of these parts are pretty squishy.'))
         ->addHandleIcon($handle, pht('You have a cardiovascular system!'))
-        ->setBarColor('indigo'));
+        ->setStatusIcon('fa-check indigo'));
 
 
-    $out[] = array($head, $list);
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Card List')
+      ->setObjectList($list);
 
+    $out[] = $box;
 
-    $head = id(new PHUIHeaderView())
-      ->setHeader(pht('Grippable List'));
     $list = new PHUIObjectItemListView();
-    $list->setCards(true);
 
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('Grab ahold!'))
         ->setHref('#')
-        ->setGrippable(true)
-        ->setBarColor('red'));
+        ->setGrippable(true));
 
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('Hold on tight!'))
         ->setHref('#')
-        ->setGrippable(true)
-        ->setBarColor('yellow'));
+        ->setGrippable(true));
 
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht("Don't let go!"))
         ->setHref('#')
         ->setGrippable(true)
-        ->setBarColor('green')
         ->addAction(
           id(new PHUIListItemView())
             ->setHref('#')
-            ->setIcon('delete')));
+            ->setIcon('fa-times')));
 
-    $out[] = array($head, $list);
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Grippable List')
+      ->setObjectList($list);
 
-    $head = id(new PHUIHeaderView())
-      ->setHeader(pht('List With Actions'));
+    $out[] = $box;
+
     $list = new PHUIObjectItemListView();
 
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('You Have The Power'))
         ->setHref('#')
-        ->setBarColor('blue')
+        ->setStatusIcon('fa-circle-o blue')
         ->addAction(
           id(new PHUIListItemView())
             ->setHref('#')
             ->setName(pht('Moo'))
-            ->setIcon('edit')));
+            ->setIcon('fa-pencil')));
 
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('Believe In Yourself'))
         ->setHref('#')
-        ->setBarColor('violet')
+        ->setStatusIcon('fa-circle-o violet')
         ->addAction(
           id(new PHUIListItemView())
             ->setHref('#')
             ->setName(pht('Quack'))
-            ->setIcon('edit'))
+            ->setIcon('fa-pencil'))
         ->addAction(
           id(new PHUIListItemView())
             ->setHref('#')
             ->setName(pht('Oink'))
-            ->setIcon('delete')));
+            ->setIcon('fa-times')));
 
-    $out[] = array($head, $list);
-
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Action Link List')
+      ->setObjectList($list);
 
     $head = id(new PHUIHeaderView())
       ->setHeader(pht('Extras'));
@@ -231,15 +202,13 @@ final class PHUIObjectItemListExample extends PhabricatorUIExample {
     $list->addItem(
       id(new PHUIObjectItemView())
         ->setHeader(pht('Ace of Hearts'))
-        ->setSubHead(
+        ->setDescription(
           pht('This is a powerful card in the game "Hearts".'))
         ->setHref('#')
         ->addAttribute(pht('Suit: Hearts'))
         ->addAttribute(pht('Rank: Ace'))
-        ->addIcon('love', pht('Ace'))
-        ->addIcon('love-grey', pht('Hearts'))
-        ->addFootIcon('blame-white', pht('Ace'))
-        ->addFootIcon('love-white', pht('Heart'))
+        ->addIcon('fa-heart', pht('Ace'))
+        ->addIcon('fa-heart red', pht('Hearts'))
         ->addHandleIcon($handle, pht('You hold all the cards.'))
         ->addHandleIcon($handle, pht('You make all the rules.')));
 
@@ -260,16 +229,16 @@ final class PHUIObjectItemListExample extends PhabricatorUIExample {
       id(new PHUIObjectItemView())
         ->setHeader(pht('Crowded Eastern Edge'))
         ->setHref('#')
-        ->addIcon('computer', pht('Stuff'))
-        ->addIcon('computer', pht('Stuff'))
-        ->addIcon('computer', pht('Stuff'))
+        ->addIcon('fa-circle red', pht('Stuff'))
+        ->addIcon('fa-circle yellow', pht('Stuff'))
+        ->addIcon('fa-circle green', pht('Stuff'))
         ->addHandleIcon($handle, pht('More Stuff')));
 
-    $out[] = array($head, $list);
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Action List')
+      ->setObjectList($list);
 
-
-    $head = id(new PHUIHeaderView())
-      ->setHeader(pht('Effects'));
+    $out[] = $box;
 
     $list = new PHUIObjectItemListView();
 
@@ -300,11 +269,11 @@ final class PHUIObjectItemListExample extends PhabricatorUIExample {
         ->setDisabled(true)
         ->setHref('#'));
 
-    $out[] = array($head, $list);
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Extra Things and Stuff')
+      ->setObjectList($list);
 
-
-    $head = id(new PHUIHeaderView())
-      ->setHeader(pht('Colors'));
+    $out[] = $box;
 
     $list = new PHUIObjectItemListView();
 
@@ -326,10 +295,52 @@ final class PHUIObjectItemListExample extends PhabricatorUIExample {
       $list->addItem(
         id(new PHUIObjectItemView())
           ->setHeader($bar_label)
-          ->setBarColor($bar_color));
+          ->setStatusIcon('fa-bell '.$bar_color));
     }
 
-    $out[] = array($head, $list);
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Color Icons')
+      ->setObjectList($list);
+
+    $out[] = $box;
+
+    $list = new PHUIObjectItemListView();
+    $list->setFlush(true);
+
+    $default_profile = PhabricatorFile::loadBuiltin($user, 'profile.png');
+    $default_project = PhabricatorFile::loadBuiltin($user, 'project.png');
+
+    $list->addItem(
+      id(new PHUIObjectItemView())
+        ->setImageURI($default_profile->getViewURI())
+        ->setHeader(pht('Default User Profile Image'))
+        ->addAction(
+          id(new PHUIListItemView())
+            ->setHref('#')
+            ->setIcon('fa-pencil-square'))
+        ->addAction(
+          id(new PHUIListItemView())
+            ->setHref('#')
+            ->setIcon('fa-plus-square'))
+        ->addAction(
+          id(new PHUIListItemView())
+            ->setHref('#')
+            ->setIcon('fa-minus-square')));
+
+    $list->addItem(
+      id(new PHUIObjectItemView())
+        ->setImageURI($default_project->getViewURI())
+        ->setImageHref('#')
+        ->setHref('$$$')
+        ->setHeader(pht('Default Project Profile Image'))
+        ->setGrippable(true)
+        ->addAttribute(pht('This is the default project profile image.')));
+
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText('Profile Images')
+      ->setObjectList($list);
+
+    $out[] = $box;
 
     return $out;
   }

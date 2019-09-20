@@ -1,22 +1,28 @@
 <?php
 
-/**
- * @group conpherence
- */
 final class ConpherenceParticipant extends ConpherenceDAO {
 
   protected $participantPHID;
   protected $conpherencePHID;
-  protected $participationStatus;
-  protected $behindTransactionPHID;
   protected $seenMessageCount;
-  protected $dateTouched;
   protected $settings = array();
 
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_SERIALIZATION => array(
         'settings' => self::SERIALIZATION_JSON,
+      ),
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'seenMessageCount' => 'uint64',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'conpherencePHID' => array(
+          'columns' => array('conpherencePHID', 'participantPHID'),
+          'unique' => true,
+        ),
+        'key_thread' => array(
+          'columns' => array('participantPHID', 'conpherencePHID'),
+        ),
       ),
     ) + parent::getConfiguration();
   }
@@ -25,24 +31,22 @@ final class ConpherenceParticipant extends ConpherenceDAO {
     return nonempty($this->settings, array());
   }
 
-  public function markUpToDate(
-    ConpherenceThread $conpherence,
-    ConpherenceTransaction $xaction) {
+  public function markUpToDate(ConpherenceThread $conpherence) {
+
     if (!$this->isUpToDate($conpherence)) {
-      $this->setParticipationStatus(ConpherenceParticipationStatus::UP_TO_DATE);
-      $this->setBehindTransactionPHID($xaction->getPHID());
       $this->setSeenMessageCount($conpherence->getMessageCount());
       $this->save();
+
+      PhabricatorUserCache::clearCache(
+        PhabricatorUserMessageCountCacheType::KEY_COUNT,
+        $this->getParticipantPHID());
     }
+
     return $this;
   }
 
-  private function isUpToDate(ConpherenceThread $conpherence) {
-    return
-      ($this->getSeenMessageCount() == $conpherence->getMessageCount())
-        &&
-      ($this->getParticipationStatus() ==
-       ConpherenceParticipationStatus::UP_TO_DATE);
+  public function isUpToDate(ConpherenceThread $conpherence) {
+    return ($this->getSeenMessageCount() == $conpherence->getMessageCount());
   }
 
 }

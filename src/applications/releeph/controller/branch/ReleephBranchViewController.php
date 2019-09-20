@@ -1,64 +1,40 @@
 <?php
 
-final class ReleephBranchViewController extends ReleephProjectController
-  implements PhabricatorApplicationSearchResultsControllerInterface {
-
-  private $queryKey;
+final class ReleephBranchViewController extends ReleephBranchController {
 
   public function shouldAllowPublic() {
     return true;
   }
 
-  public function willProcessRequest(array $data) {
-    parent::willProcessRequest($data);
-    $this->queryKey = idx($data, 'queryKey');
-  }
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $id = $request->getURIData('branchID');
+    $querykey = $request->getURIData('queryKey');
 
+    $branch = id(new ReleephBranchQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($id))
+      ->executeOne();
+    if (!$branch) {
+      return new Aphront404Response();
+    }
+    $this->setBranch($branch);
 
-  public function processRequest() {
-    $request = $this->getRequest();
-
-    $controller = id(new PhabricatorApplicationSearchController($request))
+    $controller = id(new PhabricatorApplicationSearchController())
       ->setPreface($this->renderPreface())
-      ->setQueryKey($this->queryKey)
+      ->setQueryKey($querykey)
       ->setSearchEngine($this->getSearchEngine())
       ->setNavigation($this->buildSideNavView());
 
     return $this->delegateToController($controller);
   }
 
-  public function renderResultsList(
-    array $requests,
-    PhabricatorSavedQuery $query) {
-
-    assert_instances_of($requests, 'ReleephRequest');
-    $viewer = $this->getRequest()->getUser();
-
-    $releeph_branch = $this->getReleephBranch();
-    $releeph_project = $this->getReleephProject();
-
-    // TODO: Really gross.
-    $releeph_branch->populateReleephRequestHandles(
-      $viewer,
-      $requests);
-
-    $list = id(new ReleephRequestHeaderListView())
-      ->setOriginType('branch')
-      ->setUser($viewer)
-      ->setAphrontRequest($this->getRequest())
-      ->setReleephProject($releeph_project)
-      ->setReleephBranch($releeph_branch)
-      ->setReleephRequests($requests);
-
-    return $list;
-  }
 
   public function buildSideNavView($for_app = false) {
     $user = $this->getRequest()->getUser();
 
     $nav = new AphrontSideNavFilterView();
     $nav->setBaseURI(new PhutilURI($this->getApplicationURI()));
-
 
     $this->getSearchEngine()->addNavigationItems($nav->getMenu());
 
@@ -68,69 +44,66 @@ final class ReleephBranchViewController extends ReleephProjectController
   }
 
   private function getSearchEngine() {
-    $branch = $this->getReleephBranch();
+    $branch = $this->getBranch();
     return id(new ReleephRequestSearchEngine())
       ->setBranch($branch)
-      ->setBaseURI($branch->getURI())
+      ->setBaseURI($this->getApplicationURI('branch/'.$branch->getID().'/'))
       ->setViewer($this->getRequest()->getUser());
   }
 
-  public function buildApplicationCrumbs() {
-    $releeph_branch = $this->getReleephBranch();
-
+  protected function buildApplicationCrumbs() {
     $crumbs = parent::buildApplicationCrumbs();
 
-    if ($releeph_branch->isActive()) {
-      $create_uri = $releeph_branch->getURI('request/');
+    $branch = $this->getBranch();
+    if ($branch) {
+      $pull_uri = $this->getApplicationURI('branch/pull/'.$branch->getID().'/');
       $crumbs->addAction(
         id(new PHUIListItemView())
-          ->setHref($create_uri)
-          ->setName(pht('Request Pick'))
-          ->setIcon('create'));
+          ->setHref($pull_uri)
+          ->setName(pht('New Pull Request'))
+          ->setIcon('fa-plus-square')
+          ->setDisabled(!$branch->isActive()));
     }
 
     return $crumbs;
   }
 
   private function renderPreface() {
-    $branch = $this->getReleephBranch();
     $viewer = $this->getRequest()->getUser();
 
+    $branch = $this->getBranch();
     $id = $branch->getID();
 
     $header = id(new PHUIHeaderView())
-      ->setHeader($branch->getDisplayName());
+      ->setHeader($branch->getDisplayName())
+      ->setUser($viewer)
+      ->setPolicyObject($branch);
 
-    if (!$branch->getIsActive()) {
-      $header->addTag(
-        id(new PhabricatorTagView())
-          ->setType(PhabricatorTagView::TYPE_STATE)
-          ->setBackgroundColor(PhabricatorTagView::COLOR_BLACK)
-          ->setName(pht('Closed')));
+    if ($branch->getIsActive()) {
+      $header->setStatus('fa-check', 'bluegrey', pht('Active'));
+    } else {
+      $header->setStatus('fa-ban', 'dark', pht('Closed'));
     }
 
     $actions = id(new PhabricatorActionListView())
       ->setUser($viewer)
-      ->setObject($branch)
-      ->setObjectURI($this->getRequest()->getRequestURI());
+      ->setObject($branch);
 
     $can_edit = PhabricatorPolicyFilter::hasCapability(
       $viewer,
       $branch,
       PhabricatorPolicyCapability::CAN_EDIT);
 
-    $edit_uri = $branch->getURI('edit/');
-    $close_uri = $branch->getURI('close/');
-    $reopen_uri = $branch->getURI('re-open/');
-
-    $id = $branch->getID();
+    $edit_uri = $this->getApplicationURI("branch/edit/{$id}/");
+    $close_uri = $this->getApplicationURI("branch/close/{$id}/");
+    $reopen_uri = $this->getApplicationURI("branch/re-open/{$id}/");
     $history_uri = $this->getApplicationURI("branch/{$id}/history/");
 
     $actions->addAction(
       id(new PhabricatorActionView())
         ->setName(pht('Edit Branch'))
         ->setHref($edit_uri)
-        ->setIcon('edit')
+        ->setIcon('fa-pencil')
         ->setDisabled(!$can_edit)
         ->setWorkflow(!$can_edit));
 
@@ -139,7 +112,7 @@ final class ReleephBranchViewController extends ReleephProjectController
         id(new PhabricatorActionView())
           ->setName(pht('Close Branch'))
           ->setHref($close_uri)
-          ->setIcon('delete')
+          ->setIcon('fa-times')
           ->setDisabled(!$can_edit)
           ->setWorkflow(true));
     } else {
@@ -147,9 +120,8 @@ final class ReleephBranchViewController extends ReleephProjectController
         id(new PhabricatorActionView())
           ->setName(pht('Reopen Branch'))
           ->setHref($reopen_uri)
-          ->setIcon('new')
+          ->setIcon('fa-plus')
           ->setUser($viewer)
-          ->setRenderAsForm(true)
           ->setDisabled(!$can_edit)
           ->setWorkflow(true));
     }
@@ -158,7 +130,7 @@ final class ReleephBranchViewController extends ReleephProjectController
       id(new PhabricatorActionView())
         ->setName(pht('View History'))
         ->setHref($history_uri)
-        ->setIcon('transcript'));
+        ->setIcon('fa-list'));
 
     $properties = id(new PHUIPropertyListView())
       ->setUser($viewer)

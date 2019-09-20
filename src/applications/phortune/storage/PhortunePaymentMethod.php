@@ -4,38 +4,59 @@
  * A payment method is a credit card; it is associated with an account and
  * charges can be made against it.
  */
-final class PhortunePaymentMethod extends PhortuneDAO
-  implements PhabricatorPolicyInterface {
+final class PhortunePaymentMethod
+  extends PhortuneDAO
+  implements
+    PhabricatorPolicyInterface,
+    PhabricatorExtendedPolicyInterface,
+    PhabricatorPolicyCodexInterface,
+    PhabricatorApplicationTransactionInterface {
 
   const STATUS_ACTIVE     = 'payment:active';
-  const STATUS_FAILED     = 'payment:failed';
-  const STATUS_REMOVED    = 'payment:removed';
+  const STATUS_DISABLED   = 'payment:disabled';
 
   protected $name = '';
   protected $status;
   protected $accountPHID;
   protected $authorPHID;
+  protected $merchantPHID;
+  protected $providerPHID;
   protected $expires;
   protected $metadata = array();
   protected $brand;
   protected $lastFourDigits;
-  protected $providerType;
-  protected $providerDomain;
 
   private $account = self::ATTACHABLE;
+  private $merchant = self::ATTACHABLE;
+  private $providerConfig = self::ATTACHABLE;
 
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID => true,
       self::CONFIG_SERIALIZATION => array(
         'metadata' => self::SERIALIZATION_JSON,
+      ),
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'name' => 'text255',
+        'status' => 'text64',
+        'brand' => 'text64',
+        'expires' => 'text16',
+        'lastFourDigits' => 'text16',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_account' => array(
+          'columns' => array('accountPHID', 'status'),
+        ),
+        'key_merchant' => array(
+          'columns' => array('merchantPHID', 'accountPHID'),
+        ),
       ),
     ) + parent::getConfiguration();
   }
 
   public function generatePHID() {
     return PhabricatorPHID::generateNewPHID(
-      PhabricatorPHIDConstants::PHID_TYPE_PAYM);
+      PhortunePaymentMethodPHIDType::TYPECONST);
   }
 
   public function attachAccount(PhortuneAccount $account) {
@@ -47,8 +68,31 @@ final class PhortunePaymentMethod extends PhortuneDAO
     return $this->assertAttached($this->account);
   }
 
+  public function attachMerchant(PhortuneMerchant $merchant) {
+    $this->merchant = $merchant;
+    return $this;
+  }
+
+  public function getMerchant() {
+    return $this->assertAttached($this->merchant);
+  }
+
+  public function attachProviderConfig(PhortunePaymentProviderConfig $config) {
+    $this->providerConfig = $config;
+    return $this;
+  }
+
+  public function getProviderConfig() {
+    return $this->assertAttached($this->providerConfig);
+  }
+
   public function getDescription() {
-    return '...';
+    $provider = $this->buildPaymentProvider();
+
+    $expires = $this->getDisplayExpires();
+    $description = $provider->getPaymentMethodProviderDescription();
+
+    return pht("Expires %s \xC2\xB7 %s", $expires, $description);
   }
 
   public function getMetadataValue($key, $default = null) {
@@ -61,29 +105,63 @@ final class PhortunePaymentMethod extends PhortuneDAO
   }
 
   public function buildPaymentProvider() {
-    $providers = PhortunePaymentProvider::getAllProviders();
+    return $this->getProviderConfig()->buildProvider();
+  }
 
-    $accept = array();
-    foreach ($providers as $provider) {
-      if ($provider->canHandlePaymentMethod($this)) {
-        $accept[] = $provider;
-      }
+  public function getDisplayName() {
+    if (strlen($this->name)) {
+      return $this->name;
     }
 
-    if (!$accept) {
-      throw new PhortuneNoPaymentProviderException($this);
-    }
+    $provider = $this->buildPaymentProvider();
+    return $provider->getDefaultPaymentMethodDisplayName($this);
+  }
 
-    if (count($accept) > 1) {
-      throw new PhortuneMultiplePaymentProvidersException($this, $accept);
-    }
+  public function getFullDisplayName() {
+    return pht('%s (%s)', $this->getDisplayName(), $this->getSummary());
+  }
 
-    return head($accept);
+  public function getSummary() {
+    return pht('%s %s', $this->getBrand(), $this->getLastFourDigits());
   }
 
   public function setExpires($year, $month) {
     $this->expires = $year.'-'.$month;
     return $this;
+  }
+
+  public function getDisplayExpires() {
+    list($year, $month) = explode('-', $this->getExpires());
+    $month = sprintf('%02d', $month);
+    $year = substr($year, -2);
+    return $month.'/'.$year;
+  }
+
+  public function isActive() {
+    return ($this->getStatus() === self::STATUS_ACTIVE);
+  }
+
+  public function getURI() {
+    return urisprintf(
+      '/phortune/account/%d/methods/%d/',
+      $this->getAccount()->getID(),
+      $this->getID());
+  }
+
+  public function getObjectName() {
+    return pht('Payment Method %d', $this->getID());
+  }
+
+
+/* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
+
+
+  public function getApplicationTransactionEditor() {
+    return new PhortunePaymentMethodEditor();
+  }
+
+  public function getApplicationTransactionTemplate() {
+    return new PhortunePaymentMethodTransaction();
   }
 
 
@@ -98,18 +176,49 @@ final class PhortunePaymentMethod extends PhortuneDAO
   }
 
   public function getPolicy($capability) {
-    return $this->getAccount()->getPolicy($capability);
+    return PhabricatorPolicies::getMostOpenPolicy();
   }
 
   public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
-    return $this->getAccount()->hasAutomaticCapability(
-      $capability,
-      $viewer);
+    // See T13366. If you can edit the merchant associated with this payment
+    // method, you can view the payment method.
+    if ($capability === PhabricatorPolicyCapability::CAN_VIEW) {
+      $any_edit = PhortuneMerchantQuery::canViewersEditMerchants(
+        array($viewer->getPHID()),
+        array($this->getMerchantPHID()));
+      if ($any_edit) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
-  public function describeAutomaticCapability($capability) {
-    return pht(
-      'Members of an account can always view and edit its payment methods.');
+
+/* -(  PhabricatorExtendedPolicyInterface  )--------------------------------- */
+
+
+  public function getExtendedPolicy($capability, PhabricatorUser $viewer) {
+    if ($this->hasAutomaticCapability($capability, $viewer)) {
+      return array();
+    }
+
+    // See T13366. For blanket view and edit permissions on all payment
+    // methods, you must be able to edit the associated account.
+    return array(
+      array(
+        $this->getAccount(),
+        PhabricatorPolicyCapability::CAN_EDIT,
+      ),
+    );
+  }
+
+
+/* -(  PhabricatorPolicyCodexInterface  )------------------------------------ */
+
+
+  public function newPolicyCodex() {
+    return new PhortunePaymentMethodPolicyCodex();
   }
 
 }

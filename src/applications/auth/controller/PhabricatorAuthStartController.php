@@ -7,8 +7,7 @@ final class PhabricatorAuthStartController
     return false;
   }
 
-  public function processRequest() {
-    $request = $this->getRequest();
+  public function handleRequest(AphrontRequest $request) {
     $viewer = $request->getUser();
 
     if ($viewer->isLoggedIn()) {
@@ -24,23 +23,61 @@ final class PhabricatorAuthStartController
       return $this->processConduitRequest();
     }
 
-    if ($request->getCookie('phusr') && $request->getCookie('phsid')) {
-      // The session cookie is invalid, so clear it.
-      $request->clearCookie('phusr');
-      $request->clearCookie('phsid');
+    // If the user gets this far, they aren't logged in, so if they have a
+    // user session token we can conclude that it's invalid: if it was valid,
+    // they'd have been logged in above and never made it here. Try to clear
+    // it and warn the user they may need to nuke their cookies.
 
-      return $this->renderError(
-        pht(
-          "Your login session is invalid. Try reloading the page and logging ".
-          "in again. If that does not work, clear your browser cookies."));
+    $session_token = $request->getCookie(PhabricatorCookies::COOKIE_SESSION);
+    $did_clear = $request->getStr('cleared');
+
+    if (strlen($session_token)) {
+      $kind = PhabricatorAuthSessionEngine::getSessionKindFromToken(
+        $session_token);
+      switch ($kind) {
+        case PhabricatorAuthSessionEngine::KIND_ANONYMOUS:
+          // If this is an anonymous session. It's expected that they won't
+          // be logged in, so we can just continue.
+          break;
+        default:
+          // The session cookie is invalid, so try to clear it.
+          $request->clearCookie(PhabricatorCookies::COOKIE_USERNAME);
+          $request->clearCookie(PhabricatorCookies::COOKIE_SESSION);
+
+          // We've previously tried to clear the cookie but we ended up back
+          // here, so it didn't work. Hard fatal instead of trying again.
+          if ($did_clear) {
+            return $this->renderError(
+              pht(
+                'Your login session is invalid, and clearing the session '.
+                'cookie was unsuccessful. Try clearing your browser cookies.'));
+          }
+
+          $redirect_uri = $request->getRequestURI();
+          $redirect_uri->replaceQueryParam('cleared', 1);
+          return id(new AphrontRedirectResponse())->setURI($redirect_uri);
+      }
     }
 
+    // If we just cleared the session cookie and it worked, clean up after
+    // ourselves by redirecting to get rid of the "cleared" parameter. The
+    // the workflow will continue normally.
+    if ($did_clear) {
+      $redirect_uri = $request->getRequestURI();
+      $redirect_uri->removeQueryParam('cleared');
+      return id(new AphrontRedirectResponse())->setURI($redirect_uri);
+    }
 
     $providers = PhabricatorAuthProvider::getAllEnabledProviders();
     foreach ($providers as $key => $provider) {
       if (!$provider->shouldAllowLogin()) {
         unset($providers[$key]);
       }
+    }
+
+    $configs = array();
+    foreach ($providers as $provider) {
+      $configs[] = $provider->getProviderConfig();
     }
 
     if (!$providers) {
@@ -53,36 +90,54 @@ final class PhabricatorAuthStartController
 
       return $this->renderError(
         pht(
-          "This Phabricator install is not configured with any enabled ".
-          "authentication providers which can be used to log in. If you ".
-          "have accidentally locked yourself out by disabling all providers, ".
-          "you can use `phabricator/bin/auth recover <username>` to ".
-          "recover access to an administrative account."));
+          'This Phabricator install is not configured with any enabled '.
+          'authentication providers which can be used to log in. If you '.
+          'have accidentally locked yourself out by disabling all providers, '.
+          'you can use `%s` to recover access to an account.',
+          'phabricator/bin/auth recover <username>'));
     }
 
     $next_uri = $request->getStr('next');
-    if (!$next_uri) {
-      $next_uri_path = $this->getRequest()->getPath();
-      if ($next_uri_path == '/auth/start/') {
-        $next_uri = '/';
-      } else {
-        $next_uri = $this->getRequest()->getRequestURI();
+    if (!strlen($next_uri)) {
+      if ($this->getDelegatingController()) {
+        // Only set a next URI from the request path if this controller was
+        // delegated to, which happens when a user tries to view a page which
+        // requires them to login.
+
+        // If this controller handled the request directly, we're on the main
+        // login page, and never want to redirect the user back here after they
+        // login.
+        $next_uri = (string)$this->getRequest()->getRequestURI();
       }
     }
 
     if (!$request->isFormPost()) {
-      $request->setCookie('next_uri', $next_uri);
-      $request->setCookie('phcid', Filesystem::readRandomCharacters(16));
+      if (strlen($next_uri)) {
+        PhabricatorCookies::setNextURICookie($request, $next_uri);
+      }
+      PhabricatorCookies::setClientIDCookie($request);
     }
+
+    $auto_response = $this->tryAutoLogin($providers);
+    if ($auto_response) {
+      return $auto_response;
+    }
+
+    $invite = $this->loadInvite();
 
     $not_buttons = array();
     $are_buttons = array();
     $providers = msort($providers, 'getLoginOrder');
     foreach ($providers as $provider) {
-      if ($provider->isLoginFormAButton()) {
-        $are_buttons[] = $provider->buildLoginForm($this);
+      if ($invite) {
+        $form = $provider->buildInviteForm($this);
       } else {
-        $not_buttons[] = $provider->buildLoginForm($this);
+        $form = $provider->buildLoginForm($this);
+      }
+      if ($provider->isLoginFormAButton()) {
+        $are_buttons[] = $form;
+      } else {
+        $not_buttons[] = $form;
       }
     }
 
@@ -122,24 +177,31 @@ final class PhabricatorAuthStartController
         $button_columns);
     }
 
-    $login_message = PhabricatorEnv::getEnvConfig('auth.login-message');
-    $login_message = phutil_safe_html($login_message);
+    $invite_message = null;
+    if ($invite) {
+      $invite_message = $this->renderInviteHeader($invite);
+    }
+
+    $custom_message = $this->newCustomStartMessage();
+
+    $email_login = $this->newEmailLoginView($configs);
 
     $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('Login')));
+    $crumbs->addTextCrumb(pht('Login'));
+    $crumbs->setBorder(true);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $login_message,
-        $out,
-      ),
-      array(
-        'title' => pht('Login to Phabricator'),
-        'device' => true,
-      ));
+    $title = pht('Login');
+    $view = array(
+      $invite_message,
+      $custom_message,
+      $out,
+      $email_login,
+    );
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
   }
 
 
@@ -155,14 +217,24 @@ final class PhabricatorAuthStartController
         $request->getRequestURI());
     }
 
-    $dialog = new AphrontDialogView();
-    $dialog->setUser($viewer);
-    $dialog->setTitle(pht('Login Required'));
-    $dialog->appendChild(pht('You must login to continue.'));
-    $dialog->addSubmitButton(pht('Login'));
-    $dialog->addCancelButton('/');
+    // Often, users end up here by clicking a disabled action link in the UI
+    // (for example, they might click "Edit Subtasks" on a Maniphest task
+    // page). After they log in we want to send them back to that main object
+    // page if we can, since it's confusing to end up on a standalone page with
+    // only a dialog (particularly if that dialog is another error,
+    // like a policy exception).
 
-    return id(new AphrontDialogResponse())->setDialog($dialog);
+    $via_header = AphrontRequest::getViaHeaderName();
+    $via_uri = AphrontRequest::getHTTPHeader($via_header);
+    if (strlen($via_uri)) {
+      PhabricatorCookies::setNextURICookie($request, $via_uri, $force = true);
+    }
+
+    return $this->newDialog()
+      ->setTitle(pht('Login Required'))
+      ->appendParagraph(pht('You must log in to take this action.'))
+      ->addSubmitButton(pht('Log In'))
+      ->addCancelButton('/');
   }
 
 
@@ -194,5 +266,96 @@ final class PhabricatorAuthStartController
       pht('Authentication Failure'),
       array($message));
   }
+
+  private function tryAutoLogin(array $providers) {
+    $request = $this->getRequest();
+
+    // If the user just logged out, don't immediately log them in again.
+    if ($request->getURIData('loggedout')) {
+      return null;
+    }
+
+    // If we have more than one provider, we can't autologin because we
+    // don't know which one the user wants.
+    if (count($providers) != 1) {
+      return null;
+    }
+
+    $provider = head($providers);
+    if (!$provider->supportsAutoLogin()) {
+      return null;
+    }
+
+    $config = $provider->getProviderConfig();
+    if (!$config->getShouldAutoLogin()) {
+      return null;
+    }
+
+    $auto_uri = $provider->getAutoLoginURI($request);
+
+    return id(new AphrontRedirectResponse())
+      ->setIsExternal(true)
+      ->setURI($auto_uri);
+  }
+
+  private function newCustomStartMessage() {
+    $viewer = $this->getViewer();
+
+    $text = PhabricatorAuthMessage::loadMessageText(
+      $viewer,
+      PhabricatorAuthLoginMessageType::MESSAGEKEY);
+
+    if (!strlen($text)) {
+      return null;
+    }
+
+    $remarkup_view = new PHUIRemarkupView($viewer, $text);
+
+    return phutil_tag(
+      'div',
+      array(
+        'class' => 'auth-custom-message',
+      ),
+      $remarkup_view);
+  }
+
+  private function newEmailLoginView(array $configs) {
+    assert_instances_of($configs, 'PhabricatorAuthProviderConfig');
+
+    // Check if password auth is enabled. If it is, the password login form
+    // renders a "Forgot password?" link, so we don't need to provide a
+    // supplemental link.
+
+    $has_password = false;
+    foreach ($configs as $config) {
+      $provider = $config->getProvider();
+      if ($provider instanceof PhabricatorPasswordAuthProvider) {
+        $has_password = true;
+      }
+    }
+
+    if ($has_password) {
+      return null;
+    }
+
+    $view = array(
+      pht('Trouble logging in?'),
+      ' ',
+      phutil_tag(
+        'a',
+        array(
+          'href' => '/login/email/',
+        ),
+        pht('Send a login link to your email address.')),
+    );
+
+    return phutil_tag(
+      'div',
+      array(
+        'class' => 'auth-custom-message',
+      ),
+      $view);
+  }
+
 
 }

@@ -1,39 +1,23 @@
 <?php
 
-/**
- * @group file
- */
 final class PhabricatorFileEditor
   extends PhabricatorApplicationTransactionEditor {
+
+  public function getEditorApplicationClass() {
+    return 'PhabricatorFilesApplication';
+  }
+
+  public function getEditorObjectsDescription() {
+    return pht('Files');
+  }
 
   public function getTransactionTypes() {
     $types = parent::getTransactionTypes();
 
     $types[] = PhabricatorTransactions::TYPE_COMMENT;
+    $types[] = PhabricatorTransactions::TYPE_VIEW_POLICY;
 
     return $types;
-  }
-
-  protected function getCustomTransactionOldValue(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
-
-  }
-
-  protected function getCustomTransactionNewValue(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
-
-  }
-
-  protected function applyCustomInternalTransaction(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
-  }
-
-  protected function applyCustomExternalTransaction(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
   }
 
   protected function shouldSendMail(
@@ -43,7 +27,7 @@ final class PhabricatorFileEditor
   }
 
   protected function getMailSubjectPrefix() {
-    return PhabricatorEnv::getEnvConfig('metamta.files.subject-prefix');
+    return pht('[File]');
   }
 
   protected function getMailTo(PhabricatorLiskDAO $object) {
@@ -63,8 +47,7 @@ final class PhabricatorFileEditor
     $name = $object->getName();
 
     return id(new PhabricatorMetaMTAMail())
-      ->setSubject("F{$id}: {$name}")
-      ->addHeader('Thread-Topic', "F{$id}");
+      ->setSubject("F{$id}: {$name}");
   }
 
   protected function buildMailBody(
@@ -80,12 +63,14 @@ final class PhabricatorFileEditor
     return $body;
   }
 
-  protected function supportsFeed() {
+  protected function shouldPublishFeedStory(
+    PhabricatorLiskDAO $object,
+    array $xactions) {
     return true;
   }
 
   protected function supportsSearch() {
-    return false;
+    return true;
   }
 
 }

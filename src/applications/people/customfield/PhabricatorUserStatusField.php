@@ -10,7 +10,7 @@ final class PhabricatorUserStatusField
   }
 
   public function getFieldName() {
-    return pht('Status');
+    return pht('Availability');
   }
 
   public function getFieldDescription() {
@@ -21,19 +21,24 @@ final class PhabricatorUserStatusField
     return true;
   }
 
-  public function renderPropertyViewValue() {
+  public function isFieldEnabled() {
+    return PhabricatorApplication::isClassInstalled(
+      'PhabricatorCalendarApplication');
+  }
+
+  public function renderPropertyViewValue(array $handles) {
     $user = $this->getObject();
     $viewer = $this->requireViewer();
 
-    $statuses = id(new PhabricatorUserStatus())
-      ->loadCurrentStatuses(array($user->getPHID()));
-    if (!$statuses) {
-      return pht('Available');
+    // Don't show availability for disabled users, since this is vaguely
+    // misleading to say "Availability: Available" and probably not useful.
+    if ($user->getIsDisabled()) {
+      return null;
     }
 
-    $status = head($statuses);
-
-    return $status->getTerseSummary($viewer);
+    return id(new PHUIUserAvailabilityView())
+      ->setViewer($viewer)
+      ->setAvailableUser($user);
   }
 
 }

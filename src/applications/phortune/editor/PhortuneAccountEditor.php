@@ -1,62 +1,82 @@
 <?php
 
-
 final class PhortuneAccountEditor
   extends PhabricatorApplicationTransactionEditor {
 
+  public function getEditorApplicationClass() {
+    return 'PhabricatorPhortuneApplication';
+  }
+
+  public function getEditorObjectsDescription() {
+    return pht('Phortune Accounts');
+  }
+
+  public function getCreateObjectTitle($author, $object) {
+    return pht('%s created this payment account.', $author);
+  }
+
   public function getTransactionTypes() {
     $types = parent::getTransactionTypes();
-
     $types[] = PhabricatorTransactions::TYPE_EDGE;
-    $types[] = PhortuneAccountTransaction::TYPE_NAME;
-
     return $types;
   }
 
-
-  protected function getCustomTransactionOldValue(
+  protected function validateTransaction(
     PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
-    switch ($xaction->getTransactionType()) {
-      case PhortuneAccountTransaction::TYPE_NAME:
-        return $object->getName();
-    }
-    return parent::getCustomTransactionOldValue($object, $xaction);
-  }
+    $type,
+    array $xactions) {
 
-  protected function getCustomTransactionNewValue(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
-    switch ($xaction->getTransactionType()) {
-      case PhortuneAccountTransaction::TYPE_NAME:
-        return $xaction->getNewValue();
-    }
-    return parent::getCustomTransactionNewValue($object, $xaction);
-  }
+    $errors = parent::validateTransaction($object, $type, $xactions);
 
-  protected function applyCustomInternalTransaction(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
-    switch ($xaction->getTransactionType()) {
-      case PhortuneAccountTransaction::TYPE_NAME:
-        $object->setName($xaction->getNewValue());
-        return;
+    $viewer = $this->requireActor();
+
+    switch ($type) {
       case PhabricatorTransactions::TYPE_EDGE:
-        return;
-    }
-    return parent::applyCustomInternalTransaction($object, $xaction);
-  }
+        foreach ($xactions as $xaction) {
+          switch ($xaction->getMetadataValue('edge:type')) {
+            case PhortuneAccountHasMemberEdgeType::EDGECONST:
+              $old = $object->getMemberPHIDs();
+              $new = $this->getPHIDTransactionNewValue($xaction, $old);
 
-  protected function applyCustomExternalTransaction(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
-    switch ($xaction->getTransactionType()) {
-      case PhortuneAccountTransaction::TYPE_NAME:
-        return;
-      case PhabricatorTransactions::TYPE_EDGE:
-        return;
+              $old = array_fuse($old);
+              $new = array_fuse($new);
+
+              foreach ($new as $new_phid) {
+                if (isset($old[$new_phid])) {
+                  continue;
+                }
+
+                $user = id(new PhabricatorPeopleQuery())
+                  ->setViewer($viewer)
+                  ->withPHIDs(array($new_phid))
+                  ->executeOne();
+                if (!$user) {
+                  $error = new PhabricatorApplicationTransactionValidationError(
+                    $type,
+                    pht('Invalid'),
+                    pht(
+                      'Account managers must be valid users, "%s" is not.',
+                      $new_phid));
+                  $errors[] = $error;
+                  continue;
+                }
+              }
+
+              $actor_phid = $this->getActingAsPHID();
+              if (!isset($new[$actor_phid])) {
+                $error = new PhabricatorApplicationTransactionValidationError(
+                  $type,
+                  pht('Invalid'),
+                  pht('You can not remove yourself as an account manager.'),
+                  $xaction);
+                $errors[] = $error;
+              }
+            break;
+          }
+        }
+        break;
     }
-    return parent::applyCustomExternalTransaction($object, $xaction);
+    return $errors;
   }
 
 }

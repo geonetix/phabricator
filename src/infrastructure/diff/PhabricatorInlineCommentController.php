@@ -6,6 +6,24 @@ abstract class PhabricatorInlineCommentController
   abstract protected function createComment();
   abstract protected function loadComment($id);
   abstract protected function loadCommentForEdit($id);
+  abstract protected function loadCommentForDone($id);
+  abstract protected function loadCommentByPHID($phid);
+  abstract protected function loadObjectOwnerPHID(
+    PhabricatorInlineCommentInterface $inline);
+  abstract protected function deleteComment(
+    PhabricatorInlineCommentInterface $inline);
+  abstract protected function undeleteComment(
+    PhabricatorInlineCommentInterface $inline);
+  abstract protected function saveComment(
+    PhabricatorInlineCommentInterface $inline);
+
+  protected function hideComments(array $ids) {
+    throw new PhutilMethodNotImplementedException();
+  }
+
+  protected function showComments(array $ids) {
+    throw new PhutilMethodNotImplementedException();
+  }
 
   private $changesetID;
   private $isNewFile;
@@ -15,6 +33,8 @@ abstract class PhabricatorInlineCommentController
   private $commentText;
   private $operation;
   private $commentID;
+  private $renderer;
+  private $replyToCommentPHID;
 
   public function getCommentID() {
     return $this->commentID;
@@ -48,56 +68,138 @@ abstract class PhabricatorInlineCommentController
     return $this->isNewFile;
   }
 
+  public function setRenderer($renderer) {
+    $this->renderer = $renderer;
+    return $this;
+  }
+
+  public function getRenderer() {
+    return $this->renderer;
+  }
+
+  public function setReplyToCommentPHID($phid) {
+    $this->replyToCommentPHID = $phid;
+    return $this;
+  }
+
+  public function getReplyToCommentPHID() {
+    return $this->replyToCommentPHID;
+  }
 
   public function processRequest() {
     $request = $this->getRequest();
-    $user = $request->getUser();
+    $viewer = $this->getViewer();
 
     $this->readRequestParameters();
 
-    switch ($this->getOperation()) {
-      case 'delete':
-        $inline = $this->loadCommentForEdit($this->getCommentID());
-
-        if ($request->isFormPost()) {
-          $inline->delete();
-          return $this->buildEmptyResponse();
+    $op = $this->getOperation();
+    switch ($op) {
+      case 'hide':
+      case 'show':
+        if (!$request->validateCSRF()) {
+          return new Aphront404Response();
         }
 
-        $dialog = new AphrontDialogView();
-        $dialog->setUser($user);
-        $dialog->setSubmitURI($request->getRequestURI());
+        $ids = $request->getStrList('ids');
+        if ($ids) {
+          if ($op == 'hide') {
+            $this->hideComments($ids);
+          } else {
+            $this->showComments($ids);
+          }
+        }
 
-        $dialog->setTitle('Really delete this comment?');
-        $dialog->addHiddenInput('id', $this->getCommentID());
-        $dialog->addHiddenInput('op', 'delete');
-        $dialog->appendChild(
-          phutil_tag('p', array(), pht('Delete this inline comment?')));
+        return id(new AphrontAjaxResponse())->setContent(array());
+      case 'done':
+        if (!$request->validateCSRF()) {
+          return new Aphront404Response();
+        }
+        $inline = $this->loadCommentForDone($this->getCommentID());
 
-        $dialog->addCancelButton('#');
-        $dialog->addSubmitButton('Delete');
+        $is_draft_state = false;
+        $is_checked = false;
+        switch ($inline->getFixedState()) {
+          case PhabricatorInlineCommentInterface::STATE_DRAFT:
+            $next_state = PhabricatorInlineCommentInterface::STATE_UNDONE;
+            break;
+          case PhabricatorInlineCommentInterface::STATE_UNDRAFT:
+            $next_state = PhabricatorInlineCommentInterface::STATE_DONE;
+            $is_checked = true;
+            break;
+          case PhabricatorInlineCommentInterface::STATE_DONE:
+            $next_state = PhabricatorInlineCommentInterface::STATE_UNDRAFT;
+            $is_draft_state = true;
+            break;
+          default:
+          case PhabricatorInlineCommentInterface::STATE_UNDONE:
+            $next_state = PhabricatorInlineCommentInterface::STATE_DRAFT;
+            $is_draft_state = true;
+            $is_checked = true;
+            break;
+        }
 
-        return id(new AphrontDialogResponse())->setDialog($dialog);
-      case 'edit':
+        $inline->setFixedState($next_state)->save();
+
+        return id(new AphrontAjaxResponse())
+          ->setContent(
+            array(
+              'isChecked' => $is_checked,
+              'draftState' => $is_draft_state,
+            ));
+      case 'delete':
+      case 'undelete':
+      case 'refdelete':
+        if (!$request->validateCSRF()) {
+          return new Aphront404Response();
+        }
+
+        // NOTE: For normal deletes, we just process the delete immediately
+        // and show an "Undo" action. For deletes by reference from the
+        // preview ("refdelete"), we prompt first (because the "Undo" may
+        // not draw, or may not be easy to locate).
+
+        if ($op == 'refdelete') {
+          if (!$request->isFormPost()) {
+            return $this->newDialog()
+              ->setTitle(pht('Really delete comment?'))
+              ->addHiddenInput('id', $this->getCommentID())
+              ->addHiddenInput('op', $op)
+              ->appendParagraph(pht('Delete this inline comment?'))
+              ->addCancelButton('#')
+              ->addSubmitButton(pht('Delete'));
+          }
+        }
+
+        $is_delete = ($op == 'delete' || $op == 'refdelete');
+
         $inline = $this->loadCommentForEdit($this->getCommentID());
 
+        if ($is_delete) {
+          $this->deleteComment($inline);
+        } else {
+          $this->undeleteComment($inline);
+        }
+
+        return $this->buildEmptyResponse();
+      case 'edit':
+        $inline = $this->loadCommentForEdit($this->getCommentID());
         $text = $this->getCommentText();
 
         if ($request->isFormPost()) {
           if (strlen($text)) {
             $inline->setContent($text);
-            $inline->save();
+            $this->saveComment($inline);
             return $this->buildRenderedCommentResponse(
               $inline,
               $this->getIsOnRight());
           } else {
-            $inline->delete();
+            $this->deleteComment($inline);
             return $this->buildEmptyResponse();
           }
         }
 
         $edit_dialog = $this->buildEditDialog();
-        $edit_dialog->setTitle('Edit Inline Comment');
+        $edit_dialog->setTitle(pht('Edit Inline Comment'));
 
         $edit_dialog->addHiddenInput('id', $this->getCommentID());
         $edit_dialog->addHiddenInput('op', 'edit');
@@ -106,10 +208,11 @@ abstract class PhabricatorInlineCommentController
           $this->renderTextArea(
             nonempty($text, $inline->getContent())));
 
-        return id(new AphrontAjaxResponse())
-          ->setContent($edit_dialog->render());
-      case 'create':
+        $view = $this->buildScaffoldForView($edit_dialog);
 
+        return id(new AphrontAjaxResponse())
+          ->setContent($view->render());
+      case 'create':
         $text = $this->getCommentText();
 
         if (!$request->isFormPost() || !strlen($text)) {
@@ -118,12 +221,26 @@ abstract class PhabricatorInlineCommentController
 
         $inline = $this->createComment()
           ->setChangesetID($this->getChangesetID())
-          ->setAuthorPHID($user->getPHID())
+          ->setAuthorPHID($viewer->getPHID())
           ->setLineNumber($this->getLineNumber())
           ->setLineLength($this->getLineLength())
           ->setIsNewFile($this->getIsNewFile())
-          ->setContent($text)
-          ->save();
+          ->setContent($text);
+
+        if ($this->getReplyToCommentPHID()) {
+          $inline->setReplyToCommentPHID($this->getReplyToCommentPHID());
+        }
+
+        // If you own this object, mark your own inlines as "Done" by default.
+        $owner_phid = $this->loadObjectOwnerPHID($inline);
+        if ($owner_phid) {
+          if ($viewer->getPHID() == $owner_phid) {
+            $fixed_state = PhabricatorInlineCommentInterface::STATE_DRAFT;
+            $inline->setFixedState($fixed_state);
+          }
+        }
+
+        $this->saveComment($inline);
 
         return $this->buildRenderedCommentResponse(
           $inline,
@@ -133,23 +250,22 @@ abstract class PhabricatorInlineCommentController
         $edit_dialog = $this->buildEditDialog();
 
         if ($this->getOperation() == 'reply') {
-          $inline = $this->loadComment($this->getCommentID());
-
-          $edit_dialog->setTitle('Reply to Inline Comment');
-          $changeset = $inline->getChangesetID();
-          $is_new = $inline->getIsNewFile();
-          $number = $inline->getLineNumber();
-          $length = $inline->getLineLength();
+          $edit_dialog->setTitle(pht('Reply to Inline Comment'));
         } else {
-          $edit_dialog->setTitle('New Inline Comment');
-          $changeset = $this->getChangesetID();
-          $is_new = $this->getIsNewFile();
-          $number = $this->getLineNumber();
-          $length = $this->getLineLength();
+          $edit_dialog->setTitle(pht('New Inline Comment'));
         }
 
+        // NOTE: We read the values from the client (the display values), not
+        // the values from the database (the original values) when replying.
+        // In particular, when replying to a ghost comment which was moved
+        // across diffs and then moved backward to the most recent visible
+        // line, we want to reply on the display line (which exists), not on
+        // the comment's original line (which may not exist in this changeset).
+        $is_new = $this->getIsNewFile();
+        $number = $this->getLineNumber();
+        $length = $this->getLineLength();
+
         $edit_dialog->addHiddenInput('op', 'create');
-        $edit_dialog->addHiddenInput('changeset', $changeset);
         $edit_dialog->addHiddenInput('is_new', $is_new);
         $edit_dialog->addHiddenInput('number', $number);
         $edit_dialog->addHiddenInput('length', $length);
@@ -157,8 +273,10 @@ abstract class PhabricatorInlineCommentController
         $text_area = $this->renderTextArea($this->getCommentText());
         $edit_dialog->appendChild($text_area);
 
+        $view = $this->buildScaffoldForView($edit_dialog);
+
         return id(new AphrontAjaxResponse())
-          ->setContent($edit_dialog->render());
+          ->setContent($view->render());
     }
   }
 
@@ -167,27 +285,55 @@ abstract class PhabricatorInlineCommentController
 
     // NOTE: This isn't necessarily a DifferentialChangeset ID, just an
     // application identifier for the changeset. In Diffusion, it's a Path ID.
-    $this->changesetID    = $request->getInt('changeset');
+    $this->changesetID = $request->getInt('changesetID');
 
-    $this->isNewFile      = $request->getBool('is_new');
-    $this->isOnRight      = $request->getBool('on_right');
-    $this->lineNumber     = $request->getInt('number');
-    $this->lineLength     = $request->getInt('length');
-    $this->commentText    = $request->getStr('text');
-    $this->commentID      = $request->getInt('id');
-    $this->operation      = $request->getStr('op');
+    $this->isNewFile = (int)$request->getBool('is_new');
+    $this->isOnRight = $request->getBool('on_right');
+    $this->lineNumber = $request->getInt('number');
+    $this->lineLength = $request->getInt('length');
+    $this->commentText = $request->getStr('text');
+    $this->commentID = $request->getInt('id');
+    $this->operation = $request->getStr('op');
+    $this->renderer = $request->getStr('renderer');
+    $this->replyToCommentPHID = $request->getStr('replyToCommentPHID');
+
+    if ($this->getReplyToCommentPHID()) {
+      $reply_phid = $this->getReplyToCommentPHID();
+      $reply_comment = $this->loadCommentByPHID($reply_phid);
+      if (!$reply_comment) {
+        throw new Exception(
+          pht('Failed to load comment "%s".', $reply_phid));
+      }
+
+      // When replying, force the new comment into the same location as the
+      // old comment. If we don't do this, replying to a ghost comment from
+      // diff A while viewing diff B can end up placing the two comments in
+      // different places while viewing diff C, because the porting algorithm
+      // makes a different decision. Forcing the comments to bind to the same
+      // place makes sure they stick together no matter which diff is being
+      // viewed. See T10562 for discussion.
+
+      $this->changesetID = $reply_comment->getChangesetID();
+      $this->isNewFile = $reply_comment->getIsNewFile();
+      $this->lineNumber = $reply_comment->getLineNumber();
+      $this->lineLength = $reply_comment->getLineLength();
+    }
   }
 
   private function buildEditDialog() {
     $request = $this->getRequest();
-    $user = $request->getUser();
+    $viewer = $this->getViewer();
 
-    $edit_dialog = new DifferentialInlineCommentEditView();
-    $edit_dialog->setUser($user);
-    $edit_dialog->setSubmitURI($request->getRequestURI());
-    $edit_dialog->setOnRight($this->getIsOnRight());
-    $edit_dialog->setNumber($this->getLineNumber());
-    $edit_dialog->setLength($this->getLineLength());
+    $edit_dialog = id(new PHUIDiffInlineCommentEditView())
+      ->setUser($viewer)
+      ->setSubmitURI($request->getRequestURI())
+      ->setIsOnRight($this->getIsOnRight())
+      ->setIsNewFile($this->getIsNewFile())
+      ->setNumber($this->getLineNumber())
+      ->setLength($this->getLineLength())
+      ->setRenderer($this->getRenderer())
+      ->setReplyToCommentPHID($this->getReplyToCommentPHID())
+      ->setChangesetID($this->getChangesetID());
 
     return $edit_dialog;
   }
@@ -196,7 +342,7 @@ abstract class PhabricatorInlineCommentController
     return id(new AphrontAjaxResponse())
       ->setContent(
         array(
-          'markup'          => '',
+          'markup' => '',
         ));
   }
 
@@ -205,26 +351,31 @@ abstract class PhabricatorInlineCommentController
     $on_right) {
 
     $request = $this->getRequest();
-    $user = $request->getUser();
+    $viewer = $this->getViewer();
 
     $engine = new PhabricatorMarkupEngine();
-    $engine->setViewer($user);
+    $engine->setViewer($viewer);
     $engine->addObject(
       $inline,
       PhabricatorInlineCommentInterface::MARKUP_FIELD_BODY);
     $engine->process();
 
-    $phids = array($user->getPHID());
+    $phids = array($viewer->getPHID());
 
     $handles = $this->loadViewerHandles($phids);
+    $object_owner_phid = $this->loadObjectOwnerPHID($inline);
 
-    $view = new DifferentialInlineCommentView();
-    $view->setInlineComment($inline);
-    $view->setOnRight($on_right);
-    $view->setBuildScaffolding(true);
-    $view->setMarkupEngine($engine);
-    $view->setHandles($handles);
-    $view->setEditable(true);
+    $view = id(new PHUIDiffInlineCommentDetailView())
+      ->setUser($viewer)
+      ->setInlineComment($inline)
+      ->setIsOnRight($on_right)
+      ->setMarkupEngine($engine)
+      ->setHandles($handles)
+      ->setEditable(true)
+      ->setCanMarkDone(false)
+      ->setObjectOwnerPHID($object_owner_phid);
+
+    $view = $this->buildScaffoldForView($view);
 
     return id(new AphrontAjaxResponse())
       ->setContent(
@@ -235,14 +386,22 @@ abstract class PhabricatorInlineCommentController
   }
 
   private function renderTextArea($text) {
-    return javelin_tag(
-      'textarea',
-      array(
-        'class' => 'differential-inline-comment-edit-textarea',
-        'sigil' => 'differential-inline-comment-edit-textarea',
-        'name' => 'text',
-      ),
-      $text);
+    return id(new PhabricatorRemarkupControl())
+      ->setViewer($this->getViewer())
+      ->setSigil('differential-inline-comment-edit-textarea')
+      ->setName('text')
+      ->setValue($text)
+      ->setDisableFullScreen(true);
+  }
+
+  private function buildScaffoldForView(PHUIDiffInlineCommentView $view) {
+    $renderer = DifferentialChangesetHTMLRenderer::getHTMLRendererByKey(
+      $this->getRenderer());
+
+    $view = $renderer->getRowScaffoldForInline($view);
+
+    return id(new PHUIDiffInlineCommentTableScaffold())
+      ->addRowScaffold($view);
   }
 
 }

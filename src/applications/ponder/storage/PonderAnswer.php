@@ -2,12 +2,12 @@
 
 final class PonderAnswer extends PonderDAO
   implements
+    PhabricatorApplicationTransactionInterface,
     PhabricatorMarkupInterface,
-    PonderVotableInterface,
     PhabricatorPolicyInterface,
     PhabricatorFlaggableInterface,
     PhabricatorSubscribableInterface,
-    PhabricatorTokenReceiverInterface {
+    PhabricatorDestructibleInterface {
 
   const MARKUP_FIELD_CONTENT = 'markup:content';
 
@@ -15,14 +15,30 @@ final class PonderAnswer extends PonderDAO
   protected $questionID;
 
   protected $content;
-  protected $contentSource;
-
+  protected $mailKey;
+  protected $status;
   protected $voteCount;
-  private $vote;
+
   private $question = self::ATTACHABLE;
   private $comments;
 
-  private $userVotes = array();
+  public static function initializeNewAnswer(
+    PhabricatorUser $actor,
+    PonderQuestion $question) {
+    $app = id(new PhabricatorApplicationQuery())
+      ->setViewer($actor)
+      ->withClasses(array('PhabricatorPonderApplication'))
+      ->executeOne();
+
+    return id(new PonderAnswer())
+      ->setQuestionID($question->getID())
+      ->setContent('')
+      ->attachQuestion($question)
+      ->setAuthorPHID($actor->getPHID())
+      ->setVoteCount(0)
+      ->setStatus(PonderAnswerStatus::ANSWER_STATUS_VISIBLE);
+
+  }
 
   public function attachQuestion(PonderQuestion $question = null) {
     $this->question = $question;
@@ -37,23 +53,6 @@ final class PonderAnswer extends PonderDAO
     return '/Q'.$this->getQuestionID().'#A'.$this->getID();
   }
 
-  public function setUserVote($vote) {
-    $this->vote = $vote['data'];
-    if (!$this->vote) {
-      $this->vote = PonderVote::VOTE_NONE;
-    }
-    return $this;
-  }
-
-  public function attachUserVote($user_phid, $vote) {
-    $this->vote = $vote;
-    return $this;
-  }
-
-  public function getUserVote() {
-    return $this->vote;
-  }
-
   public function setComments($comments) {
     $this->comments = $comments;
     return $this;
@@ -63,36 +62,71 @@ final class PonderAnswer extends PonderDAO
     return $this->comments;
   }
 
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID => true,
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'voteCount' => 'sint32',
+        'content' => 'text',
+        'status' => 'text32',
+        'mailKey' => 'bytes20',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_phid' => null,
+        'phid' => array(
+          'columns' => array('phid'),
+          'unique' => true,
+        ),
+        'key_oneanswerperquestion' => array(
+          'columns' => array('questionID', 'authorPHID'),
+          'unique' => true,
+        ),
+        'questionID' => array(
+          'columns' => array('questionID'),
+        ),
+        'authorPHID' => array(
+          'columns' => array('authorPHID'),
+        ),
+        'status' => array(
+          'columns' => array('status'),
+        ),
+      ),
     ) + parent::getConfiguration();
   }
 
   public function generatePHID() {
-    return PhabricatorPHID::generateNewPHID(
-      PonderPHIDTypeAnswer::TYPECONST);
-  }
-
-  public function setContentSource(PhabricatorContentSource $content_source) {
-    $this->contentSource = $content_source->serialize();
-    return $this;
-  }
-
-  public function getContentSource() {
-    return PhabricatorContentSource::newFromSerialized($this->contentSource);
+    return PhabricatorPHID::generateNewPHID(PonderAnswerPHIDType::TYPECONST);
   }
 
   public function getMarkupField() {
     return self::MARKUP_FIELD_CONTENT;
   }
 
+  public function save() {
+    if (!$this->getMailKey()) {
+      $this->setMailKey(Filesystem::readRandomCharacters(20));
+    }
+    return parent::save();
+  }
+
+
+/* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
+
+
+  public function getApplicationTransactionEditor() {
+    return new PonderAnswerEditor();
+  }
+
+  public function getApplicationTransactionTemplate() {
+    return new PonderAnswerTransaction();
+  }
+
+
   // Markup interface
 
   public function getMarkupFieldKey($field) {
-    $hash = PhabricatorHash::digest($this->getMarkupText($field));
-    $id = $this->getID();
-    return "ponder:A{$id}:{$field}:{$hash}";
+    $content = $this->getMarkupText($field);
+    return PhabricatorMarkupEngine::digestRemarkupContent($this, $content);
   }
 
   public function getMarkupText($field) {
@@ -114,15 +148,6 @@ final class PonderAnswer extends PonderDAO
     return (bool)$this->getID();
   }
 
-  // votable interface
-  public function getUserVoteEdgeType() {
-    return PhabricatorEdgeConfig::TYPE_VOTING_USER_HAS_ANSWER;
-  }
-
-  public function getVotablePHID() {
-    return $this->getPHID();
-  }
-
 
 /* -(  PhabricatorPolicyInterface  )----------------------------------------- */
 
@@ -139,7 +164,9 @@ final class PonderAnswer extends PonderDAO
       case PhabricatorPolicyCapability::CAN_VIEW:
         return $this->getQuestion()->getPolicy($capability);
       case PhabricatorPolicyCapability::CAN_EDIT:
-        return PhabricatorPolicies::POLICY_NOONE;
+        $app = PhabricatorApplication::getByClass(
+          'PhabricatorPonderApplication');
+        return $app->getPolicy(PonderModerateCapability::CAPABILITY);
     }
   }
 
@@ -160,24 +187,16 @@ final class PonderAnswer extends PonderDAO
 
   public function describeAutomaticCapability($capability) {
     $out = array();
-    $out[] = pht("The author of an answer can always view and edit it.");
+    $out[] = pht('The author of an answer can always view and edit it.');
     switch ($capability) {
       case PhabricatorPolicyCapability::CAN_VIEW:
         $out[] = pht(
-          "The user who asks a question can always view the answers.");
+          'The user who asks a question can always view the answers.');
+        $out[] = pht(
+          'A moderator can always view the answers.');
         break;
     }
     return $out;
-  }
-
-
-/* -(  PhabricatorTokenReceiverInterface  )---------------------------------- */
-
-
-  public function getUsersToNotifyOfTokenGiven() {
-    return array(
-      $this->getAuthorPHID(),
-    );
   }
 
 
@@ -188,5 +207,16 @@ final class PonderAnswer extends PonderDAO
     return ($phid == $this->getAuthorPHID());
   }
 
+
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+
+    $this->openTransaction();
+      $this->delete();
+    $this->saveTransaction();
+  }
 
 }

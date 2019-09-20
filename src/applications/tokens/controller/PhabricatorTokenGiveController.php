@@ -2,27 +2,39 @@
 
 final class PhabricatorTokenGiveController extends PhabricatorTokenController {
 
-  private $phid;
-
-  public function willProcessRequest(array $data) {
-    $this->phid = $data['phid'];
-  }
-
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+ public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $phid = $request->getURIData('phid');
 
     $handle = id(new PhabricatorHandleQuery())
-      ->setViewer($user)
-      ->withPHIDs(array($this->phid))
+      ->setViewer($viewer)
+      ->withPHIDs(array($phid))
       ->executeOne();
     if (!$handle->isComplete()) {
       return new Aphront404Response();
     }
 
+    $object = id(new PhabricatorObjectQuery())
+      ->setViewer($viewer)
+      ->withPHIDs(array($phid))
+      ->executeOne();
+
+    if (!($object instanceof PhabricatorTokenReceiverInterface)) {
+      return new Aphront400Response();
+    }
+
+    if (!PhabricatorPolicyFilter::canInteract($viewer, $object)) {
+      $lock = PhabricatorEditEngineLock::newForObject($viewer, $object);
+
+      $dialog = $this->newDialog()
+        ->addCancelButton($handle->getURI());
+
+      return $lock->willBlockUserInteractionWithDialog($dialog);
+    }
+
     $current = id(new PhabricatorTokenGivenQuery())
-      ->setViewer($user)
-      ->withAuthorPHIDs(array($user->getPHID()))
+      ->setViewer($viewer)
+      ->withAuthorPHIDs(array($viewer->getPHID()))
       ->withObjectPHIDs(array($handle->getPHID()))
       ->execute();
 
@@ -35,16 +47,19 @@ final class PhabricatorTokenGiveController extends PhabricatorTokenController {
     }
 
     $done_uri = $handle->getURI();
-    if ($request->isDialogFormPost()) {
+    if ($request->isFormOrHisecPost()) {
+      $content_source = PhabricatorContentSource::newFromRequest($request);
+
+      $editor = id(new PhabricatorTokenGivenEditor())
+        ->setActor($viewer)
+        ->setRequest($request)
+        ->setCancelURI($handle->getURI())
+        ->setContentSource($content_source);
       if ($is_give) {
         $token_phid = $request->getStr('tokenPHID');
-        $editor = id(new PhabricatorTokenGivenEditor())
-          ->setActor($user)
-          ->addToken($handle->getPHID(), $token_phid);
+        $editor->addToken($handle->getPHID(), $token_phid);
       } else {
-        $editor = id(new PhabricatorTokenGivenEditor())
-          ->setActor($user)
-          ->deleteToken($handle->getPHID());
+        $editor->deleteToken($handle->getPHID());
       }
 
       return id(new AphrontReloadResponse())->setURI($done_uri);
@@ -56,22 +71,29 @@ final class PhabricatorTokenGiveController extends PhabricatorTokenController {
       $dialog = $this->buildRescindTokenDialog(head($current));
     }
 
-    $dialog->setUser($user);
+    $dialog->setUser($viewer);
     $dialog->addCancelButton($done_uri);
 
     return id(new AphrontDialogResponse())->setDialog($dialog);
   }
 
   private function buildGiveTokenDialog() {
-    $user = $this->getRequest()->getUser();
+    $viewer = $this->getViewer();
 
     $tokens = id(new PhabricatorTokenQuery())
-      ->setViewer($user)
+      ->setViewer($viewer)
       ->execute();
 
     $buttons = array();
     $ii = 0;
     foreach ($tokens as $token) {
+      $aural = javelin_tag(
+        'span',
+        array(
+          'aural' => true,
+        ),
+        pht('Award "%s" Token', $token->getName()));
+
       $buttons[] = javelin_tag(
         'button',
         array(
@@ -82,10 +104,13 @@ final class PhabricatorTokenGiveController extends PhabricatorTokenController {
           'sigil' => 'has-tooltip',
           'meta' => array(
             'tip' => $token->getName(),
-          )
+          ),
         ),
-        $token->renderIcon());
-      if ((++$ii % 4) == 0) {
+        array(
+          $aural,
+          $token->renderIcon(),
+        ));
+      if ((++$ii % 6) == 0) {
         $buttons[] = phutil_tag('br');
       }
     }

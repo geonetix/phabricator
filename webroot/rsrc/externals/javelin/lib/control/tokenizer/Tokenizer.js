@@ -30,8 +30,6 @@
  *
  * When the tokenizer is focused, the CSS class `jx-tokenizer-container-focused`
  * is added to the container node.
- *
- * @group control
  */
 JX.install('Tokenizer', {
   construct : function(containerNode) {
@@ -46,12 +44,16 @@ JX.install('Tokenizer', {
     'change'],
 
   properties : {
-    limit : null
+    limit : null,
+    renderTokenCallback : null,
+    browseURI: null,
+    disabled: false
   },
 
   members : {
     _containerNode : null,
     _root : null,
+    _frame: null,
     _focus : null,
     _orig : null,
     _typeahead : null,
@@ -64,6 +66,11 @@ JX.install('Tokenizer', {
     _placeholder : null,
 
     start : function() {
+      if (this.getDisabled()) {
+        JX.DOM.alterClass(this._containerNode, 'disabled-control', true);
+        return;
+      }
+
       if (__DEV__) {
         if (!this._typeahead) {
           throw new Error(
@@ -77,6 +84,21 @@ JX.install('Tokenizer', {
       this._tokens = [];
       this._tokenMap = {};
 
+      try {
+        this._frame = JX.DOM.findAbove(this._orig, 'div', 'tokenizer-frame');
+      } catch (e) {
+        // Ignore, this tokenizer doesn't have a frame.
+      }
+
+      if (this._frame) {
+        JX.DOM.alterClass(this._frame, 'has-browse', !!this.getBrowseURI());
+        JX.DOM.listen(
+          this._frame,
+          'click',
+          'tokenizer-browse',
+          JX.bind(this, this._onbrowse));
+      }
+
       var focus = this.buildInput(this._orig.value);
       this._focus = focus;
 
@@ -89,7 +111,7 @@ JX.install('Tokenizer', {
 
       JX.DOM.listen(
         focus,
-        ['click', 'focus', 'blur', 'keydown', 'keypress'],
+        ['click', 'focus', 'blur', 'keydown', 'keypress', 'paste'],
         null,
         JX.bind(this, this.handleEvent));
 
@@ -223,7 +245,10 @@ JX.install('Tokenizer', {
         this._typeahead.updatePlaceholder();
       } else if (e.getType() == 'focus') {
         this._didfocus();
+      } else if (e.getType() == 'paste') {
+        setTimeout(JX.bind(this, this._redraw), 0);
       }
+
     },
 
     refresh : function() {
@@ -248,7 +273,6 @@ JX.install('Tokenizer', {
       }
       this._lastvalue = focus.value;
 
-      var root  = this._root;
       var metrics = JX.DOM.textMetrics(
         this._focus,
         'jx-tokenizer-metrics');
@@ -295,7 +319,7 @@ JX.install('Tokenizer', {
 
       root.insertBefore(token, focus);
 
-      this.invoke('change', this);
+      this._didChangeValue();
 
       return true;
     },
@@ -329,11 +353,23 @@ JX.install('Tokenizer', {
         sigil: 'remove'
       }, '\u00d7'); // U+00D7 multiplication sign
 
-      return JX.$N('a', {
+      var display_token = value;
+
+      var attrs = {
         className: 'jx-tokenizer-token',
         sigil: 'token',
         meta: {key: key}
-      }, [value, input, remove]);
+      };
+      var container = JX.$N('a', attrs);
+
+      var render_callback = this.getRenderTokenCallback();
+      if (render_callback) {
+        display_token = render_callback(value, key, container);
+      }
+
+      JX.DOM.setContent(container, [display_token, input, remove]);
+
+      return container;
     },
 
     getTokens : function() {
@@ -345,9 +381,6 @@ JX.install('Tokenizer', {
     },
 
     _onkeydown : function(e) {
-      var focus = this._focus;
-      var root = this._root;
-
       var raw = e.getRawEvent();
       if (raw.ctrlKey || raw.metaKey || raw.altKey) {
         return;
@@ -362,8 +395,13 @@ JX.install('Tokenizer', {
           break;
         case 'delete':
           if (!this._focus.value.length) {
+            // In unusual cases, it's possible for us to end up with a token
+            // that has the empty string ("") as a value. Support removal of
+            // this unusual token.
+
             var tok;
-            while ((tok = this._tokens.pop())) {
+            while (this._tokens.length) {
+              tok = this._tokens.pop();
               if (this._remove(tok, true)) {
                 break;
               }
@@ -392,7 +430,38 @@ JX.install('Tokenizer', {
       this._redraw(true);
       focus && this.focus();
 
+      this._didChangeValue();
+
+      return true;
+    },
+
+    _didChangeValue: function() {
+
+      if (this.getBrowseURI()) {
+        var button = JX.DOM.find(this._frame, 'a', 'tokenizer-browse');
+        JX.DOM.alterClass(button, 'disabled', !!this._shouldLockBrowse());
+      }
+
       this.invoke('change', this);
+    },
+
+    _shouldLockBrowse: function() {
+      var limit = this.getLimit();
+
+      if (!limit) {
+        // If there's no limit, never lock the browse button.
+        return false;
+      }
+
+      if (limit == 1) {
+        // If the limit is 1, we'll replace the current token if the
+        // user selects a new one, so we never need to lock the button.
+        return false;
+      }
+
+      if (limit > JX.keys(this.getTokens()).length) {
+        return false;
+      }
 
       return true;
     },
@@ -425,6 +494,40 @@ JX.install('Tokenizer', {
         false);
       this._focus.value = '';
       this._redraw();
+    },
+
+    _onbrowse: function(e) {
+      e.kill();
+
+      var uri = this.getBrowseURI();
+      if (!uri) {
+        return;
+      }
+
+      if (this._shouldLockBrowse()) {
+        return;
+      }
+
+      new JX.Workflow(uri, {exclude: JX.keys(this.getTokens()).join(',')})
+        .setHandler(
+          JX.bind(this, function(r) {
+            var source = this._typeahead.getDatasource();
+
+            source.addResult(r.token);
+            var result = source.getResult(r.key);
+
+            // If we have a limit of 1 token, replace the current token with
+            // the new token if we currently have a token.
+            if (this.getLimit() == 1) {
+              for (var k in this.getTokens()) {
+                this.removeToken(k);
+              }
+            }
+
+            this.addToken(r.key, result.name);
+            this.focus();
+          }))
+        .start();
     }
 
   }

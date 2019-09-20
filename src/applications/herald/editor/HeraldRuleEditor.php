@@ -3,52 +3,79 @@
 final class HeraldRuleEditor
   extends PhabricatorApplicationTransactionEditor {
 
-  public function getTransactionTypes() {
-    $types = parent::getTransactionTypes();
-
-    $types[] = PhabricatorTransactions::TYPE_COMMENT;
-    $types[] = HeraldRuleTransaction::TYPE_DISABLE;
-
-    return $types;
+  public function getEditorApplicationClass() {
+    return 'PhabricatorHeraldApplication';
   }
 
-  protected function getCustomTransactionOldValue(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
+  public function getEditorObjectsDescription() {
+    return pht('Herald Rules');
+  }
 
-    switch ($xaction->getTransactionType()) {
-      case HeraldRuleTransaction::TYPE_DISABLE:
-        return (int)$object->getIsDisabled();
+  protected function shouldApplyHeraldRules(
+    PhabricatorLiskDAO $object,
+    array $xactions) {
+    return true;
+  }
+
+  protected function buildHeraldAdapter(
+    PhabricatorLiskDAO $object,
+    array $xactions) {
+    return id(new HeraldRuleAdapter())
+      ->setRule($object);
+  }
+
+  protected function shouldSendMail(
+    PhabricatorLiskDAO $object,
+    array $xactions) {
+    return true;
+  }
+
+  protected function getMailTo(PhabricatorLiskDAO $object) {
+    $phids = array();
+
+    $phids[] = $this->getActingAsPHID();
+
+    if ($object->isPersonalRule()) {
+      $phids[] = $object->getAuthorPHID();
     }
 
+    return $phids;
   }
 
-  protected function getCustomTransactionNewValue(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
-
-    switch ($xaction->getTransactionType()) {
-      case HeraldRuleTransaction::TYPE_DISABLE:
-        return (int)$xaction->getNewValue();
-    }
-
+  protected function buildReplyHandler(PhabricatorLiskDAO $object) {
+    return id(new HeraldRuleReplyHandler())
+      ->setMailReceiver($object);
   }
 
-  protected function applyCustomInternalTransaction(
-    PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
+  protected function buildMailTemplate(PhabricatorLiskDAO $object) {
+    $monogram = $object->getMonogram();
+    $name = $object->getName();
 
-    switch ($xaction->getTransactionType()) {
-      case HeraldRuleTransaction::TYPE_DISABLE:
-        return $object->setIsDisabled($xaction->getNewValue());
-    }
+    $subject = pht('%s: %s', $monogram, $name);
 
+    return id(new PhabricatorMetaMTAMail())
+      ->setSubject($subject);
   }
 
-  protected function applyCustomExternalTransaction(
+  protected function getMailSubjectPrefix() {
+    return pht('[Herald]');
+  }
+
+  protected function buildMailBody(
     PhabricatorLiskDAO $object,
-    PhabricatorApplicationTransaction $xaction) {
-    return;
+    array $xactions) {
+
+    $body = parent::buildMailBody($object, $xactions);
+
+    $body->addLinkSection(
+      pht('RULE DETAIL'),
+      PhabricatorEnv::getProductionURI($object->getURI()));
+
+    return $body;
+  }
+
+  protected function supportsSearch() {
+    return true;
   }
 
 }

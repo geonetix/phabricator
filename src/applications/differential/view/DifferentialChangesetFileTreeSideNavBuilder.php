@@ -1,11 +1,12 @@
 <?php
 
-final class DifferentialChangesetFileTreeSideNavBuilder {
+final class DifferentialChangesetFileTreeSideNavBuilder extends Phobject {
 
   private $title;
   private $baseURI;
   private $anchorName;
   private $collapsed = false;
+  private $width;
 
   public function setAnchorName($anchor_name) {
     $this->anchorName = $anchor_name;
@@ -36,13 +37,19 @@ final class DifferentialChangesetFileTreeSideNavBuilder {
     return $this;
   }
 
+  public function setWidth($width) {
+    $this->width = $width;
+    return $this;
+  }
+
   public function build(array $changesets) {
     assert_instances_of($changesets, 'DifferentialChangeset');
 
-    $nav = new AphrontSideNavFilterView();
-    $nav->setBaseURI($this->getBaseURI());
-    $nav->setFlexible(true);
-    $nav->setCollapsed($this->collapsed);
+    $nav = id(new AphrontSideNavFilterView())
+      ->setBaseURI($this->getBaseURI())
+      ->setFlexible(true)
+      ->setCollapsed($this->collapsed)
+      ->setWidth($this->width);
 
     $anchor = $this->getAnchorName();
 
@@ -83,6 +90,9 @@ final class DifferentialChangesetFileTreeSideNavBuilder {
     while (($path = $path->getNextNode())) {
       $data = $path->getData();
 
+      $classes = array();
+      $classes[] = 'phabricator-filetree-item';
+
       $name = $path->getName();
       $style = 'padding-left: '.(2 + (3 * $path->getDepth())).'px';
 
@@ -90,19 +100,24 @@ final class DifferentialChangesetFileTreeSideNavBuilder {
       if ($data) {
         $href = '#'.$data->getAnchorName();
         $title = $name;
-        $icon = 'phabricator-filetree-icon-file';
+
+        $icon = $data->newFileTreeIcon();
+        $classes[] = $data->getFileTreeClass();
+
+        $count = phutil_tag(
+          'span',
+          array(
+            'class' => 'filetree-progress-hint',
+            'id' => 'tree-node-'.$data->getAnchorName(),
+          ));
       } else {
         $name .= '/';
         $title = $path->getFullPath().'/';
-        $icon = 'phabricator-filetree-icon-dir';
-      }
+        $icon = id(new PHUIIconView())
+          ->setIcon('fa-folder-open blue');
 
-      $icon = phutil_tag(
-        'span',
-        array(
-          'class' => 'phabricator-filetree-icon '.$icon,
-        ),
-        '');
+        $count = null;
+      }
 
       $name_element = phutil_tag(
         'span',
@@ -111,15 +126,16 @@ final class DifferentialChangesetFileTreeSideNavBuilder {
         ),
         $name);
 
+
       $filetree[] = javelin_tag(
         $href ? 'a' : 'span',
         array(
           'href' => $href,
           'style' => $style,
           'title' => $title,
-          'class' => 'phabricator-filetree-item',
+          'class' => implode(' ', $classes),
         ),
-        array($icon, $name_element));
+        array($count, $icon, $name_element));
     }
     $tree->destroy();
 
@@ -140,4 +156,3 @@ final class DifferentialChangesetFileTreeSideNavBuilder {
   }
 
 }
-

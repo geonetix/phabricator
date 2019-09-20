@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * NOTE: When loading ExternalAccounts for use in an authentication context
+ * (that is, you're going to act as the account or link identities or anything
+ * like that) you should require CAN_EDIT capability even if you aren't actually
+ * editing the ExternalAccount.
+ *
+ * ExternalAccounts have a permissive CAN_VIEW policy (like users) because they
+ * interact directly with objects and can leave comments, sign documents, etc.
+ * However, CAN_EDIT is restricted to users who own the accounts.
+ */
 final class PhabricatorExternalAccountQuery
   extends PhabricatorCursorPagedPolicyAwareQuery {
 
@@ -11,6 +21,7 @@ final class PhabricatorExternalAccountQuery
   private $userPHIDs;
   private $needImages;
   private $accountSecrets;
+  private $providerConfigPHIDs;
 
   public function withUserPHIDs(array $user_phids) {
     $this->userPHIDs = $user_phids;
@@ -52,22 +63,40 @@ final class PhabricatorExternalAccountQuery
     return $this;
   }
 
-  public function loadPage() {
-    $table = new PhabricatorExternalAccount();
-    $conn_r = $table->establishConnection('r');
-
-    $data = queryfx_all(
-      $conn_r,
-      'SELECT * FROM %T %Q %Q %Q',
-      $table->getTableName(),
-      $this->buildWhereClause($conn_r),
-      $this->buildOrderClause($conn_r),
-      $this->buildLimitClause($conn_r));
-
-    return $table->loadAllFromArray($data);
+  public function withProviderConfigPHIDs(array $phids) {
+    $this->providerConfigPHIDs = $phids;
+    return $this;
   }
 
-  public function willFilterPage(array $accounts) {
+  public function newResultObject() {
+    return new PhabricatorExternalAccount();
+  }
+
+  protected function loadPage() {
+    return $this->loadStandardPage($this->newResultObject());
+  }
+
+  protected function willFilterPage(array $accounts) {
+    $viewer = $this->getViewer();
+
+    $configs = id(new PhabricatorAuthProviderConfigQuery())
+      ->setViewer($viewer)
+      ->withPHIDs(mpull($accounts, 'getProviderConfigPHID'))
+      ->execute();
+    $configs = mpull($configs, null, 'getPHID');
+
+    foreach ($accounts as $key => $account) {
+      $config_phid = $account->getProviderConfigPHID();
+      $config = idx($configs, $config_phid);
+
+      if (!$config) {
+        unset($accounts[$key]);
+        continue;
+      }
+
+      $account->attachProviderConfig($config);
+    }
+
     if ($this->needImages) {
       $file_phids = mpull($accounts, 'getProfileImagePHID');
       $file_phids = array_filter($file_phids);
@@ -106,65 +135,70 @@ final class PhabricatorExternalAccountQuery
     return $accounts;
   }
 
-  protected function buildWhereClause(AphrontDatabaseConnection $conn_r) {
-    $where = array();
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
 
-    $where[] = $this->buildPagingClause($conn_r);
-
-    if ($this->ids) {
+    if ($this->ids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'id IN (%Ld)',
         $this->ids);
     }
 
-    if ($this->phids) {
+    if ($this->phids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'phid IN (%Ls)',
         $this->phids);
     }
 
-    if ($this->accountTypes) {
+    if ($this->accountTypes !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'accountType IN (%Ls)',
         $this->accountTypes);
     }
 
-    if ($this->accountDomains) {
+    if ($this->accountDomains !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'accountDomain IN (%Ls)',
         $this->accountDomains);
     }
 
-    if ($this->accountIDs) {
+    if ($this->accountIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'accountID IN (%Ls)',
         $this->accountIDs);
     }
 
-    if ($this->userPHIDs) {
+    if ($this->userPHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'userPHID IN (%Ls)',
         $this->userPHIDs);
     }
 
-    if ($this->accountSecrets) {
+    if ($this->accountSecrets !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'accountSecret IN (%Ls)',
         $this->accountSecrets);
     }
 
-    return $this->formatWhereClause($where);
+    if ($this->providerConfigPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'providerConfigPHID IN (%Ls)',
+        $this->providerConfigPHIDs);
+    }
+
+    return $where;
   }
 
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationPeople';
+    return 'PhabricatorPeopleApplication';
   }
 
 }

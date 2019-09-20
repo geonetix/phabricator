@@ -21,7 +21,6 @@
  *
  * @task stop Stopping Event Behaviors
  * @task info Getting Event Information
- * @group event
  */
 JX.install('Event', {
   members : {
@@ -134,6 +133,20 @@ JX.install('Event', {
       return r.which == 3 || r.button == 2;
     },
 
+
+    /**
+     * Get whether the mouse button associated with the mouse event is the
+     * left-side button in a browser-agnostic way.
+     *
+     * @return bool
+     * @task info
+     */
+    isLeftButton: function() {
+      var r = this.getRawEvent();
+      return (r.which == 1 || r.button == 0);
+    },
+
+
     /**
      * Determine if a mouse event is a normal event (left mouse button, no
      * modifier keys).
@@ -142,9 +155,8 @@ JX.install('Event', {
      * @task info
      */
     isNormalMouseEvent : function() {
-      var supportedEvents = ['click', 'mouseup', 'mousedown'];
-
-      if (supportedEvents.indexOf(this.getType()) == -1) {
+      var supportedEvents = {'click': 1, 'mouseup': 1, 'mousedown': 1};
+      if (!(this.getType() in supportedEvents)) {
         return false;
       }
 
@@ -159,7 +171,12 @@ JX.install('Event', {
       }
 
       if (('button' in r) && r.button) {
-        return false;
+        if ('which' in r) {
+          return false;
+        // IE won't have which and has left click == 1 here
+        } else if (r.button != 1) {
+          return false;
+        }
       }
 
       return true;
@@ -207,7 +224,7 @@ JX.install('Event', {
 
     /**
      * Get the metadata associated with the node that corresponds to the key
-     * in this event's node map.  This is a simple helper method that makes
+     * in this event's node map. This is a simple helper method that makes
      * the API for accessing metadata associated with specific nodes less ugly.
      *
      *  JX.Stratcom.listen('click', 'tag:a', function(event) {
@@ -323,7 +340,16 @@ JX.install('Event', {
     /**
      * @task info
      */
-    nodeDistances : {}
+    nodeDistances : {},
+
+    /**
+     * True if this is a cursor event that was caused by a touch interaction
+     * rather than a mouse device interaction.
+     *
+     * @type bool
+     * @taks info
+     */
+    isTouchEvent: false
   },
 
   /**
@@ -336,7 +362,13 @@ JX.install('Event', {
     if (__DEV__) {
       JX.Event.prototype.toString = function() {
         var path = '['+this.getPath().join(', ')+']';
-        return 'Event<'+this.getType()+', '+path+', '+this.getTarget()+'>';
+
+        var type = this.getType();
+        if (this.getIsTouchEvent()) {
+          type = type + '/touch';
+        }
+
+        return 'Event<'+type+', '+path+', '+this.getTarget()+'>';
       };
     }
   }

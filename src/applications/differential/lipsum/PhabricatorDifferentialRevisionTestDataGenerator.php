@@ -3,59 +3,65 @@
 final class PhabricatorDifferentialRevisionTestDataGenerator
   extends PhabricatorTestDataGenerator {
 
-  public function generate() {
-    $author = $this->loadPhabrictorUser();
-    $authorPHID = $author->getPHID();
+  const GENERATORKEY = 'revisions';
+
+  public function getGeneratorName() {
+    return pht('Differential Revisions');
+  }
+
+  public function generateObject() {
+    $author = $this->loadPhabricatorUser();
+
     $revision = DifferentialRevision::initializeNewRevision($author);
+    $revision->attachReviewers(array());
+    $revision->attachActiveDiff(null);
+
+    // This could be a bit richer and more formal than it is.
     $revision->setTitle($this->generateTitle());
     $revision->setSummary($this->generateDescription());
     $revision->setTestPlan($this->generateDescription());
-    $revision->loadRelationships();
-    $aux_fields = $this->loadAuxiliaryFields($author, $revision);
+
     $diff = $this->generateDiff($author);
-    // Add Diff
-    $editor = new DifferentialRevisionEditor($revision);
-    $editor->setActor($author);
-    $editor->addDiff($diff, $this->generateDescription());
-    $editor->setAuxiliaryFields($aux_fields);
-    $editor->save();
-    // Add Reviewers
-    $editor2 = new DifferentialCommentEditor($revision,
-      DifferentialAction::ACTION_ADDREVIEWERS);
-    $editor2->setActor($author);
-    $editor2->setAddedReviewers($this->getCCPHIDs());
-    $editor2->save();
-    // Add CCs
-    $editor3 = new DifferentialCommentEditor($revision,
-      DifferentialAction::ACTION_ADDCCS);
-    $editor3->setActor($author);
-    $editor3->setAddedCCs($this->getCCPHIDs());
-    $editor3->save();
-    return $revision->save();
+    $type_update = DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE;
+
+    $xactions = array();
+
+    $xactions[] = id(new DifferentialTransaction())
+      ->setTransactionType($type_update)
+      ->setNewValue($diff->getPHID());
+
+    id(new DifferentialTransactionEditor())
+      ->setActor($author)
+      ->setContentSource($this->getLipsumContentSource())
+      ->applyTransactions($revision, $xactions);
+
+    return $revision;
   }
 
   public function getCCPHIDs() {
     $ccs = array();
     for ($i = 0; $i < rand(1, 4);$i++) {
-      $ccs[] = $this->loadPhabrictorUserPHID();
+      $ccs[] = $this->loadPhabricatorUserPHID();
     }
     return $ccs;
   }
 
   public function generateDiff($author) {
     $paste_generator = new PhabricatorPasteTestDataGenerator();
-    $languages = $paste_generator->supportedLanguages;
-    $lang = array_rand($languages);
-    $code = $paste_generator->generateContent($lang);
-    $altcode = $paste_generator->generateContent($lang);
+    $languages = $paste_generator->getSupportedLanguages();
+    $language = array_rand($languages);
+    $spec = $languages[$language];
+
+    $code = $paste_generator->generateContent($spec);
+    $altcode = $paste_generator->generateContent($spec);
     $newcode = $this->randomlyModify($code, $altcode);
     $diff = id(new PhabricatorDifferenceEngine())
       ->generateRawDiffFromFileContent($code, $newcode);
      $call = new ConduitCall(
-        'differential.createrawdiff',
-        array(
-          'diff' => $diff,
-        ));
+      'differential.createrawdiff',
+      array(
+        'diff' => $diff,
+      ));
     $call->setUser($author);
     $result = $call->execute();
     $thediff = id(new DifferentialDiff())->load(
@@ -98,22 +104,6 @@ final class PhabricatorDifferentialRevisionTestDataGenerator
       }
     }
     return implode($newcode2, "\n");
-  }
-
-  private function loadAuxiliaryFields($user, DifferentialRevision $revision) {
-    $aux_fields = DifferentialFieldSelector::newSelector()
-      ->getFieldSpecifications();
-    foreach ($aux_fields as $key => $aux_field) {
-      $aux_field->setRevision($revision);
-      if (!$aux_field->shouldAppearOnEdit()) {
-        unset($aux_fields[$key]);
-      } else {
-        $aux_field->setUser($user);
-      }
-    }
-    return DifferentialAuxiliaryField::loadFromStorage(
-      $revision,
-      $aux_fields);
   }
 
 }

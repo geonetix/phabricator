@@ -4,10 +4,22 @@ final class HeraldTranscriptQuery
   extends PhabricatorCursorPagedPolicyAwareQuery {
 
   private $ids;
+  private $phids;
+  private $objectPHIDs;
   private $needPartialRecords;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
+    return $this;
+  }
+
+  public function withPHIDs(array $phids) {
+    $this->phids = $phids;
+    return $this;
+  }
+
+  public function withObjectPHIDs(array $phids) {
+    $this->objectPHIDs = $phids;
     return $this;
   }
 
@@ -16,38 +28,37 @@ final class HeraldTranscriptQuery
     return $this;
   }
 
-  public function loadPage() {
+  protected function loadPage() {
     $transcript = new HeraldTranscript();
-    $conn_r = $transcript->establishConnection('r');
+    $conn = $transcript->establishConnection('r');
 
     // NOTE: Transcripts include a potentially enormous amount of serialized
     // data, so we're loading only some of the fields here if the caller asked
     // for partial records.
 
     if ($this->needPartialRecords) {
-      $fields = implode(
-        ', ',
-        array(
-          'id',
-          'phid',
-          'objectPHID',
-          'time',
-          'duration',
-          'dryRun',
-          'host',
-        ));
+      $fields = array(
+        'id',
+        'phid',
+        'objectPHID',
+        'time',
+        'duration',
+        'dryRun',
+        'host',
+      );
+      $fields = qsprintf($conn, '%LC', $fields);
     } else {
-      $fields = '*';
+      $fields = qsprintf($conn, '*');
     }
 
     $rows = queryfx_all(
-      $conn_r,
+      $conn,
       'SELECT %Q FROM %T t %Q %Q %Q',
       $fields,
       $transcript->getTableName(),
-      $this->buildWhereClause($conn_r),
-      $this->buildOrderClause($conn_r),
-      $this->buildLimitClause($conn_r));
+      $this->buildWhereClause($conn),
+      $this->buildOrderClause($conn),
+      $this->buildLimitClause($conn));
 
     $transcripts = $transcript->loadAllFromArray($rows);
 
@@ -61,7 +72,7 @@ final class HeraldTranscriptQuery
     return $transcripts;
   }
 
-  public function willFilterPage(array $transcripts) {
+  protected function willFilterPage(array $transcripts) {
     $phids = mpull($transcripts, 'getObjectPHID');
 
     $objects = id(new PhabricatorObjectQuery())
@@ -70,32 +81,56 @@ final class HeraldTranscriptQuery
       ->execute();
 
     foreach ($transcripts as $key => $transcript) {
-      if (empty($objects[$transcript->getObjectPHID()])) {
+      $object_phid = $transcript->getObjectPHID();
+
+      if (!$object_phid) {
+        $transcript->attachObject(null);
+        continue;
+      }
+
+      $object = idx($objects, $object_phid);
+      if (!$object) {
         $this->didRejectResult($transcript);
         unset($transcripts[$key]);
       }
+
+      $transcript->attachObject($object);
     }
 
     return $transcripts;
   }
 
-  public function buildWhereClause(AphrontDatabaseConnection $conn_r) {
+  protected function buildWhereClause(AphrontDatabaseConnection $conn) {
     $where = array();
 
     if ($this->ids) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'id IN (%Ld)',
         $this->ids);
     }
 
-    $where[] = $this->buildPagingClause($conn_r);
+    if ($this->phids) {
+      $where[] = qsprintf(
+        $conn,
+        'phid IN (%Ls)',
+        $this->phids);
+    }
 
-    return $this->formatWhereClause($where);
+    if ($this->objectPHIDs) {
+      $where[] = qsprintf(
+        $conn,
+        'objectPHID in (%Ls)',
+        $this->objectPHIDs);
+    }
+
+    $where[] = $this->buildPagingClause($conn);
+
+    return $this->formatWhereClause($conn, $where);
   }
 
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationHerald';
+    return 'PhabricatorHeraldApplication';
   }
 
 }

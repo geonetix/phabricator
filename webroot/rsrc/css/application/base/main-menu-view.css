@@ -1,5 +1,6 @@
 /**
  * @provides phabricator-main-menu-view
+ * @requires phui-theme-css
  */
 
 
@@ -11,16 +12,16 @@
 */
 
 .phabricator-main-menu {
-  background: #2d3236;
-  background-image: url(/rsrc/image/texture/phlnx-bg.png);
-  background-repeat: repeat-x;
   position: relative;
-  box-shadow: 0px 1px 1px rgba(0, 0, 0, 0.25);
+}
+
+.phabricator-main-menu-background {
   min-height: 44px;
 }
 
 .device-desktop .phabricator-main-menu {
   height: 44px;
+  padding-right: 4px;
 }
 
 .phabricator-main-menu a:hover {
@@ -39,33 +40,41 @@
   float: left;
 }
 
-.phabricator-main-menu-logo {
-  display: inline-block;
-  width: 149px;
+.phabricator-main-menu-brand {
   height: 44px;
   float: left;
   margin-right: 6px;
-  padding-right: 6px;
   padding-left: 6px;
 }
 
-.device-desktop .phabricator-main-menu-logo:hover {
-  background-color: rgba(0,0,0,.6);
+.phabricator-main-menu-eye {
+  margin: 2px 0;
+  width: 40px;
+  height: 40px;
+  float: left;
+  display: block;
+  background-image: url(/rsrc/image/logo/light-eye.png);
+  background-size: 40px 40px;
 }
 
-.phabricator-main-menu-logo-image {
-  position: absolute;
-  width: 149px;
-  height: 26px;
-  top: 9px;
+.device-desktop .phabricator-main-menu-brand:hover {
+  background-color: rgba({$alphagrey},.2);
+  cursor: hand;
 }
 
-.device-phone .phabricator-main-menu-logo {
-  margin-left: -45px;
+.device-phone .phabricator-wordmark {
+  display: none;
 }
 
-.device .phabricator-main-menu-logo:hover {
-  background-color: transparent;
+.phabricator-wordmark {
+  float: left;
+  color: #fff;
+  font-size: 18px;
+  margin: 9px 4px 9px 6px;
+  padding-right: 8px;
+  max-width: 175px;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 /* - Expand/Collapse Button ----------------------------------------------------
@@ -76,10 +85,20 @@
 */
 
 .phabricator-menu-button-icon {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 32px;
   float: left;
-  margin: 10px 10px 0 5px;
+  margin: 10px 8px 0 8px;
+}
+
+.phabricator-menu-button-icon.phui-icon-view {
+  font-size: 20px;
+  height: 20px;
+  width: 20px;
+  color: {$hoverwhite};
+  text-align: center;
+  vertical-align: middle;
+  line-height: 24px;
 }
 
 .phabricator-expand-application-menu,
@@ -100,7 +119,7 @@
 */
 
 .device-desktop .phabricator-main-menu-search {
-  width: 220px;
+  width: 298px;
 }
 
 .device .phabricator-main-menu-search {
@@ -108,20 +127,19 @@
 }
 
 .phabricator-main-menu-search-container {
-  padding: 9px 0 10px 0;
+  padding: 8px 0;
   position: relative;
   height: 24px;
-  margin: 0 8px;
+  margin: 0 8px 0 0;
 }
 
 .phabricator-main-menu-search-target {
   position: absolute;
-  top: 46px;
+  top: 42px;
 }
 
 .device-desktop .phabricator-main-menu-search-target {
-  width: 320px;
-  margin-left: -150px;
+  width: 360px;
 }
 
 .device .phabricator-main-menu-search-target {
@@ -131,6 +149,7 @@
 
 .device .phabricator-main-menu-search-container {
   padding: 4px 0;
+  margin: 0 4px;
 }
 
 .phabricator-main-menu .phabricator-main-menu-search input {
@@ -139,93 +158,191 @@
   box-shadow: none;
   transition: none;
 
-  color: {$lightgreytext};
+  color: {$bluetext};
   width: 100%;
   right: 0;
   position: absolute;
-  font-size: 13px;
-  border: 1px solid #333;
-  border-radius: 12px;
-  background-color: #555;
-  height: 26px;
-  line-height: 12px;
-  box-shadow: 0px 1px 1px rgba(128, 128, 128, 0.25);
-  padding: 6px 32px 6px 10px;
+  font-size: {$normalfontsize};
+  border: none;
+  background-color: {$page.content};
+  height: 28px;
+  padding: 3px 28px 3px 48px;
+  float: left;
+  width: 280px;
 }
 
 .device .phabricator-main-menu-search input {
-  height: 30px;
-  font-size: 15px;
-  border-radius: 15px;
+  height: 32px;
+  font-size: {$biggestfontsize};
+  width: 100%;
+  padding-left: 50px;
+  border: 1px solid {$lightblueborder};
 }
 
 .phabricator-main-menu .phabricator-main-menu-search input:focus {
-  background: #fff;
-  color: #333;
-  border-color: #e7e7e7;
+  background: {$page.content};
+  opacity: 1;
+  color: {$darkbluetext};
   box-shadow: none;
-  -webkit-box-shadow: none;
-  -moz-box-shadow: none;
 }
 
 .phabricator-main-menu-search input.jx-typeahead-placeholder {
-  color: {$lightgreytext};
+  color: {$bluetext};
 }
 
 .phabricator-main-menu-search button {
+  color: {$bluetext};
   position: absolute;
-  color: transparent;
-  background: transparent 5px 6px url(/rsrc/image/search.png) no-repeat;
+  background: transparent;
   border: none;
   outline: none;
   box-shadow: none;
   text-shadow: none;
   min-width: 0;
+  height: 24px;
+  width: 28px;
+  top: 9px;
+  right: -6px;
+  margin: 0 8px 0 0;
+  padding: 0;
+  border-radius: 0;
+}
 
-  height: 20px;
-  width: 20px;
-  top: 10px;
-  right: 6px;
+.phabricator-main-menu-search button.phabricator-main-menu-search-dropdown {
+  position: absolute;
+  right: auto;
+  left: 12px;
+  width: 40px;
+  background: {$greybackground};
+  z-index: 1;
+}
+
+.device-desktop .phabricator-main-menu-search
+  button.phabricator-main-menu-search-dropdown {
+    height: 24px;
+    top: 10px;
+    border-radius: 3px;
+  }
+
+.device-desktop .phabricator-main-menu-search
+  button.phabricator-main-menu-search-dropdown:hover .phui-icon-view {
+    color: {$sky};
+}
+
+.device .phabricator-main-menu-search
+  button.phabricator-main-menu-search-dropdown {
+    left: 2px;
+    background: {$greybackground};
+}
+
+button.phabricator-main-menu-search-dropdown .caret:before,
+a.phabricator-core-user-menu .caret:before {
+  content: "\f107";
+  font-family: FontAwesome;
+}
+
+.phabricator-main-menu-search button.phabricator-main-menu-search-dropdown
+  .phui-icon-view {
+  color: {$bluetext};
+  font-size: 15px;
+  top: 4px;
+  left: 8px;
+  position: absolute;
+}
+
+.phabricator-main-menu-search-dropdown .caret {
+  position: absolute;
+  right: 20px;
+  top: 2px;
+  border: none;
+  margin-top: 1px;
+}
+
+.phabricator-main-menu-search button:hover {
+  color: {$sky};
 }
 
 .device .phabricator-main-menu-search button {
-  top: 7px;
+  top: 6px;
+  border-radius: 0;
+  height: 28px;
+  right: -6px;
 }
 
 .phabricator-main-menu-search-target div.jx-typeahead-results {
-  background: #ffffff;
+  background: {$page.content};
   word-wrap: break-word;
   overflow-y: auto;
-  box-shadow: 0px 2px 6px rgba(0, 0, 0, 0.5);
-  border: 2px solid #33393d;
+  box-shadow: {$dropshadow};
+  border: 1px solid {$lightgreyborder};
   border-radius: 3px;
-  margin-left: 40px;
+  margin-left: -64px;
+}
+
+.device .phabricator-main-menu-search-target div.jx-typeahead-results {
+  margin-left: 28px;
+}
+
+.phabricator-main-search-typeahead-result .phabricator-search-icon {
+  width: 28px;
+  height: 28px;
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 24px;
+  text-align: center;
+  vertical-align: bottom;
 }
 
 .phabricator-main-search-typeahead-result {
   display: block;
-  padding: 1px 4px 1px 38px;
-  background-position: 4px 4px;
-  background-size: 25px 25px;
+  padding: 6px 8px 8px 44px;
+  background-position: 8px;
+  background-size: 30px 30px;
   background-repeat: no-repeat;
+  position: relative;
 }
 
 .phabricator-main-search-typeahead-result .result-name {
   display: block;
-  font-size: 12px;
+  font-size: {$normalfontsize};
   font-weight: bold;
-  color: #333;
+  color: {$darkgreytext};
+}
+
+.phabricator-main-search-typeahead-result.result-closed {
+  opacity: .8;
+  -webkit-filter: grayscale(100%);
+  filter: grayscale(100%);
+}
+
+.phabricator-main-search-typeahead-result.result-closed
+  .result-name {
+  text-decoration: line-through;
+  color: {$lightgreytext};
+}
+
+.phabricator-main-search-typeahead-result.has-image {
+  padding-left: 48px;
 }
 
 .phabricator-main-search-typeahead-result .result-type {
   color: {$lightgreytext};
-  font-size: 11px;
+  font-size: {$smallestfontsize};
   font-weight: normal;
 }
 
 .device .phabricator-application-menu-expanded.phabricator-search-menu-expanded
  .phabricator-search-menu {
   padding: 0;
+}
+
+.device-phone .phabricator-main-search-typeahead-result .result-name {
+  font-size: {$biggestfontsize};
+}
+
+.device-phone .phabricator-main-search-typeahead-result .result-type {
+  font-size: {$normalfontsize};
 }
 
 
@@ -237,71 +354,91 @@
 
 .phabricator-main-menu-alerts {
   display: inline-block;
-  border-radius: 15px;
   float: left;
-  background: rgba(0,0,0,.5);
-  height: 20px;
-  padding: 2px 10px 3px 8px;
-  margin-top: 10px;
+  padding: 4px 0;
 }
 
-.phabricator-main-menu-alert-icon,
-.phabricator-main-menu-message-icon {
-  width: 18px;
-  height: 18px;
-  display: block;
+.alert-notifications {
   float: left;
-  margin: 2px 0 0 0;
 }
 
-.alert-notifications .phabricator-main-menu-message-icon {
-  margin: 2px 0 0 6px;
+.alert-notifications .phui-icon-view {
+  color: {$hoverwhite};
 }
 
-.phabricator-main-menu-alert-count,
-.phabricator-main-menu-message-count {
-  font-weight: bold;
-  line-height: 20px;
-  color: #ffffff;
-  text-align: center;
-  display: none;
-  float: left;
-  margin-left: 3px;
+.device-desktop .alert-notifications:hover {
+  margin-top: -2px;
+  transition-duration: .2s;
 }
 
-.alert-unread .phabricator-main-menu-alert-count,
-.message-unread .phabricator-main-menu-message-count  {
-  display: block;
-}
-
-/* - Dark Menu -----------------------------------------------------------------
-
-  Styles shared between the "core" menu (left button on mobile) and
-  "application" menu (right button on mobile). These styles give the menu a
-  white-on-black appearance.
-
-*/
-
-.device .phabricator-dark-menu,
-.device .phabricator-dark-menu a.phui-list-item-href {
+.device-desktop .alert-notifications:hover .phui-icon-view {
   color: #fff;
 }
 
-.device .phabricator-dark-menu .phui-list-item-type-label {
-  text-transform: uppercase;
-  font-size: 12px;
-  background-color: #151719;
-  padding: 5px 0;
-  display: block;
-  font-weight: bold;
+.phabricator-main-menu-alert-icon,
+.phabricator-main-menu-message-icon,
+.phabricator-main-menu-setup-icon {
+  width: 18px;
+  height: 18px;
+  float: left;
+  padding: 8px 6px 8px 4px;
+  color: #fff;
+  font-size: 18px;
+  line-height: 20px;
+  text-align: right;
 }
 
-.device .phabricator-dark-menu .phui-list-item-href {
-  border-width: 1px 0;
-  border-style: solid;
-  border-color: #34373b transparent #282c2d;
-  background-image: url(/rsrc/image/texture/dark-menu.png);
-  padding: 4px 0;
+.phui-icon-view.menu-icon-selected {
+  color: #fff;
+}
+
+.phabricator-main-menu-alert-icon {
+  font-size: 16px;
+  margin-top: 2px;
+}
+
+.setup-unread .phui-icon-view.phabricator-main-menu-setup-icon {
+  color: #ecf36c;
+  font-size: 16px;
+  margin-top: 2px;
+  width: 15px;
+}
+
+.setup-unread .phabricator-main-menu-setup-count {
+  color: #ecf36c;
+  margin-top: 10px;
+}
+
+.device-desktop .alert-notifications.setup-unread:hover .phui-icon-view {
+  color: #ecf36c;
+}
+
+.phabricator-main-menu-alert-count,
+.phabricator-main-menu-message-count,
+.phabricator-main-menu-setup-count {
+  color: #fff;
+  text-align: center;
+  display: none;
+  float: left;
+  margin: 11px 6px 0 -2px;
+  font-size: {$smallerfontsize};
+}
+
+.device-phone .alert-unread .phabricator-main-menu-alert-count,
+.device-phone .message-unread .phabricator-main-menu-message-count,
+.device-phone .setup-unread .phabricator-main-menu-setup-count {
+  display: none;
+}
+
+.alert-unread .phabricator-main-menu-alert-icon,
+.message-unread .phabricator-main-menu-message-icon,
+.setup-unread .phabricator-main-menu-setup-icon {
+  color: #fff;
+}
+
+.alert-unread .phabricator-main-menu-alert-count,
+.message-unread .phabricator-main-menu-message-count,
+.setup-unread .phabricator-main-menu-setup-count {
   display: block;
 }
 
@@ -311,10 +448,6 @@
   Styles unique to the core menu (left button on mobile).
 
 */
-
-.phabricator-core-menu-profile-image {
-  background-size: 28px 28px;
-}
 
 .device .phabricator-search-menu {
   display: none;
@@ -326,18 +459,14 @@
 
 .device .phabricator-search-menu-expanded .phabricator-search-menu {
   display: block;
-  padding-top: 44px;
-}
-
-.device .phabricator-dark-menu .phui-list-item-type-link {
-  font-size: 15px;
-  min-height: 30px;
-  line-height: 28px;
-}
-
-.device .phui-list-item-type-link
-  .phabricator-core-menu-icon + .phui-list-item-name {
-  margin-left: 30px;
+  position: absolute;
+  top: 38px;
+  left: 8px;
+  right: 8px;
+  border: 1px solid {$lightblueborder};
+  border-radius: 3px;
+  box-shadow: {$dropshadow};
+  background: {$page.background};
 }
 
 .device-desktop .phabricator-application-menu {
@@ -349,29 +478,58 @@
   display: none;
 }
 
-.device-desktop .phabricator-application-menu .phui-list-item-view.core-menu-item {
+.phabricator-application-menu .phui-list-item-href {
   display: block;
 }
 
+.phabricator-application-menu .phui-list-item-icon.phui-font-fa {
+  font-size: 20px;
+  height: 20px;
+  width: 20px;
+  color: {$hoverwhite};
+  margin: 8px;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.device .phabricator-application-menu .phui-list-item-icon.phui-font-fa {
+  margin: 4px 12px 4px 0;
+}
+
+.phabricator-application-menu .phui-list-item-icon.fa-plus {
+  line-height: 22px;
+}
+
 .device-desktop .phabricator-application-menu
- .core-menu-item.phui-list-item-view:hover {
-  background-color: rgba(0,0,0,.6);
+  .core-menu-item.phui-list-item-view:hover
+  .phui-list-item-icon.phui-font-fa {
+    color: #fff;
+  }
+
+.device-desktop .phabricator-application-menu
+  .phui-list-item-view.core-menu-item {
+  display: block;
 }
 
 .device-desktop .phabricator-application-menu .phui-list-item-view {
   float: left;
   position: relative;
-  min-width: 40px;
-  height: 44px;
+  min-width: 36px;
+  height: 36px;
+  margin-top: 4px;
 }
 
 .device-desktop .phabricator-core-menu-icon {
-  top: 9px;
-  left: 6px;
+  top: 4px;
+  left: 4px;
 }
 
 .device .phabricator-core-menu-icon {
-  left: 6px;
+  left: 16px;
+  height: 24px;
+  width: 24px;
+  background-size: 24px;
+  margin: 2px;
 }
 
 .phabricator-core-menu-icon {
@@ -381,25 +539,130 @@
   height: 28px;
 }
 
-/* - Application Menu ----------------------------------------------------------
+.phabricator-main-menu-dropdown.phui-list-sidenav {
+  position: absolute;
+  background: #fff;
+  top: 42px;
+  padding: 6px 0;
+  margin: 0 20px 0 0;
+  box-shadow: {$dropshadow};
+  border: 1px solid {$lightblueborder};
+  border-radius: 3px;
+}
 
-  Styles unique to the application menu (right button on mobile).
+.phabricator-main-menu-dropdown.phui-list-sidenav .phui-list-item-has-icon
+  .phui-list-item-href {
+    padding: 4px 40px 4px 12px;
+    white-space: nowrap;
+}
+
+.phabricator-main-menu-dropdown.phui-list-sidenav .phui-list-item-type-label
+  .phui-list-item-name {
+    padding-left: 12px;
+}
+
+/* - User Menu -----------------------------------------------------------------
+
+  Styles unique to the user profile menu.
 
 */
 
-.device .phabricator-application-menu-expanded .phabricator-application-menu {
-  display: block;
-  padding-top: 44px;
+.phabricator-core-user-menu {
+  float: right;
+  display: inline-block;
+  padding: 9px 24px 0 8px;
+  height: 35px;
+  position: relative;
 }
 
-.device .phabricator-application-menu,
-.device-desktop .phabricator-dark-menu .phui-list-item-type-label {
+.phabricator-core-user-mobile-menu {
   display: none;
 }
 
-.phabricator-application-menu .phui-list-item-name {
-  padding-left: 12px;
+.phabricator-core-user-menu span.phui-icon-view.phuihead-small {
+  height: 24px;
+  width: 24px;
+  background-size: 24px;
+  border-radius: 3px;
+  display: inline-block;
+  margin: 1px 0 0 0;
 }
+
+.phabricator-core-user-menu .phui-icon-view {
+  color: {$hoverwhite};
+  font-size: 18px;
+  margin: 4px 0 0 0;
+}
+
+.phabricator-core-user-menu .caret {
+  position: absolute;
+  right: 17px;
+  top: 13px;
+  border: none;
+  margin: 1px;
+  color: {$hoverwhite};
+}
+
+.phabricator-core-login-button {
+  float: right;
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 3px;
+  margin: 8px 6px 4px;
+  border: 1px solid {$hoverwhite};
+  color: {$hoverwhite};
+}
+
+.device-desktop .phabricator-core-login-button:hover {
+  border: 1px solid #fff;
+  color: #fff;
+}
+
+.device-desktop .phabricator-core-user-menu:hover .caret,
+.device-desktop .phabricator-core-user-menu:hover .phui-icon-view {
+  color: #fff;
+}
+
+.device .phabricator-core-user-menu .caret {
+  display: none;
+}
+
+.device .phabricator-core-user-mobile-menu {
+  display: block;
+}
+
+.device .phabricator-core-user-menu {
+  padding: 9px 8px 0 8px;
+}
+
+.device .phabricator-core-user-menu .phui-icon-view {
+  font-size: 20px;
+  margin: 3px 0 0 0;
+}
+
+ul.phabricator-core-user-profile-object .phui-oi-objname {
+  font-size: {$biggestfontsize};
+}
+
+ul.phabricator-core-user-profile-object li.phui-oi,
+ul.phabricator-core-user-profile-object .phui-oi-name,
+ul.phabricator-core-user-profile-object .phui-oi-content,
+ul.phabricator-core-user-profile-object .phui-oi-subhead {
+  padding: 0;
+  margin: 0;
+  background: transparent;
+}
+
+ul.phabricator-core-user-profile-object.phui-oi-list-simple .phui-oi-image {
+  height: 36px;
+  width: 36px;
+}
+
+ul.phabricator-core-user-profile-object.phui-oi-list-simple
+  .phui-oi-content-box {
+    margin-left: 44px;
+}
+
 
 
 /* - Print ---------------------------------------------------------------------

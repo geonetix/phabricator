@@ -32,22 +32,28 @@ final class PhabricatorApplicationTransactionNoEffectResponse
     $only_empty_comment = (count($xactions) == 1) &&
       (head($xactions)->getTransactionType() == $type_comment);
 
+    $count = phutil_count($xactions);
+
     if ($ex->hasAnyEffect()) {
-      $title = pht('%d Action(s) With No Effect', count($xactions));
+      $title = pht('%s Action(s) With No Effect', $count);
+      $head = pht('Some of your %s action(s) have no effect:', $count);
       $tail = pht('Apply remaining actions?');
-      $continue = pht('Apply Other Actions');
+      $continue = pht('Apply Remaining Actions');
     } else if ($ex->hasComment()) {
       $title = pht('Post as Comment');
+      $head = pht('The %s action(s) you are taking have no effect:', $count);
       $tail = pht('Do you want to post your comment anyway?');
       $continue = pht('Post Comment');
     } else if ($only_empty_comment) {
       // Special case this since it's common and we can give the user a nicer
       // dialog than "Action Has No Effect".
       $title = pht('Empty Comment');
+      $head = null;
       $tail = null;
       $continue = null;
     } else {
-      $title = pht('%d Action(s) Have No Effect', count($xactions));
+      $title = pht('%s Action(s) Have No Effect', $count);
+      $head = pht('The %s action(s) you are taking have no effect:', $count);
       $tail = null;
       $continue = null;
     }
@@ -56,9 +62,15 @@ final class PhabricatorApplicationTransactionNoEffectResponse
       ->setUser($request->getUser())
       ->setTitle($title);
 
+    $dialog->appendChild($head);
+
+    $list = array();
     foreach ($xactions as $xaction) {
-      $dialog->appendChild(
-        phutil_tag('p', array(), $xaction->getNoEffectDescription()));
+      $list[] = $xaction->getNoEffectDescription();
+    }
+
+    if ($list) {
+      $dialog->appendList($list);
     }
     $dialog->appendChild($tail);
 

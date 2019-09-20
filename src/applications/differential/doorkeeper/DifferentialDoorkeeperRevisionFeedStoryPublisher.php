@@ -26,7 +26,7 @@ final class DifferentialDoorkeeperRevisionFeedStoryPublisher
     return id(new DifferentialRevisionQuery())
       ->setViewer($this->getViewer())
       ->withIDs(array($object->getID()))
-      ->needRelationships(true)
+      ->needReviewers(true)
       ->executeOne();
   }
 
@@ -35,38 +35,32 @@ final class DifferentialDoorkeeperRevisionFeedStoryPublisher
   }
 
   public function getActiveUserPHIDs($object) {
-    $status = $object->getStatus();
-    if ($status == ArcanistDifferentialRevisionStatus::NEEDS_REVIEW) {
-      return $object->getReviewers();
+    if ($object->isNeedsReview()) {
+      return $object->getReviewerPHIDs();
     } else {
       return array();
     }
   }
 
   public function getPassiveUserPHIDs($object) {
-    $status = $object->getStatus();
-    if ($status == ArcanistDifferentialRevisionStatus::NEEDS_REVIEW) {
+    if ($object->isNeedsReview()) {
       return array();
     } else {
-      return $object->getReviewers();
+      return $object->getReviewerPHIDs();
     }
   }
 
   public function getCCUserPHIDs($object) {
-    return $object->getCCPHIDs();
+    return PhabricatorSubscribersQuery::loadSubscribersForPHID(
+      $object->getPHID());
   }
 
   public function getObjectTitle($object) {
-    $prefix = $this->getTitlePrefix($object);
-
-    $lines = new PhutilNumber($object->getLineCount());
-    $lines = pht('[Request, %d lines]', $lines);
-
     $id = $object->getID();
 
     $title = $object->getTitle();
 
-    return ltrim("{$prefix} {$lines} D{$id}: {$title}");
+    return "D{$id}: {$title}";
   }
 
   public function getObjectURI($object) {
@@ -78,13 +72,7 @@ final class DifferentialDoorkeeperRevisionFeedStoryPublisher
   }
 
   public function isObjectClosed($object) {
-    switch ($object->getStatus()) {
-      case ArcanistDifferentialRevisionStatus::CLOSED:
-      case ArcanistDifferentialRevisionStatus::ABANDONED:
-        return true;
-      default:
-        return false;
-    }
+    return $object->isClosed();
   }
 
   public function getResponsibilityTitle($object) {
@@ -92,21 +80,8 @@ final class DifferentialDoorkeeperRevisionFeedStoryPublisher
     return pht('%s Review Request', $prefix);
   }
 
-  public function getStoryText($object) {
-    $implied_context = $this->getRenderWithImpliedContext();
-
-    $story = $this->getFeedStory();
-    if ($story instanceof PhabricatorFeedStoryDifferential) {
-      $text = $story->renderForAsanaBridge($implied_context);
-    } else {
-      $text = $story->renderText();
-    }
-    return $text;
-  }
-
   private function getTitlePrefix(DifferentialRevision $revision) {
-    $prefix_key = 'metamta.differential.subject-prefix';
-    return PhabricatorEnv::getEnvConfig($prefix_key);
+    return pht('[Differential]');
   }
 
 }

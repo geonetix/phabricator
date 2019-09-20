@@ -20,8 +20,8 @@ NOTE: Follow these instructions to use Apache. To use nginx or lighttpd, scroll
 down to their sections.
 
 Get Apache running and verify it's serving a test page. Consult the Apache
-documentation for help. Make sure ##mod_php## and ##mod_rewrite## are enabled,
-and ##mod_ssl## if you intend to set up SSL.
+documentation for help. Make sure `mod_php` and `mod_rewrite` are enabled,
+and `mod_ssl` if you intend to set up SSL.
 
 If you haven't already, set up a domain name to point to the host you're
 installing on. You can either install Phabricator on a subdomain (like
@@ -33,8 +33,7 @@ is correctly configured.
 NOTE: The domain must contain a dot ('.'), i.e. not be just a bare name like
 'http://example/'. Some web browsers will not set cookies otherwise.
 
-Now, either create a VirtualHost entry (to put Phabricator on a subdomain)
-or edit the Directory entry for the DocumentRoot. It should look something like
+Now create a VirtualHost entry for Phabricator. It should look something like
 this:
 
   name=httpd.conf
@@ -49,8 +48,6 @@ this:
     DocumentRoot /path/to/phabricator/webroot
 
     RewriteEngine on
-    RewriteRule ^/rsrc/(.*)     -                       [L,QSA]
-    RewriteRule ^/favicon.ico   -                       [L,QSA]
     RewriteRule ^(.*)$          /index.php?__path__=$1  [B,L,QSA]
   </VirtualHost>
 
@@ -85,18 +82,11 @@ For nginx, use a configuration like this:
   name=nginx.conf
   server {
     server_name phabricator.example.com;
-
-    root      /path/to/phabricator/webroot;
-    try_files $uri $uri/ /index.php;
+    root        /path/to/phabricator/webroot;
 
     location / {
-      index   index.php;
-
-      if ( !-f $request_filename )
-      {
-        rewrite ^/(.*)$ /index.php?__path__=/$1 last;
-        break;
-      }
+      index index.php;
+      rewrite ^/(.*)$ /index.php?__path__=/$1 last;
     }
 
     location /index.php {
@@ -126,7 +116,7 @@ Restart nginx after making your edits, then continue to "Setup" below.
 
 = Webserver: Configuring lighttpd =
 
-NOTE: Follow these instructions to use lighttpd. To use Apache or niginx, scroll
+NOTE: Follow these instructions to use lighttpd. To use Apache or nginx, scroll
 up to their sections.
 
 For lighttpd, add a section like this to your lighttpd.conf:
@@ -134,8 +124,6 @@ For lighttpd, add a section like this to your lighttpd.conf:
   $HTTP["host"] =~ "phabricator(\.example\.com)?" {
       server.document-root = "/path/to/phabricator/webroot"
       url.rewrite-once = (
-          "^(/rsrc/.*)$" => "$1",
-          "^(/favicon.ico)$" => "$1",
           # This simulates QSA ("query string append") mode in apache
           "^(/[^?]*)\?(.*)" => "/index.php?__path__=$1&$2",
           "^(/.*)$" => "/index.php?__path__=$1",
@@ -150,10 +138,18 @@ server.modules list:
 
 Finally, you should run the following commands to enable php support:
 
-  $ sudo apt-get install php5-cgi  # for ubuntu; other distros should be similar
+  $ sudo apt-get install php5-cgi  # for Ubuntu; other distros should be similar
   $ sudo lighty-enable-mod fastcgi-php
 
 Restart lighttpd after making your edits, then continue below.
+
+
+Load Balancer Health Checks
+===========================
+
+If you're using a load balancer in front of your webserver, you can configure
+it to perform health checks using the path `/status/`.
+
 
 = Setup =
 
@@ -181,7 +177,7 @@ root or some other admin user:
 
   phabricator/ $ ./bin/storage upgrade --user <user> --password <password>
 
-You can avoid the prompt the script issues by passing the ##--force## flag (for
+You can avoid the prompt the script issues by passing the `--force` flag (for
 example, if you are scripting the upgrade process).
 
   phabricator/ $ ./bin/storage upgrade --force
@@ -197,6 +193,11 @@ Continue by:
     @{article:Configuring Accounts and Registration}; or
   - understanding advanced configuration topics with
     @{article:Configuration User Guide: Advanced Configuration}; or
+  - configuring an alternate file domain with
+    @{article:Configuring a File Domain}; or
+  - configuring a preamble script to set up the environment properly behind a
+    load balancer, or adjust rate limiting with
+    @{article:Configuring a Preamble Script}; or
   - configuring where uploaded files and attachments will be stored with
     @{article:Configuring File Storage}; or
   - configuring Phabricator so it can send mail with
@@ -204,5 +205,8 @@ Continue by:
   - configuring inbound mail with @{article:Configuring Inbound Email}; or
   - importing repositories with @{article:Diffusion User Guide}; or
   - learning about daemons with @{article:Managing Daemons with phd}; or
-  - configuring backups with @{article:Configuring Backups}; or
+  - learning about notification with
+    @{article:Notifications User Guide: Setup and Configuration}; or
+  - configuring backups with
+    @{article:Configuring Backups and Performing Migrations}; or
   - contributing to Phabricator with @{article:Contributor Introduction}.

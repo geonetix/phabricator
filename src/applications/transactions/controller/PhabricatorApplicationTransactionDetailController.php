@@ -3,31 +3,62 @@
 final class PhabricatorApplicationTransactionDetailController
   extends PhabricatorApplicationTransactionController {
 
-  private $phid;
+  private $objectHandle;
 
-  public function willProcessRequest(array $data) {
-    $this->phid = $data['phid'];
+  public function shouldAllowPublic() {
+    return true;
   }
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    // Users can end up on this page directly by following links in email,
+    // so we try to make it somewhat reasonable as a standalone page.
+
+    $viewer = $this->getViewer();
+    $phid = $request->getURIData('phid');
 
     $xaction = id(new PhabricatorObjectQuery())
-      ->withPHIDs(array($this->phid))
-      ->setViewer($user)
+      ->withPHIDs(array($phid))
+      ->setViewer($viewer)
       ->executeOne();
-
     if (!$xaction) {
-      // future proofing for the day visibility of transactions can change
       return new Aphront404Response();
     }
 
-    return id(new PhabricatorApplicationTransactionResponse())
-      ->setViewer($user)
-      ->setTransactions(array($xaction))
-      ->setIsDetailView(true)
-      ->setAnchorOffset($request->getStr('anchor'));
+    $details = $xaction->renderChangeDetails($viewer);
+
+    $object_phid = $xaction->getObjectPHID();
+    $handles = $viewer->loadHandles(array($object_phid));
+    $handle = $handles[$object_phid];
+    $this->objectHandle = $handle;
+
+    $cancel_uri = $handle->getURI();
+
+    if ($request->isAjax()) {
+      $button_text = pht('Done');
+    } else {
+      $button_text = pht('Continue');
+    }
+
+    return $this->newDialog()
+      ->setTitle(pht('Change Details'))
+      ->setWidth(AphrontDialogView::WIDTH_FORM)
+      ->setClass('aphront-dialog-tab-group')
+      ->appendChild($details)
+      ->addCancelButton($cancel_uri, $button_text);
   }
+
+  protected function buildApplicationCrumbs() {
+    $crumbs = parent::buildApplicationCrumbs();
+
+    $handle = $this->objectHandle;
+    if ($handle) {
+      $crumbs->addTextCrumb(
+        $handle->getObjectName(),
+        $handle->getURI());
+    }
+
+    return $crumbs;
+  }
+
 
 }

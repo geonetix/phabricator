@@ -3,48 +3,55 @@
 final class PhabricatorDaemonManagementStatusWorkflow
   extends PhabricatorDaemonManagementWorkflow {
 
-  public function didConstruct() {
+  protected function didConstruct() {
     $this
       ->setName('status')
-      ->setSynopsis(pht('Show status of running daemons.'))
-      ->setArguments(array());
+      ->setSynopsis(pht('Show daemon processes on this host.'));
   }
 
   public function execute(PhutilArgumentParser $args) {
-    $console = PhutilConsole::getConsole();
-    $daemons = $this->loadRunningDaemons();
+    $process_refs = $this->getOverseerProcessRefs();
 
-    if (!$daemons) {
-      $console->writeErr(
-        "%s\n",
-        pht("There are no running Phabricator daemons."));
+    if (!$process_refs) {
+      $instance = $this->getInstance();
+      if ($instance !== null) {
+        $this->logInfo(
+          pht('NO DAEMONS'),
+          pht(
+            'There are no running daemon processes for the current '.
+            'instance ("%s").',
+            $instance));
+      } else {
+        $this->logInfo(
+          pht('NO DAEMONS'),
+          pht('There are no running daemon processes.'));
+      }
+
       return 1;
     }
 
-    $status = 0;
-    printf(
-      "%-5s\t%-24s\t%s\n",
-      "PID",
-      "Started",
-      "Daemon");
-    foreach ($daemons as $daemon) {
-      $name = $daemon->getName();
-      if (!$daemon->isRunning()) {
-        $daemon->updateStatus(PhabricatorDaemonLog::STATUS_DEAD);
-        $status = 2;
-        $name = '<DEAD> '.$name;
-      }
-      printf(
-        "%5s\t%-24s\t%s\n",
-        $daemon->getPID(),
-        $daemon->getEpochStarted()
-          ? date('M j Y, g:i:s A', $daemon->getEpochStarted())
-          : null,
-        $name);
+    $table = id(new PhutilConsoleTable())
+      ->addColumns(
+        array(
+          'pid' => array(
+            'title' => pht('PID'),
+          ),
+          'command' => array(
+            'title' => pht('Command'),
+          ),
+        ));
+
+    foreach ($process_refs as $process_ref) {
+      $table->addRow(
+        array(
+          'pid' => $process_ref->getPID(),
+          'command' => $process_ref->getCommand(),
+        ));
     }
 
-    return $status;
-  }
+    $table->draw();
 
+    return 0;
+  }
 
 }

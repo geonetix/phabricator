@@ -21,7 +21,7 @@ final class PhabricatorUserRolesField
     return true;
   }
 
-  public function renderPropertyViewValue() {
+  public function renderPropertyViewValue(array $handles) {
     $user = $this->getObject();
 
     $roles = array();
@@ -31,8 +31,14 @@ final class PhabricatorUserRolesField
     if ($user->getIsDisabled()) {
       $roles[] = pht('Disabled');
     }
+    if (!$user->getIsApproved()) {
+      $roles[] = pht('Not Approved');
+    }
     if ($user->getIsSystemAgent()) {
       $roles[] = pht('Bot');
+    }
+    if ($user->getIsMailingList()) {
+      $roles[] = pht('Mailing List');
     }
 
     if ($roles) {

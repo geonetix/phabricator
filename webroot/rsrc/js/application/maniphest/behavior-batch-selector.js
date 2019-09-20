@@ -35,24 +35,11 @@ JX.behavior('maniphest-batch-selector', function(config) {
 
     JX.DOM.alterClass(
       task,
-      'phui-object-item-selected',
+      'phui-oi-selected',
       is_selected(task));
 
     update();
   };
-
-  var redraw = function (task) {
-    var selected = is_selected(task);
-    change(task, selected);
-  };
-  JX.Stratcom.listen(
-    'subpriority-changed',
-    null,
-    function (e) {
-      e.kill();
-      var data = e.getData();
-      redraw(data.task);
-    });
 
   // Change all tasks to some state (used by "select all" / "clear selection"
   // buttons).
@@ -156,13 +143,16 @@ JX.behavior('maniphest-batch-selector', function(config) {
     JX.$(config.formID),
     'submit',
     null,
-    function(e) {
-      var inputs = [];
+    function() {
+      var ids = [];
       for (var k in selected) {
-        inputs.push(
-          JX.$N('input', {type: 'hidden', name: 'batch[]', value: k}));
+        ids.push(k);
       }
-      JX.DOM.setContent(JX.$(config.idContainer), inputs);
+      ids = ids.join(',');
+
+      var input = JX.$N('input', {type: 'hidden', name: 'ids', value: ids});
+
+      JX.DOM.setContent(JX.$(config.idContainer), input);
     });
 
   update();

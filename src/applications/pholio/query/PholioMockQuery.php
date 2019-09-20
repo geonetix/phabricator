@@ -1,14 +1,12 @@
 <?php
 
-/**
- * @group pholio
- */
 final class PholioMockQuery
   extends PhabricatorCursorPagedPolicyAwareQuery {
 
   private $ids;
   private $phids;
   private $authorPHIDs;
+  private $statuses;
 
   private $needCoverFiles;
   private $needImages;
@@ -27,6 +25,11 @@ final class PholioMockQuery
 
   public function withAuthorPHIDs(array $author_phids) {
     $this->authorPHIDs = $author_phids;
+    return $this;
+  }
+
+  public function withStatuses(array $statuses) {
+    $this->statuses = $statuses;
     return $this;
   }
 
@@ -50,119 +53,110 @@ final class PholioMockQuery
     return $this;
   }
 
+  public function newResultObject() {
+    return new PholioMock();
+  }
+
   protected function loadPage() {
-    $table = new PholioMock();
-    $conn_r = $table->establishConnection('r');
-
-    $data = queryfx_all(
-      $conn_r,
-      'SELECT * FROM %T %Q %Q %Q',
-      $table->getTableName(),
-      $this->buildWhereClause($conn_r),
-      $this->buildOrderClause($conn_r),
-      $this->buildLimitClause($conn_r));
-
-    $mocks = $table->loadAllFromArray($data);
-
-    if ($mocks && $this->needImages) {
-      $this->loadImages($mocks);
+    if ($this->needInlineComments && !$this->needImages) {
+      throw new Exception(
+        pht(
+          'You can not query for inline comments without also querying for '.
+          'images.'));
     }
 
-    if ($mocks && $this->needCoverFiles) {
-      $this->loadCoverFiles($mocks);
+    return $this->loadStandardPage(new PholioMock());
+  }
+
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
+
+    if ($this->ids !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'mock.id IN (%Ld)',
+        $this->ids);
     }
 
-    if ($mocks && $this->needTokenCounts) {
-      $this->loadTokenCounts($mocks);
+    if ($this->phids !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'mock.phid IN (%Ls)',
+        $this->phids);
+    }
+
+    if ($this->authorPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'mock.authorPHID in (%Ls)',
+        $this->authorPHIDs);
+    }
+
+    if ($this->statuses !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'mock.status IN (%Ls)',
+        $this->statuses);
+    }
+
+    return $where;
+  }
+
+  protected function didFilterPage(array $mocks) {
+    $viewer = $this->getViewer();
+
+    if ($this->needImages) {
+      $images = id(new PholioImageQuery())
+        ->setViewer($viewer)
+        ->withMocks($mocks)
+        ->needInlineComments($this->needInlineComments)
+        ->execute();
+
+      $image_groups = mgroup($images, 'getMockPHID');
+      foreach ($mocks as $mock) {
+        $images = idx($image_groups, $mock->getPHID(), array());
+        $mock->attachImages($images);
+      }
+    }
+
+    if ($this->needCoverFiles) {
+      $cover_files = id(new PhabricatorFileQuery())
+        ->setViewer($viewer)
+        ->withPHIDs(mpull($mocks, 'getCoverPHID'))
+        ->execute();
+      $cover_files = mpull($cover_files, null, 'getPHID');
+
+      foreach ($mocks as $mock) {
+        $file = idx($cover_files, $mock->getCoverPHID());
+        if (!$file) {
+          $file = PhabricatorFile::loadBuiltin(
+            $viewer,
+            'missing.png');
+        }
+        $mock->attachCoverFile($file);
+      }
+    }
+
+    if ($this->needTokenCounts) {
+      $counts = id(new PhabricatorTokenCountQuery())
+        ->withObjectPHIDs(mpull($mocks, 'getPHID'))
+        ->execute();
+
+      foreach ($mocks as $mock) {
+        $token_count = idx($counts, $mock->getPHID(), 0);
+        $mock->attachTokenCount($token_count);
+      }
     }
 
     return $mocks;
   }
 
-  private function buildWhereClause(AphrontDatabaseConnection $conn_r) {
-    $where = array();
-
-    $where[] = $this->buildPagingClause($conn_r);
-
-    if ($this->ids) {
-      $where[] = qsprintf(
-        $conn_r,
-        'id IN (%Ld)',
-        $this->ids);
-    }
-
-    if ($this->phids) {
-      $where[] = qsprintf(
-        $conn_r,
-        'phid IN (%Ls)',
-        $this->phids);
-    }
-
-    if ($this->authorPHIDs) {
-      $where[] = qsprintf(
-        $conn_r,
-        'authorPHID in (%Ls)',
-        $this->authorPHIDs);
-    }
-
-    return $this->formatWhereClause($where);
-  }
-
-  private function loadImages(array $mocks) {
-    assert_instances_of($mocks, 'PholioMock');
-
-    $mock_map = mpull($mocks, null, 'getID');
-    $all_images = id(new PholioImageQuery())
-      ->setViewer($this->getViewer())
-      ->setMockCache($mock_map)
-      ->withMockIDs(array_keys($mock_map))
-      ->needInlineComments($this->needInlineComments)
-      ->execute();
-
-    $image_groups = mgroup($all_images, 'getMockID');
-
-    foreach ($mocks as $mock) {
-      $mock_images = idx($image_groups, $mock->getID(), array());
-      $mock->attachAllImages($mock_images);
-      $active_images = mfilter($mock_images, 'getIsObsolete', true);
-      $mock->attachImages(msort($active_images, 'getSequence'));
-    }
-  }
-
-  private function loadCoverFiles(array $mocks) {
-    assert_instances_of($mocks, 'PholioMock');
-    $cover_file_phids = mpull($mocks, 'getCoverPHID');
-    $cover_files = id(new PhabricatorFileQuery())
-      ->setViewer($this->getViewer())
-      ->withPHIDs($cover_file_phids)
-      ->execute();
-
-    $cover_files = mpull($cover_files, null, 'getPHID');
-
-    foreach ($mocks as $mock) {
-      $file = idx($cover_files, $mock->getCoverPHID());
-      if (!$file) {
-        $file = PhabricatorFile::loadBuiltin($this->getViewer(), 'missing.png');
-      }
-      $mock->attachCoverFile($file);
-    }
-  }
-
-  private function loadTokenCounts(array $mocks) {
-    assert_instances_of($mocks, 'PholioMock');
-
-    $phids = mpull($mocks, 'getPHID');
-    $counts = id(new PhabricatorTokenCountQuery())
-      ->withObjectPHIDs($phids)
-      ->execute();
-
-    foreach ($mocks as $mock) {
-      $mock->attachTokenCount(idx($counts, $mock->getPHID(), 0));
-    }
-  }
-
   public function getQueryApplicationClass() {
-    return 'PhabricatorApplicationPholio';
+    return 'PhabricatorPholioApplication';
+  }
+
+  protected function getPrimaryTableAlias() {
+    return 'mock';
   }
 
 }

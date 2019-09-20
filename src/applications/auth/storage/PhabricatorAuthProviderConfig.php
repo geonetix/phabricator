@@ -1,7 +1,10 @@
 <?php
 
-final class PhabricatorAuthProviderConfig extends PhabricatorAuthDAO
-  implements PhabricatorPolicyInterface {
+final class PhabricatorAuthProviderConfig
+  extends PhabricatorAuthDAO
+  implements
+    PhabricatorApplicationTransactionInterface,
+    PhabricatorPolicyInterface {
 
   protected $providerClass;
   protected $providerType;
@@ -12,6 +15,8 @@ final class PhabricatorAuthProviderConfig extends PhabricatorAuthDAO
   protected $shouldAllowRegistration  = 0;
   protected $shouldAllowLink          = 0;
   protected $shouldAllowUnlink        = 0;
+  protected $shouldTrustEmails        = 0;
+  protected $shouldAutoLogin          = 0;
 
   protected $properties = array();
 
@@ -19,14 +24,35 @@ final class PhabricatorAuthProviderConfig extends PhabricatorAuthDAO
 
   public function generatePHID() {
     return PhabricatorPHID::generateNewPHID(
-      PhabricatorPHIDConstants::PHID_TYPE_AUTH);
+      PhabricatorAuthAuthProviderPHIDType::TYPECONST);
   }
 
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID => true,
       self::CONFIG_SERIALIZATION => array(
         'properties' => self::SERIALIZATION_JSON,
+      ),
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'isEnabled' => 'bool',
+        'providerClass' => 'text128',
+        'providerType' => 'text32',
+        'providerDomain' => 'text128',
+        'shouldAllowLogin' => 'bool',
+        'shouldAllowRegistration' => 'bool',
+        'shouldAllowLink' => 'bool',
+        'shouldAllowUnlink' => 'bool',
+        'shouldTrustEmails' => 'bool',
+        'shouldAutoLogin' => 'bool',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_provider' => array(
+          'columns' => array('providerType', 'providerDomain'),
+          'unique' => true,
+        ),
+        'key_class' => array(
+          'columns' => array('providerClass'),
+        ),
       ),
     ) + parent::getConfiguration();
   }
@@ -57,6 +83,39 @@ final class PhabricatorAuthProviderConfig extends PhabricatorAuthDAO
     return $this->provider;
   }
 
+  public function getURI() {
+    return '/auth/config/view/'.$this->getID().'/';
+  }
+
+  public function getObjectName() {
+    return pht('Auth Provider %d', $this->getID());
+  }
+
+  public function getDisplayName() {
+    return $this->getProvider()->getProviderName();
+  }
+
+  public function getSortVector() {
+    return id(new PhutilSortVector())
+      ->addString($this->getDisplayName());
+  }
+
+  public function newIconView() {
+    return $this->getProvider()->newIconView();
+  }
+
+
+/* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
+
+
+  public function getApplicationTransactionEditor() {
+    return new PhabricatorAuthProviderConfigEditor();
+  }
+
+  public function getApplicationTransactionTemplate() {
+    return new PhabricatorAuthProviderConfigTransaction();
+  }
+
 
 /* -(  PhabricatorPolicyInterface  )----------------------------------------- */
 
@@ -79,10 +138,6 @@ final class PhabricatorAuthProviderConfig extends PhabricatorAuthDAO
 
   public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
     return false;
-  }
-
-  public function describeAutomaticCapability($capability) {
-    return null;
   }
 
 }

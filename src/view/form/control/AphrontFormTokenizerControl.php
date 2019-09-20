@@ -6,8 +6,10 @@ final class AphrontFormTokenizerControl extends AphrontFormControl {
   private $disableBehavior;
   private $limit;
   private $placeholder;
+  private $handles;
+  private $initialValue;
 
-  public function setDatasource($datasource) {
+  public function setDatasource(PhabricatorTypeaheadDatasource $datasource) {
     $this->datasource = $datasource;
     return $this;
   }
@@ -31,12 +33,26 @@ final class AphrontFormTokenizerControl extends AphrontFormControl {
     return $this;
   }
 
+  public function setInitialValue(array $initial_value) {
+    $this->initialValue = $initial_value;
+    return $this;
+  }
+
+  public function getInitialValue() {
+    return $this->initialValue;
+  }
+
+  public function willRender() {
+    // Load the handles now so we'll get a bulk load later on when we actually
+    // render them.
+    $this->loadHandles();
+  }
+
   protected function renderInput() {
     $name = $this->getName();
-    $values = nonempty($this->getValue(), array());
 
-    assert_instances_of($values, 'PhabricatorObjectHandle');
-    $values = mpull($values, 'getFullName', 'getPHID');
+    $handles = $this->loadHandles();
+    $handles = iterator_to_array($handles);
 
     if ($this->getID()) {
       $id = $this->getID();
@@ -44,63 +60,95 @@ final class AphrontFormTokenizerControl extends AphrontFormControl {
       $id = celerity_generate_unique_node_id();
     }
 
-    if (!$this->placeholder) {
-      $this->placeholder = $this->getDefaultPlaceholder();
+    $datasource = $this->datasource;
+    if (!$datasource) {
+      throw new Exception(
+        pht('You must set a datasource to use a TokenizerControl.'));
+    }
+    $datasource->setViewer($this->getUser());
+
+    $placeholder = null;
+    if (!strlen($this->placeholder)) {
+      $placeholder = $datasource->getPlaceholderText();
     }
 
-    $template = new AphrontTokenizerTemplateView();
-    $template->setName($name);
-    $template->setID($id);
-    $template->setValue($values);
+    $values = nonempty($this->getValue(), array());
+    $tokens = $datasource->renderTokens($values);
+
+    foreach ($tokens as $token) {
+      $token->setInputName($this->getName());
+    }
+
+    $template = id(new AphrontTokenizerTemplateView())
+      ->setName($name)
+      ->setID($id)
+      ->setValue($tokens);
+
+    $initial_value = $this->getInitialValue();
+    if ($initial_value !== null) {
+      $template->setInitialValue($initial_value);
+    }
 
     $username = null;
-    if ($this->user) {
-      $username = $this->user->getUsername();
+    if ($this->hasViewer()) {
+      $username = $this->getViewer()->getUsername();
+    }
+
+    $datasource_uri = $datasource->getDatasourceURI();
+    $browse_uri = $datasource->getBrowseURI();
+    if ($browse_uri) {
+      $template->setBrowseURI($browse_uri);
     }
 
     if (!$this->disableBehavior) {
       Javelin::initBehavior('aphront-basic-tokenizer', array(
-        'id'          => $id,
-        'src'         => $this->datasource,
-        'value'       => $values,
-        'limit'       => $this->limit,
-        'ondemand'    => PhabricatorEnv::getEnvConfig('tokenizer.ondemand'),
-        'username'    => $username,
-        'placeholder' => $this->placeholder,
+        'id' => $id,
+        'src' => $datasource_uri,
+        'value' => mpull($tokens, 'getValue', 'getKey'),
+        'icons' => mpull($tokens, 'getIcon', 'getKey'),
+        'types' => mpull($tokens, 'getTokenType', 'getKey'),
+        'colors' => mpull($tokens, 'getColor', 'getKey'),
+        'availabilityColors' => mpull(
+          $tokens,
+          'getAvailabilityColor',
+          'getKey'),
+        'limit' => $this->limit,
+        'username' => $username,
+        'placeholder' => $placeholder,
+        'browseURI' => $browse_uri,
+        'disabled' => $this->getDisabled(),
       ));
     }
 
     return $template->render();
   }
 
-  private function getDefaultPlaceholder() {
-    $datasource = $this->datasource;
+  private function loadHandles() {
+    if ($this->handles === null) {
+      $viewer = $this->getUser();
+      if (!$viewer) {
+        throw new Exception(
+          pht(
+            'Call %s before rendering tokenizers. '.
+            'Use %s on %s to do this easily.',
+            'setUser()',
+            'appendControl()',
+            'AphrontFormView'));
+      }
 
-    $matches = null;
-    if (!preg_match('@^/typeahead/common/(.*)/$@', $datasource, $matches)) {
-      return null;
+      $values = nonempty($this->getValue(), array());
+
+      $phids = array();
+      foreach ($values as $value) {
+        if (!PhabricatorTypeaheadDatasource::isFunctionToken($value)) {
+          $phids[] = $value;
+        }
+      }
+
+      $this->handles = $viewer->loadHandles($phids);
     }
 
-    $request = $matches[1];
-
-    $map = array(
-      'users'           => pht('Type a user name...'),
-      'authors'         => pht('Type a user name...'),
-      'usersorprojects' => pht('Type a user or project name...'),
-      'searchowner'     => pht('Type a user name...'),
-      'accounts'        => pht('Type a user name...'),
-      'mailable'        => pht('Type a user or mailing list...'),
-      'allmailable'     => pht('Type a user or mailing list...'),
-      'searchproject'   => pht('Type a project name...'),
-      'projects'        => pht('Type a project name...'),
-      'repositories'    => pht('Type a repository name...'),
-      'packages'        => pht('Type a package name...'),
-      'arcanistproject' => pht('Type an arc project name...'),
-      'accountsorprojects' => pht('Type a user or project name...'),
-    );
-
-    return idx($map, $request);
+    return $this->handles;
   }
-
 
 }

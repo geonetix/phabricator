@@ -3,10 +3,14 @@
 abstract class PhabricatorRepositoryCommitChangeParserWorker
   extends PhabricatorRepositoryCommitParserWorker {
 
+  protected function getImportStepFlag() {
+    return PhabricatorRepositoryCommit::IMPORTED_CHANGE;
+  }
+
   public function getRequiredLeaseTime() {
     // It can take a very long time to parse commits; some commits in the
     // Facebook repository affect many millions of paths. Acquire 24h leases.
-    return 60 * 60 * 24;
+    return phutil_units('24 hours in seconds');
   }
 
   abstract protected function parseCommitChanges(
@@ -17,21 +21,35 @@ abstract class PhabricatorRepositoryCommitChangeParserWorker
     PhabricatorRepository $repository,
     PhabricatorRepositoryCommit $commit) {
 
-    $identifier = $commit->getCommitIdentifier();
-    $callsign = $repository->getCallsign();
-    $full_name = 'r'.$callsign.$identifier;
+    $this->log("%s\n", pht('Parsing "%s"...', $commit->getMonogram()));
 
-    $this->log("Parsing %s...\n", $full_name);
-    if ($this->isBadCommit($full_name)) {
-      $this->log("This commit is marked bad!");
-      $result = null;
-    } else {
-      $result = $this->parseCommitChanges($repository, $commit);
+    $hint = $this->loadCommitHint($commit);
+    if ($hint && $hint->isUnreadable()) {
+      $this->log(
+        pht(
+          'This commit is marked as unreadable, so changes will not be '.
+          'parsed.'));
+      return;
+    }
+
+    if (!$this->shouldSkipImportStep()) {
+      $results = $this->parseCommitChanges($repository, $commit);
+      if ($results) {
+        $this->writeCommitChanges($repository, $commit, $results);
+      }
+
+      $commit->writeImportStatusFlag($this->getImportStepFlag());
+
+      PhabricatorSearchWorker::queueDocumentForIndexing($commit->getPHID());
     }
 
     $this->finishParse();
+  }
 
-    return $result;
+  public function parseChangesForUnitTest(
+    PhabricatorRepository $repository,
+    PhabricatorRepositoryCommit $commit) {
+    return $this->parseCommitChanges($repository, $commit);
   }
 
   public static function lookupOrCreatePaths(array $paths) {
@@ -52,9 +70,9 @@ abstract class PhabricatorRepositoryCommitChangeParserWorker
         }
         queryfx(
           $conn_w,
-          'INSERT IGNORE INTO %T (path, pathHash) VALUES %Q',
+          'INSERT IGNORE INTO %T (path, pathHash) VALUES %LQ',
           PhabricatorRepository::TABLE_PATH,
-          implode(', ', $sql));
+          $sql);
       }
       $result_map += self::lookupPaths($missing_paths);
     }
@@ -82,20 +100,56 @@ abstract class PhabricatorRepositoryCommitChangeParserWorker
 
   protected function finishParse() {
     $commit = $this->commit;
-
-    $commit->writeImportStatusFlag(
-      PhabricatorRepositoryCommit::IMPORTED_CHANGE);
-
-    id(new PhabricatorSearchIndexer())
-      ->indexDocumentByPHID($commit->getPHID());
-
-    PhabricatorOwnersPackagePathValidator::updateOwnersPackagePaths($commit);
     if ($this->shouldQueueFollowupTasks()) {
-      PhabricatorWorker::scheduleTask(
-        'PhabricatorRepositoryCommitOwnersWorker',
+      $this->queueTask(
+        'PhabricatorRepositoryCommitPublishWorker',
         array(
           'commitID' => $commit->getID(),
         ));
+    }
+  }
+
+  private function writeCommitChanges(
+    PhabricatorRepository $repository,
+    PhabricatorRepositoryCommit $commit,
+    array $changes) {
+
+    $conn = $repository->establishConnection('w');
+
+    $repository_id = (int)$repository->getID();
+    $commit_id = (int)$commit->getID();
+
+    $changes_sql = array();
+    foreach ($changes as $change) {
+      $changes_sql[] = qsprintf(
+        $conn,
+        '(%d, %d, %d, %nd, %nd, %d, %d, %d, %d)',
+        $repository_id,
+        (int)$change->getPathID(),
+        $commit_id,
+        nonempty((int)$change->getTargetPathID(), null),
+        nonempty((int)$change->getTargetCommitID(), null),
+        (int)$change->getChangeType(),
+        (int)$change->getFileType(),
+        (int)$change->getIsDirect(),
+        (int)$change->getCommitSequence());
+    }
+
+    queryfx(
+      $conn,
+      'DELETE FROM %T WHERE commitID = %d',
+      PhabricatorRepository::TABLE_PATHCHANGE,
+      $commit_id);
+
+    foreach (PhabricatorLiskDAO::chunkSQL($changes_sql) as $chunk) {
+      queryfx(
+        $conn,
+        'INSERT INTO %T
+          (repositoryID, pathID, commitID, targetPathID, targetCommitID,
+            changeType, fileType, isDirect, commitSequence)
+          VALUES %LQ',
+        PhabricatorRepository::TABLE_PATHCHANGE,
+        $chunk);
     }
   }
 

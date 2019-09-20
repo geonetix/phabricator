@@ -6,6 +6,9 @@ final class DoorkeeperImportEngine extends Phobject {
   private $refs = array();
   private $phids = array();
   private $localOnly;
+  private $throwOnMissingLink;
+  private $context = array();
+  private $timeout;
 
   public function setViewer(PhabricatorUser $viewer) {
     $this->viewer = $viewer;
@@ -36,6 +39,29 @@ final class DoorkeeperImportEngine extends Phobject {
     return $this;
   }
 
+  public function setContextProperty($key, $value) {
+    $this->context[$key] = $value;
+    return $this;
+  }
+
+  public function setTimeout($timeout) {
+    $this->timeout = $timeout;
+    return $this;
+  }
+
+  public function getTimeout() {
+    return $this->timeout;
+  }
+
+  /**
+   * Configure behavior if remote refs can not be retrieved because an
+   * authentication link is missing.
+   */
+  public function setThrowOnMissingLink($throw) {
+    $this->throwOnMissingLink = $throw;
+    return $this;
+  }
+
   public function execute() {
     $refs = $this->getRefs();
     $viewer = $this->getViewer();
@@ -53,6 +79,12 @@ final class DoorkeeperImportEngine extends Phobject {
           $xobj = $ref
             ->newExternalObject()
             ->setImporterPHID($viewer->getPHID());
+
+          // NOTE: Fill the new external object into the object map, so we'll
+          // reference the same external object if more than one ref is the
+          // same. This prevents issues later where we double-populate
+          // external objects when handed duplicate refs.
+          $xobjs[$ref->getObjectKey()] = $xobj;
         }
         $ref->attachExternalObject($xobj);
       }
@@ -71,15 +103,21 @@ final class DoorkeeperImportEngine extends Phobject {
     }
 
     if (!$this->localOnly) {
-      $bridges = id(new PhutilSymbolLoader())
+      $bridges = id(new PhutilClassMapQuery())
         ->setAncestorClass('DoorkeeperBridge')
-        ->loadObjects();
+        ->setFilterMethod('isEnabled')
+        ->execute();
 
+      $timeout = $this->getTimeout();
       foreach ($bridges as $key => $bridge) {
-        if (!$bridge->isEnabled()) {
-          unset($bridges[$key]);
+        $bridge
+          ->setViewer($viewer)
+          ->setThrowOnMissingLink($this->throwOnMissingLink)
+          ->setContext($this->context);
+
+        if ($timeout !== null) {
+          $bridge->setTimeout($timeout);
         }
-        $bridge->setViewer($viewer);
       }
 
       $working_set = $refs;

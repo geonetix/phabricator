@@ -3,25 +3,24 @@
 final class PhabricatorAuthLinkController
   extends PhabricatorAuthController {
 
-  private $action;
-  private $providerKey;
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
+    $action = $request->getURIData('action');
 
-  public function willProcessRequest(array $data) {
-    $this->providerKey = $data['pkey'];
-    $this->action = $data['action'];
-  }
+    $id = $request->getURIData('id');
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
-
-    $provider = PhabricatorAuthProvider::getEnabledProviderByKey(
-      $this->providerKey);
-    if (!$provider) {
+    $config = id(new PhabricatorAuthProviderConfigQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($id))
+      ->withIsEnabled(true)
+      ->executeOne();
+    if (!$config) {
       return new Aphront404Response();
     }
 
-    switch ($this->action) {
+    $provider = $config->getProvider();
+
+    switch ($action) {
       case 'link':
         if (!$provider->shouldAllowAccountLink()) {
           return $this->renderErrorPage(
@@ -44,15 +43,15 @@ final class PhabricatorAuthLinkController
         return new Aphront400Response();
     }
 
-    $account = id(new PhabricatorExternalAccount())->loadOneWhere(
-      'accountType = %s AND accountDomain = %s AND userPHID = %s',
-      $provider->getProviderType(),
-      $provider->getProviderDomain(),
-      $viewer->getPHID());
+    $accounts = id(new PhabricatorExternalAccountQuery())
+      ->setViewer($viewer)
+      ->withUserPHIDs(array($viewer->getPHID()))
+      ->withProviderConfigPHIDs(array($config->getPHID()))
+      ->execute();
 
-    switch ($this->action) {
+    switch ($action) {
       case 'link':
-        if ($account) {
+        if ($accounts) {
           return $this->renderErrorPage(
             pht('Account Already Linked'),
             array(
@@ -63,7 +62,7 @@ final class PhabricatorAuthLinkController
         }
         break;
       case 'refresh':
-        if (!$account) {
+        if (!$accounts) {
           return $this->renderErrorPage(
             pht('No Account Linked'),
             array(
@@ -79,8 +78,9 @@ final class PhabricatorAuthLinkController
 
     $panel_uri = '/settings/panel/external/';
 
-    $request->setCookie('phcid', Filesystem::readRandomCharacters(16));
-    switch ($this->action) {
+    PhabricatorCookies::setClientIDCookie($request);
+
+    switch ($action) {
       case 'link':
         $form = $provider->buildLinkForm($this);
         break;
@@ -101,7 +101,7 @@ final class PhabricatorAuthLinkController
         $form);
     }
 
-    switch ($this->action) {
+    switch ($action) {
       case 'link':
         $name = pht('Link Account');
         $title = pht('Link %s Account', $provider->getProviderName());
@@ -115,23 +115,14 @@ final class PhabricatorAuthLinkController
     }
 
     $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('Link Account'))
-        ->setHref($panel_uri));
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName($provider->getProviderName($name)));
+    $crumbs->addTextCrumb(pht('Link Account'), $panel_uri);
+    $crumbs->addTextCrumb($provider->getProviderName($name));
+    $crumbs->setBorder(true);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $form,
-      ),
-      array(
-        'title' => $title,
-        'device' => true,
-      ));
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($form);
   }
 
 }

@@ -3,36 +3,36 @@
 final class PhabricatorManiphestTaskTestDataGenerator
   extends PhabricatorTestDataGenerator {
 
-  public function generate() {
-    $authorPHID = $this->loadPhabrictorUserPHID();
-    $author = id(new PhabricatorUser())
-          ->loadOneWhere('phid = %s', $authorPHID);
-    $task = ManiphestTask::initializeNewTask($author)
-      ->setSubPriority($this->generateTaskSubPriority())
-      ->setTitle($this->generateTitle())
-      ->setStatus(ManiphestTaskStatus::STATUS_OPEN);
+  const GENERATORKEY = 'tasks';
 
-    $content_source = PhabricatorContentSource::newForSource(
-      PhabricatorContentSource::SOURCE_UNKNOWN,
-      array());
+  public function getGeneratorName() {
+    return pht('Maniphest Tasks');
+  }
+
+  public function generateObject() {
+    $author_phid = $this->loadPhabricatorUserPHID();
+    $author = id(new PhabricatorUser())
+      ->loadOneWhere('phid = %s', $author_phid);
+    $task = ManiphestTask::initializeNewTask($author)
+      ->setTitle($this->generateTitle());
+
+    $content_source = $this->getLipsumContentSource();
 
     $template = new ManiphestTransaction();
     // Accumulate Transactions
     $changes = array();
-    $changes[ManiphestTransaction::TYPE_TITLE] =
+    $changes[ManiphestTaskTitleTransaction::TRANSACTIONTYPE] =
       $this->generateTitle();
-    $changes[ManiphestTransaction::TYPE_DESCRIPTION] =
+    $changes[ManiphestTaskDescriptionTransaction::TRANSACTIONTYPE] =
       $this->generateDescription();
-    $changes[ManiphestTransaction::TYPE_OWNER] =
+    $changes[ManiphestTaskOwnerTransaction::TRANSACTIONTYPE] =
       $this->loadOwnerPHID();
-    $changes[ManiphestTransaction::TYPE_STATUS] =
+    $changes[ManiphestTaskStatusTransaction::TRANSACTIONTYPE] =
       $this->generateTaskStatus();
-    $changes[ManiphestTransaction::TYPE_PRIORITY] =
+    $changes[ManiphestTaskPriorityTransaction::TRANSACTIONTYPE] =
       $this->generateTaskPriority();
-    $changes[ManiphestTransaction::TYPE_CCS] =
-      $this->getCCPHIDs();
-    $changes[ManiphestTransaction::TYPE_PROJECTS] =
-      $this->getProjectPHIDs();
+    $changes[PhabricatorTransactions::TYPE_SUBSCRIBERS] =
+      array('=' => $this->getCCPHIDs());
     $transactions = array();
     foreach ($changes as $type => $value) {
       $transaction = clone $template;
@@ -40,6 +40,16 @@ final class PhabricatorManiphestTaskTestDataGenerator
       $transaction->setNewValue($value);
       $transactions[] = $transaction;
     }
+
+    $transactions[] = id(new ManiphestTransaction())
+        ->setTransactionType(PhabricatorTransactions::TYPE_EDGE)
+        ->setMetadataValue(
+          'edge:type',
+          PhabricatorProjectObjectHasProjectEdgeType::EDGECONST)
+        ->setNewValue(
+          array(
+            '=' => array_fuse($this->getProjectPHIDs()),
+          ));
 
     // Apply Transactions
     $editor = id(new ManiphestTransactionEditor())
@@ -54,7 +64,7 @@ final class PhabricatorManiphestTaskTestDataGenerator
   public function getCCPHIDs() {
     $ccs = array();
     for ($i = 0; $i < rand(1, 4);$i++) {
-      $ccs[] = $this->loadPhabrictorUserPHID();
+      $ccs[] = $this->loadPhabricatorUserPHID();
     }
     return $ccs;
   }
@@ -62,7 +72,7 @@ final class PhabricatorManiphestTaskTestDataGenerator
   public function getProjectPHIDs() {
     $projects = array();
     for ($i = 0; $i < rand(1, 4);$i++) {
-      $project = $this->loadOneRandom("PhabricatorProject");
+      $project = $this->loadOneRandom('PhabricatorProject');
       if ($project) {
         $projects[] = $project->getPHID();
       }
@@ -74,7 +84,7 @@ final class PhabricatorManiphestTaskTestDataGenerator
     if (rand(0, 3) == 0) {
       return null;
     } else {
-      return $this->loadPhabrictorUserPHID();
+      return $this->loadPhabricatorUserPHID();
     }
   }
 
@@ -89,11 +99,10 @@ final class PhabricatorManiphestTaskTestDataGenerator
   }
 
   public function generateTaskPriority() {
-    return array_rand(ManiphestTaskPriority::getTaskPriorityMap());
-  }
-
-  public function generateTaskSubPriority() {
-    return rand(2 << 16, 2 << 32);
+    $pri = array_rand(ManiphestTaskPriority::getTaskPriorityMap());
+    $keyword_map = ManiphestTaskPriority::getTaskPriorityKeywordsMap();
+    $keyword = head(idx($keyword_map, $pri));
+    return $keyword;
   }
 
   public function generateTaskStatus() {
@@ -101,7 +110,7 @@ final class PhabricatorManiphestTaskTestDataGenerator
     // Make sure 4/5th of all generated Tasks are open
     $random = rand(0, 4);
     if ($random != 0) {
-      return ManiphestTaskStatus::STATUS_OPEN;
+      return ManiphestTaskStatus::getDefaultStatus();
     } else {
       return array_rand($statuses);
     }

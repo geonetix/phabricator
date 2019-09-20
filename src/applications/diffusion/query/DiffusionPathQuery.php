@@ -1,6 +1,6 @@
 <?php
 
-final class DiffusionPathQuery {
+final class DiffusionPathQuery extends Phobject {
 
   private $pathIDs;
 
@@ -10,12 +10,12 @@ final class DiffusionPathQuery {
   }
 
   public function execute() {
-    $conn_r = id(new PhabricatorRepository())->establishConnection('r');
+    $conn = id(new PhabricatorRepository())->establishConnection('r');
 
-    $where = $this->buildWhereClause($conn_r);
+    $where = $this->buildWhereClause($conn);
 
     $results = queryfx_all(
-      $conn_r,
+      $conn,
       'SELECT * FROM %T %Q',
       PhabricatorRepository::TABLE_PATH,
       $where);
@@ -23,20 +23,20 @@ final class DiffusionPathQuery {
     return ipull($results, null, 'id');
   }
 
-  private function buildWhereClause($conn_r) {
+  protected function buildWhereClause(AphrontDatabaseConnection $conn) {
     $where = array();
 
     if ($this->pathIDs) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'id IN (%Ld)',
         $this->pathIDs);
     }
 
     if ($where) {
-      return 'WHERE ('.implode(') AND (', $where).')';
+      return qsprintf($conn, 'WHERE %LA', $where);
     } else {
-      return '';
+      return qsprintf($conn, '');
     }
   }
 

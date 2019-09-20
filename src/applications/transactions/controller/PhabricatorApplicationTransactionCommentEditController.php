@@ -3,21 +3,13 @@
 final class PhabricatorApplicationTransactionCommentEditController
   extends PhabricatorApplicationTransactionController {
 
-  private $phid;
-
-  public function willProcessRequest(array $data) {
-    $this->phid = $data['phid'];
-  }
-
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
 
     $xaction = id(new PhabricatorObjectQuery())
-      ->withPHIDs(array($this->phid))
-      ->setViewer($user)
+      ->setViewer($viewer)
+      ->withPHIDs(array($request->getURIData('phid')))
       ->executeOne();
-
     if (!$xaction) {
       return new Aphront404Response();
     }
@@ -28,13 +20,36 @@ final class PhabricatorApplicationTransactionCommentEditController
       return new Aphront404Response();
     }
 
-    $obj_phid = $xaction->getObjectPHID();
-    $obj_handle = id(new PhabricatorHandleQuery())
-      ->setViewer($user)
-      ->withPHIDs(array($obj_phid))
-      ->executeOne();
+    if ($xaction->getComment()->getIsRemoved()) {
+      // You can't edit history of a transaction with a removed comment.
+      return new Aphront400Response();
+    }
 
-    if ($request->isDialogFormPost()) {
+    $phid = $xaction->getObjectPHID();
+    $handles = $viewer->loadHandles(array($phid));
+    $obj_handle = $handles[$phid];
+
+    $done_uri = $obj_handle->getURI();
+
+    // If an object is locked, you can't edit comments on it. Two reasons to
+    // lock threads are to calm contentious issues and to freeze state for
+    // auditing, and editing comments serves neither goal.
+
+    $object = $xaction->getObject();
+    $can_interact = PhabricatorPolicyFilter::canInteract(
+      $viewer,
+      $object);
+    if (!$can_interact) {
+      return $this->newDialog()
+        ->setTitle(pht('Conversation Locked'))
+        ->appendParagraph(
+          pht(
+            'You can not edit this comment because the conversation is '.
+            'locked.'))
+        ->addCancelButton($done_uri);
+    }
+
+    if ($request->isFormOrHisecPost()) {
       $text = $request->getStr('text');
 
       $comment = $xaction->getApplicationTransactionCommentObject();
@@ -44,39 +59,44 @@ final class PhabricatorApplicationTransactionCommentEditController
       }
 
       $editor = id(new PhabricatorApplicationTransactionCommentEditor())
-        ->setActor($user)
+        ->setActor($viewer)
         ->setContentSource(PhabricatorContentSource::newFromRequest($request))
+        ->setRequest($request)
+        ->setCancelURI($done_uri)
         ->applyEdit($xaction, $comment);
 
       if ($request->isAjax()) {
-        return id(new PhabricatorApplicationTransactionResponse())
-          ->setViewer($user)
-          ->setTransactions(array($xaction))
-          ->setAnchorOffset($request->getStr('anchor'));
+        return id(new AphrontAjaxResponse())->setContent(array());
       } else {
-        return id(new AphrontReloadResponse())->setURI($obj_handle->getURI());
+        return id(new AphrontReloadResponse())->setURI($done_uri);
       }
     }
 
-    $dialog = id(new AphrontDialogView())
-      ->setUser($user)
-      ->setTitle(pht('Edit Comment'));
+    $errors = array();
+    if ($xaction->getIsMFATransaction()) {
+      $message = pht(
+        'This comment was signed with MFA, so you will be required to '.
+        'provide MFA credentials to make changes.');
 
-    $dialog
-      ->addHiddenInput('anchor', $request->getStr('anchor'))
-      ->appendChild(
-        id(new PHUIFormLayoutView())
-        ->setFullWidth(true)
-        ->appendChild(
-          id(new PhabricatorRemarkupControl())
+      $errors[] = id(new PHUIInfoView())
+        ->setSeverity(PHUIInfoView::SEVERITY_MFA)
+        ->setErrors(array($message));
+    }
+
+    $form = id(new AphrontFormView())
+      ->setUser($viewer)
+      ->setFullWidth(true)
+      ->appendControl(
+        id(new PhabricatorRemarkupControl())
           ->setName('text')
-          ->setValue($xaction->getComment()->getContent())));
+          ->setValue($xaction->getComment()->getContent()));
 
-    $dialog
-      ->addSubmitButton(pht('Edit Comment'))
-      ->addCancelButton($obj_handle->getURI());
-
-    return id(new AphrontDialogResponse())->setDialog($dialog);
+    return $this->newDialog()
+      ->setTitle(pht('Edit Comment'))
+      ->appendChild($errors)
+      ->appendForm($form)
+      ->addSubmitButton(pht('Save Changes'))
+      ->addCancelButton($done_uri);
   }
 
 }

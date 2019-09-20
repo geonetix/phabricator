@@ -4,20 +4,45 @@ final class PhabricatorActionView extends AphrontView {
 
   private $name;
   private $icon;
-  private $iconSheet;
   private $href;
   private $disabled;
+  private $label;
   private $workflow;
   private $renderAsForm;
   private $download;
-  private $objectURI;
+  private $sigils = array();
+  private $metadata;
+  private $selected;
+  private $openInNewWindow;
+  private $submenu = array();
+  private $hidden;
+  private $depth;
+  private $id;
+  private $order;
+  private $color;
+  private $type;
 
-  public function setObjectURI($object_uri) {
-    $this->objectURI = $object_uri;
+  const TYPE_DIVIDER  = 'type-divider';
+  const TYPE_LABEL  = 'label';
+  const RED = 'action-item-red';
+  const GREEN = 'action-item-green';
+
+  public function setSelected($selected) {
+    $this->selected = $selected;
     return $this;
   }
-  public function getObjectURI() {
-    return $this->objectURI;
+
+  public function getSelected() {
+    return $this->selected;
+  }
+
+  public function setMetadata($metadata) {
+    $this->metadata = $metadata;
+    return $this;
+  }
+
+  public function getMetadata() {
+    return $this->metadata;
   }
 
   public function setDownload($download) {
@@ -34,19 +59,17 @@ final class PhabricatorActionView extends AphrontView {
     return $this;
   }
 
-  /**
-   * If the user is not logged in and the action is relatively complicated,
-   * give them a generic login link that will re-direct to the page they're
-   * viewing.
-   */
-  public function getHref() {
-    if ($this->workflow || $this->renderAsForm) {
-      if (!$this->user || !$this->user->isLoggedIn()) {
-        return id(new PhutilURI('/auth/start/'))
-          ->setQueryParam('next', (string)$this->getObjectURI());
-      }
-    }
+  public function setColor($color) {
+    $this->color = $color;
+    return $this;
+  }
 
+  public function addSigil($sigil) {
+    $this->sigils[] = $sigil;
+    return $this;
+  }
+
+  public function getHref() {
     return $this->href;
   }
 
@@ -55,19 +78,27 @@ final class PhabricatorActionView extends AphrontView {
     return $this;
   }
 
-  public function setIconSheet($sheet) {
-    $this->iconSheet = $sheet;
+  public function setName($name) {
+    $this->name = $name;
     return $this;
   }
 
-  public function setName($name) {
-    $this->name = $name;
+  public function getName() {
+    return $this->name;
+  }
+
+  public function setLabel($label) {
+    $this->label = $label;
     return $this;
   }
 
   public function setDisabled($disabled) {
     $this->disabled = $disabled;
     return $this;
+  }
+
+  public function getDisabled() {
+    return $this->disabled;
   }
 
   public function setWorkflow($workflow) {
@@ -80,28 +111,130 @@ final class PhabricatorActionView extends AphrontView {
     return $this;
   }
 
+  public function setOpenInNewWindow($open_in_new_window) {
+    $this->openInNewWindow = $open_in_new_window;
+    return $this;
+  }
+
+  public function getOpenInNewWindow() {
+    return $this->openInNewWindow;
+  }
+
+  public function setID($id) {
+    $this->id = $id;
+    return $this;
+  }
+
+  public function getID() {
+    if (!$this->id) {
+      $this->id = celerity_generate_unique_node_id();
+    }
+    return $this->id;
+  }
+
+  public function setOrder($order) {
+    $this->order = $order;
+    return $this;
+  }
+
+  public function getOrder() {
+    return $this->order;
+  }
+
+  public function setType($type) {
+    $this->type = $type;
+    return $this;
+  }
+
+  public function getType() {
+    return $this->type;
+  }
+
+  public function setSubmenu(array $submenu) {
+    $this->submenu = $submenu;
+
+    if (!$this->getHref()) {
+      $this->setHref('#');
+    }
+
+    return $this;
+  }
+
+  public function getItems($depth = 0) {
+    $items = array();
+
+    $items[] = $this;
+    foreach ($this->submenu as $action) {
+      foreach ($action->getItems($depth + 1) as $item) {
+        $item
+          ->setHidden(true)
+          ->setDepth($depth + 1);
+
+        $items[] = $item;
+      }
+    }
+
+    return $items;
+  }
+
+  public function setHidden($hidden) {
+    $this->hidden = $hidden;
+    return $this;
+  }
+
+  public function getHidden() {
+    return $this->hidden;
+  }
+
+  public function setDepth($depth) {
+    $this->depth = $depth;
+    return $this;
+  }
+
+  public function getDepth() {
+    return $this->depth;
+  }
+
   public function render() {
+    $caret_id = celerity_generate_unique_node_id();
 
     $icon = null;
     if ($this->icon) {
-      $sheet = nonempty($this->iconSheet, PHUIIconView::SPRITE_ICONS);
-
-      $suffix = '';
+      $color = '';
       if ($this->disabled) {
-        $suffix = '-grey';
+        $color = ' grey';
       }
-
       $icon = id(new PHUIIconView())
         ->addClass('phabricator-action-view-icon')
-        ->setSpriteIcon($this->icon.$suffix)
-        ->setSpriteSheet($sheet);
+        ->setIcon($this->icon.$color);
     }
+
+    $sigils = array();
+    if ($this->workflow) {
+      $sigils[] = 'workflow';
+    }
+
+    if ($this->download) {
+      $sigils[] = 'download';
+    }
+
+    if ($this->submenu) {
+      $sigils[] = 'keep-open';
+    }
+
+    if ($this->sigils) {
+      $sigils = array_merge($sigils, $this->sigils);
+    }
+
+    $sigils = $sigils ? implode(' ', $sigils) : null;
 
     if ($this->href) {
       if ($this->renderAsForm) {
-        if (!$this->user) {
+        if (!$this->hasViewer()) {
           throw new Exception(
-            'Call setUser() when rendering an action as a form.');
+            pht(
+              'Call %s when rendering an action as a form.',
+              'setViewer()'));
         }
 
         $item = javelin_tag(
@@ -109,73 +242,134 @@ final class PhabricatorActionView extends AphrontView {
           array(
             'class' => 'phabricator-action-view-item',
           ),
-          $this->name);
-
-        $sigils = array();
-        if ($this->workflow) {
-          $sigils[] = 'workflow';
-        }
-        if ($this->download) {
-          $sigils[] = 'download';
-        }
+          array($icon, $this->name));
 
         $item = phabricator_form(
-          $this->user,
+          $this->getViewer(),
           array(
             'action'    => $this->getHref(),
             'method'    => 'POST',
-            'sigil'     => implode(' ', $sigils),
+            'sigil'     => $sigils,
+            'meta'      => $this->metadata,
           ),
           $item);
       } else {
+        if ($this->getOpenInNewWindow()) {
+          $target = '_blank';
+          $rel = 'noreferrer';
+        } else {
+          $target = null;
+          $rel = null;
+        }
+
+        if ($this->submenu) {
+          $caret = javelin_tag(
+            'span',
+            array(
+              'class' => 'caret-right',
+              'id' => $caret_id,
+            ),
+            '');
+        } else {
+          $caret = null;
+        }
+
         $item = javelin_tag(
           'a',
           array(
             'href'  => $this->getHref(),
             'class' => 'phabricator-action-view-item',
-            'sigil' => $this->workflow ? 'workflow' : null,
+            'target' => $target,
+            'rel' => $rel,
+            'sigil' => $sigils,
+            'meta' => $this->metadata,
           ),
-          $this->name);
+          array($icon, $this->name, $caret));
       }
     } else {
-      $item = phutil_tag(
+      $item = javelin_tag(
         'span',
         array(
           'class' => 'phabricator-action-view-item',
+          'sigil' => $sigils,
         ),
-        $this->name);
+        array($icon, $this->name, $this->renderChildren()));
     }
 
     $classes = array();
     $classes[] = 'phabricator-action-view';
+
     if ($this->disabled) {
       $classes[] = 'phabricator-action-view-disabled';
     }
 
-    return phutil_tag(
-      'li',
-      array(
-        'class' => implode(' ', $classes),
-      ),
-      array($icon, $item));
-  }
-
-  public static function getAvailableIcons() {
-    $manifest = PHUIIconView::getSheetManifest(PHUIIconView::SPRITE_ICONS);
-
-    $results = array();
-    $prefix = 'icons-';
-    foreach ($manifest as $sprite) {
-      $name = $sprite['name'];
-      if (preg_match('/-(white|grey)$/', $name)) {
-        continue;
-      }
-      if (!strncmp($name, $prefix, strlen($prefix))) {
-        $results[] = substr($name, strlen($prefix));
-      }
+    if ($this->label) {
+      $classes[] = 'phabricator-action-view-label';
     }
 
-    return $results;
+    if ($this->selected) {
+      $classes[] = 'phabricator-action-view-selected';
+    }
+
+    if ($this->submenu) {
+      $classes[] = 'phabricator-action-view-submenu';
+    }
+
+    if ($this->getHref()) {
+      $classes[] = 'phabricator-action-view-href';
+    }
+
+    if ($this->icon) {
+      $classes[] = 'action-has-icon';
+    }
+
+    if ($this->color) {
+      $classes[] = $this->color;
+    }
+
+    if ($this->type) {
+      $classes[] = 'phabricator-action-view-'.$this->type;
+    }
+
+    $style = array();
+
+    if ($this->hidden) {
+      $style[] = 'display: none;';
+    }
+
+    if ($this->depth) {
+      $indent = ($this->depth * 16);
+      $style[] = "margin-left: {$indent}px;";
+    }
+
+    $sigil = null;
+    $meta = null;
+
+    if ($this->submenu) {
+      Javelin::initBehavior('phui-submenu');
+      $sigil = 'phui-submenu';
+
+      $item_ids = array();
+      foreach ($this->submenu as $subitem) {
+        $item_ids[] = $subitem->getID();
+      }
+
+      $meta = array(
+        'itemIDs' => $item_ids,
+        'caretID' => $caret_id,
+      );
+    }
+
+    return javelin_tag(
+      'li',
+      array(
+        'id' => $this->getID(),
+        'class' => implode(' ', $classes),
+        'style' => implode(' ', $style),
+        'sigil' => $sigil,
+        'meta' => $meta,
+      ),
+      $item);
   }
 
 }

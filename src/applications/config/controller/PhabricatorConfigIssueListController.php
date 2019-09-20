@@ -3,80 +3,101 @@
 final class PhabricatorConfigIssueListController
   extends PhabricatorConfigController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
 
     $nav = $this->buildSideNavView();
     $nav->selectFilter('issue/');
 
-    $issues = PhabricatorSetupCheck::runAllChecks();
-    PhabricatorSetupCheck::setOpenSetupIssueCount(
-      PhabricatorSetupCheck::countUnignoredIssues($issues));
+    $engine = new PhabricatorSetupEngine();
+    $response = $engine->execute();
+    if ($response) {
+      return $response;
+    }
+    $issues = $engine->getIssues();
 
-    $list = $this->buildIssueList($issues);
-    $list->setNoDataString(pht("There are no open setup issues."));
-
-    $header = id(new PHUIHeaderView())
-      ->setHeader(pht('Open Phabricator Setup Issues'));
-
-    $nav->appendChild(
-      array(
-        $header,
-        $list,
-      ));
+    $important = $this->buildIssueList(
+      $issues,
+      PhabricatorSetupCheck::GROUP_IMPORTANT,
+      'fa-warning');
+    $php = $this->buildIssueList(
+      $issues,
+      PhabricatorSetupCheck::GROUP_PHP,
+      'fa-code');
+    $mysql = $this->buildIssueList(
+      $issues,
+      PhabricatorSetupCheck::GROUP_MYSQL,
+      'fa-database');
+    $other = $this->buildIssueList(
+      $issues,
+      PhabricatorSetupCheck::GROUP_OTHER,
+      'fa-question-circle');
 
     $title = pht('Setup Issues');
+    $header = $this->buildHeaderView($title);
 
-    $crumbs = $this
-      ->buildApplicationCrumbs($nav)
-      ->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName(pht('Setup'))
-          ->setHref($this->getApplicationURI('issue/')));
+    if (!$issues) {
+      $issue_list = id(new PHUIInfoView())
+        ->setTitle(pht('No Issues'))
+        ->appendChild(
+          pht('Your install has no current setup issues to resolve.'))
+        ->setSeverity(PHUIInfoView::SEVERITY_NOTICE);
+    } else {
+      $issue_list = array(
+        $important,
+        $php,
+        $mysql,
+        $other,
+      );
 
-    $nav->setCrumbs($crumbs);
+      $issue_list = $this->buildConfigBoxView(pht('Issues'), $issue_list);
+    }
 
-    return $this->buildApplicationPage(
-      $nav,
-      array(
-        'title' => $title,
-        'device' => true,
-      ));
+    $crumbs = $this->buildApplicationCrumbs()
+      ->addTextCrumb($title)
+      ->setBorder(true);
+
+    $content = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setNavigation($nav)
+      ->setFixed(true)
+      ->setMainColumn($issue_list);
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($content);
   }
 
-  private function buildIssueList(array $issues) {
+  private function buildIssueList(array $issues, $group, $fonticon) {
     assert_instances_of($issues, 'PhabricatorSetupIssue');
     $list = new PHUIObjectItemListView();
-    $list->setCards(true);
+    $list->setBig(true);
     $ignored_items = array();
+    $items = 0;
 
     foreach ($issues as $issue) {
+      if ($issue->getGroup() == $group) {
+        $items++;
         $href = $this->getApplicationURI('/issue/'.$issue->getIssueKey().'/');
         $item = id(new PHUIObjectItemView())
           ->setHeader($issue->getName())
           ->setHref($href)
           ->addAttribute($issue->getSummary());
-      if (!$issue->getIsIgnored()) {
-        $item->setBarColor('yellow');
-        $item->addAction(
-          id(new PHUIListItemView())
-            ->setIcon('unpublish')
-            ->setWorkflow(true)
-            ->setName(pht('Ignore'))
-            ->setHref('/config/ignore/'.$issue->getIssueKey().'/'));
-        $list->addItem($item);
-      } else {
-        $item->addIcon('none', pht('Ignored'));
-        $item->setDisabled(true);
-        $item->addAction(
-          id(new PHUIListItemView())
-            ->setIcon('preview')
-            ->setWorkflow(true)
-            ->setName(pht('Unignore'))
-            ->setHref('/config/unignore/'.$issue->getIssueKey().'/'));
-        $item->setBarColor('none');
-        $ignored_items[] = $item;
+        if (!$issue->getIsIgnored()) {
+          $icon = id(new PHUIIconView())
+            ->setIcon($fonticon)
+            ->setBackground('bg-sky');
+          $item->setImageIcon($icon);
+          $list->addItem($item);
+        } else {
+          $icon = id(new PHUIIconView())
+            ->setIcon('fa-eye-slash')
+            ->setBackground('bg-grey');
+          $item->setDisabled(true);
+          $item->setImageIcon($icon);
+          $ignored_items[] = $item;
+        }
       }
     }
 
@@ -84,7 +105,11 @@ final class PhabricatorConfigIssueListController
       $list->addItem($item);
     }
 
-    return $list;
+    if ($items == 0) {
+      return null;
+    } else {
+      return $list;
+    }
   }
 
 }

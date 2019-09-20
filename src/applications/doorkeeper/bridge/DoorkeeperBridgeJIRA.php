@@ -22,7 +22,7 @@ final class DoorkeeperBridgeJIRA extends DoorkeeperBridge {
     $id_map = mpull($refs, 'getObjectID', 'getObjectKey');
     $viewer = $this->getViewer();
 
-    $provider = PhabricatorAuthProviderOAuth1JIRA::getJIRAProvider();
+    $provider = PhabricatorJIRAAuthProvider::getJIRAProvider();
     if (!$provider) {
       return;
     }
@@ -31,10 +31,15 @@ final class DoorkeeperBridgeJIRA extends DoorkeeperBridge {
       ->setViewer($viewer)
       ->withUserPHIDs(array($viewer->getPHID()))
       ->withAccountTypes(array($provider->getProviderType()))
+      ->requireCapabilities(
+        array(
+          PhabricatorPolicyCapability::CAN_VIEW,
+          PhabricatorPolicyCapability::CAN_EDIT,
+        ))
       ->execute();
 
     if (!$accounts) {
-      return;
+      return $this->didFailOnMissingLink();
     }
 
     // TODO: When we support multiple JIRA instances, we need to disambiguate
@@ -42,17 +47,25 @@ final class DoorkeeperBridgeJIRA extends DoorkeeperBridge {
     // (by querying all instances). For now, just query the one instance.
     $account = head($accounts);
 
+    $timeout = $this->getTimeout();
+
     $futures = array();
     foreach ($id_map as $key => $id) {
-      $futures[$key] = $provider->newJIRAFuture(
+      $future = $provider->newJIRAFuture(
         $account,
         'rest/api/2/issue/'.phutil_escape_uri($id),
         'GET');
+
+      if ($timeout !== null) {
+        $future->setTimeout($timeout);
+      }
+
+      $futures[$key] = $future;
     }
 
     $results = array();
     $failed = array();
-    foreach (Futures($futures) as $key => $future) {
+    foreach (new FutureIterator($futures) as $key => $future) {
       try {
         $results[$key] = $future->resolveJSON();
       } catch (Exception $ex) {
@@ -92,6 +105,7 @@ final class DoorkeeperBridgeJIRA extends DoorkeeperBridge {
 
       $ref->setAttribute('title', idx($fields, 'summary'));
       $ref->setAttribute('description', idx($result, 'description'));
+      $ref->setAttribute('shortname', $result['key']);
 
       $obj = $ref->getExternalObject();
       if ($obj->getID()) {
@@ -99,10 +113,7 @@ final class DoorkeeperBridgeJIRA extends DoorkeeperBridge {
       }
 
       $this->fillObjectFromData($obj, $result);
-
-      $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
-        $obj->save();
-      unset($unguarded);
+      $this->saveExternalObject($ref, $obj);
     }
   }
 
@@ -110,10 +121,34 @@ final class DoorkeeperBridgeJIRA extends DoorkeeperBridge {
     // Convert the "self" URI, which points at the REST endpoint, into a
     // browse URI.
     $self = idx($result, 'self');
-    $uri = new PhutilURI($self);
-    $uri->setPath('browse/'.$obj->getObjectID());
+    $object_id = $obj->getObjectID();
 
-    $obj->setObjectURI((string)$uri);
+    $uri = self::getJIRAIssueBrowseURIFromJIRARestURI($self, $object_id);
+    if ($uri !== null) {
+      $obj->setObjectURI($uri);
+    }
+  }
+
+  public static function getJIRAIssueBrowseURIFromJIRARestURI(
+    $uri,
+    $object_id) {
+
+    $uri = new PhutilURI($uri);
+
+    // The JIRA install might not be at the domain root, so we may need to
+    // keep an initial part of the path, like "/jira/". Find the API specific
+    // part of the URI, strip it off, then replace it with the web version.
+    $path = $uri->getPath();
+    $pos = strrpos($path, 'rest/api/2/issue/');
+    if ($pos === false) {
+      return null;
+    }
+
+    $path = substr($path, 0, $pos);
+    $path = $path.'browse/'.$object_id;
+    $uri->setPath($path);
+
+    return (string)$uri;
   }
 
 }

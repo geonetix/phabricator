@@ -1,10 +1,12 @@
 <?php
 
-abstract class PhabricatorMailReplyHandler {
+abstract class PhabricatorMailReplyHandler extends Phobject {
 
   private $mailReceiver;
+  private $applicationEmail;
   private $actor;
   private $excludePHIDs = array();
+  private $unexpandablePHIDs = array();
 
   final public function setMailReceiver($mail_receiver) {
     $this->validateMailReceiver($mail_receiver);
@@ -14,6 +16,16 @@ abstract class PhabricatorMailReplyHandler {
 
   final public function getMailReceiver() {
     return $this->mailReceiver;
+  }
+
+  public function setApplicationEmail(
+    PhabricatorMetaMTAApplicationEmail $email) {
+    $this->applicationEmail = $email;
+    return $this;
+  }
+
+  public function getApplicationEmail() {
+    return $this->applicationEmail;
   }
 
   final public function setActor(PhabricatorUser $actor) {
@@ -34,93 +46,28 @@ abstract class PhabricatorMailReplyHandler {
     return $this->excludePHIDs;
   }
 
+  public function setUnexpandablePHIDs(array $phids) {
+    $this->unexpandablePHIDs = $phids;
+    return $this;
+  }
+
+  public function getUnexpandablePHIDs() {
+    return $this->unexpandablePHIDs;
+  }
+
   abstract public function validateMailReceiver($mail_receiver);
   abstract public function getPrivateReplyHandlerEmailAddress(
-    PhabricatorObjectHandle $handle);
+    PhabricatorUser $user);
+
   public function getReplyHandlerDomain() {
-    return PhabricatorEnv::getEnvConfig(
-      'metamta.reply-handler-domain');
+    return PhabricatorEnv::getEnvConfig('metamta.reply-handler-domain');
   }
-  abstract public function getReplyHandlerInstructions();
+
   abstract protected function receiveEmail(
     PhabricatorMetaMTAReceivedMail $mail);
 
   public function processEmail(PhabricatorMetaMTAReceivedMail $mail) {
-    $error = $this->sanityCheckEmail($mail);
-
-    if ($error) {
-      if ($this->shouldSendErrorEmail($mail)) {
-        $this->sendErrorEmail($error, $mail);
-      }
-      return null;
-    }
-
     return $this->receiveEmail($mail);
-  }
-
-  private function sanityCheckEmail(PhabricatorMetaMTAReceivedMail $mail) {
-    $body        = $mail->getCleanTextBody();
-    $attachments = $mail->getAttachments();
-
-    if (empty($body) && empty($attachments)) {
-      return 'Empty email body. Email should begin with an !action and / or '.
-             'text to comment. Inline replies and signatures are ignored.';
-    }
-
-    return null;
-  }
-
-  /**
-   * Only send an error email if the user is talking to just Phabricator. We
-   * can assume if there is only one To address it is a Phabricator address
-   * since this code is running and everything.
-   */
-  private function shouldSendErrorEmail(PhabricatorMetaMTAReceivedMail $mail) {
-    return (count($mail->getToAddresses()) == 1) &&
-           (count($mail->getCCAddresses()) == 0);
-  }
-
-  private function sendErrorEmail($error,
-                                  PhabricatorMetaMTAReceivedMail $mail) {
-    $template = new PhabricatorMetaMTAMail();
-    $template->setSubject('Exception: unable to process your mail request');
-    $template->setBody($this->buildErrorMailBody($error, $mail));
-    $template->setRelatedPHID($mail->getRelatedPHID());
-    $phid = $this->getActor()->getPHID();
-    $handle = id(new PhabricatorHandleQuery())
-      ->setViewer($this->getActor())
-      ->withPHIDs(array($phid))
-      ->executeOne();
-    $tos = array($phid => $handle);
-    $mails = $this->multiplexMail($template, $tos, array());
-
-    foreach ($mails as $email) {
-      $email->saveAndSend();
-    }
-
-    return true;
-  }
-
-  private function buildErrorMailBody($error,
-                                      PhabricatorMetaMTAReceivedMail $mail) {
-    $original_body = $mail->getRawTextBody();
-
-    $main_body = <<<EOBODY
-Your request failed because an error was encoutered while processing it:
-
-  ERROR: {$error}
-
-  -- Original Body -------------------------------------------------------------
-
-  {$original_body}
-
-EOBODY;
-
-    $body = new PhabricatorMetaMTAMailBody();
-    $body->addRawSection($main_body);
-    $body->addReplySection($this->getReplyHandlerInstructions());
-
-    return $body->render();
   }
 
   public function supportsPrivateReplies() {
@@ -132,9 +79,11 @@ EOBODY;
     if (!PhabricatorEnv::getEnvConfig('metamta.public-replies')) {
       return false;
     }
+
     if (!$this->getReplyHandlerDomain()) {
       return false;
     }
+
     return (bool)$this->getPublicReplyHandlerEmailAddress();
   }
 
@@ -147,109 +96,6 @@ EOBODY;
     return null;
   }
 
-  final public function getRecipientsSummary(
-    array $to_handles,
-    array $cc_handles) {
-    assert_instances_of($to_handles, 'PhabricatorObjectHandle');
-    assert_instances_of($cc_handles, 'PhabricatorObjectHandle');
-
-    $body = '';
-
-    if (PhabricatorEnv::getEnvConfig('metamta.recipients.show-hints')) {
-      if ($to_handles) {
-        $body .= "To: ".implode(', ', mpull($to_handles, 'getName'))."\n";
-      }
-      if ($cc_handles) {
-        $body .= "Cc: ".implode(', ', mpull($cc_handles, 'getName'))."\n";
-      }
-    }
-
-    return $body;
-  }
-
-  final public function multiplexMail(
-    PhabricatorMetaMTAMail $mail_template,
-    array $to_handles,
-    array $cc_handles) {
-    assert_instances_of($to_handles, 'PhabricatorObjectHandle');
-    assert_instances_of($cc_handles, 'PhabricatorObjectHandle');
-
-    $result = array();
-
-    // If MetaMTA is configured to always multiplex, skip the single-email
-    // case.
-    if (!PhabricatorMetaMTAMail::shouldMultiplexAllMail()) {
-      // If private replies are not supported, simply send one email to all
-      // recipients and CCs. This covers cases where we have no reply handler,
-      // or we have a public reply handler.
-      if (!$this->supportsPrivateReplies()) {
-        $mail = clone $mail_template;
-        $mail->addTos(mpull($to_handles, 'getPHID'));
-        $mail->addCCs(mpull($cc_handles, 'getPHID'));
-
-        if ($this->supportsPublicReplies()) {
-          $reply_to = $this->getPublicReplyHandlerEmailAddress();
-          $mail->setReplyTo($reply_to);
-        }
-
-        $result[] = $mail;
-
-        return $result;
-      }
-    }
-
-    $tos = mpull($to_handles, null, 'getPHID');
-    $ccs = mpull($cc_handles, null, 'getPHID');
-
-    // Merge all the recipients together. TODO: We could keep the CCs as real
-    // CCs and send to a "noreply@domain.com" type address, but keep it simple
-    // for now.
-    $recipients = $tos + $ccs;
-
-    // When multiplexing mail, explicitly include To/Cc information in the
-    // message body and headers.
-
-    $mail_template = clone $mail_template;
-
-    $mail_template->addPHIDHeaders('X-Phabricator-To', array_keys($tos));
-    $mail_template->addPHIDHeaders('X-Phabricator-Cc', array_keys($ccs));
-
-    $body = $mail_template->getBody();
-    $body .= "\n";
-    $body .= $this->getRecipientsSummary($to_handles, $cc_handles);
-
-    foreach ($recipients as $phid => $recipient) {
-      $mail = clone $mail_template;
-      if (isset($to_handles[$phid])) {
-        $mail->addTos(array($phid));
-      } else if (isset($cc_handles[$phid])) {
-        $mail->addCCs(array($phid));
-      } else {
-        // not good - they should be a to or a cc
-        continue;
-      }
-
-      $mail->setBody($body);
-
-      $reply_to = null;
-      if (!$reply_to && $this->supportsPrivateReplies()) {
-        $reply_to = $this->getPrivateReplyHandlerEmailAddress($recipient);
-      }
-
-      if (!$reply_to && $this->supportsPublicReplies()) {
-        $reply_to = $this->getPublicReplyHandlerEmailAddress();
-      }
-
-      if ($reply_to) {
-        $mail->setReplyTo($reply_to);
-      }
-
-      $result[] = $mail;
-    }
-
-    return $result;
-  }
-
   protected function getDefaultPublicReplyHandlerEmailAddress($prefix) {
 
     $receiver = $this->getMailReceiver();
@@ -259,8 +105,11 @@ EOBODY;
     // We compute a hash using the object's own PHID to prevent an attacker
     // from blindly interacting with objects that they haven't ever received
     // mail about by just sending to D1@, D2@, etc...
+
+    $mail_key = PhabricatorMetaMTAMailProperties::loadMailKey($receiver);
+
     $hash = PhabricatorObjectMailReceiver::computeMailHash(
-      $receiver->getMailKey(),
+      $mail_key,
       $receiver->getPHID());
 
     $address = "{$prefix}{$receiver_id}+public+{$hash}@{$domain}";
@@ -271,65 +120,292 @@ EOBODY;
     $single_handle_prefix = PhabricatorEnv::getEnvConfig(
       'metamta.single-reply-handler-prefix');
     return ($single_handle_prefix)
-      ? $single_handle_prefix . '+' . $address
+      ? $single_handle_prefix.'+'.$address
       : $address;
   }
 
   protected function getDefaultPrivateReplyHandlerEmailAddress(
-    PhabricatorObjectHandle $handle,
+    PhabricatorUser $user,
     $prefix) {
-
-    if ($handle->getType() != PhabricatorPeoplePHIDTypeUser::TYPECONST) {
-      // You must be a real user to get a private reply handler address.
-      return null;
-    }
-
-    $user = id(new PhabricatorPeopleQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
-      ->withPHIDs(array($handle->getPHID()))
-      ->executeOne();
-
-    if (!$user) {
-      // This may happen if a user was subscribed to something, and was then
-      // deleted.
-      return null;
-    }
 
     $receiver = $this->getMailReceiver();
     $receiver_id = $receiver->getID();
     $user_id = $user->getID();
+
+    $mail_key = PhabricatorMetaMTAMailProperties::loadMailKey($receiver);
+
     $hash = PhabricatorObjectMailReceiver::computeMailHash(
-      $receiver->getMailKey(),
-      $handle->getPHID());
+      $mail_key,
+      $user->getPHID());
     $domain = $this->getReplyHandlerDomain();
 
     $address = "{$prefix}{$receiver_id}+{$user_id}+{$hash}@{$domain}";
     return $this->getSingleReplyHandlerPrefix($address);
   }
 
- final protected function enhanceBodyWithAttachments(
+  final protected function enhanceBodyWithAttachments(
     $body,
-    array $attachments,
-    $format = '- {F%d, layout=link}') {
+    array $attachments) {
+
     if (!$attachments) {
       return $body;
     }
 
-    // TODO: (T603) What's the policy here?
-    $files = id(new PhabricatorFile())
-      ->loadAllWhere('phid in (%Ls)', $attachments);
+    $files = id(new PhabricatorFileQuery())
+      ->setViewer($this->getActor())
+      ->withPHIDs($attachments)
+      ->execute();
 
-    // if we have some text then double return before adding our file list
-    if ($body) {
-      $body .= "\n\n";
-    }
+    $output = array();
+    $output[] = $body;
 
+    // We're going to put all the non-images first in a list, then embed
+    // the images.
+    $head = array();
+    $tail = array();
     foreach ($files as $file) {
-      $file_str = sprintf($format, $file->getID());
-      $body .= $file_str."\n";
+      if ($file->isViewableImage()) {
+        $tail[] = $file;
+      } else {
+        $head[] = $file;
+      }
     }
 
-    return rtrim($body);
+    if ($head) {
+      $list = array();
+      foreach ($head as $file) {
+        $list[] = '  - {'.$file->getMonogram().', layout=link}';
+      }
+      $output[] = implode("\n", $list);
+    }
+
+    if ($tail) {
+      $list = array();
+      foreach ($tail as $file) {
+        $list[] = '{'.$file->getMonogram().'}';
+      }
+      $output[] = implode("\n\n", $list);
+    }
+
+    $output = implode("\n\n", $output);
+
+    return rtrim($output);
+  }
+
+
+  /**
+   * Produce a list of mail targets for a given to/cc list.
+   *
+   * Each target should be sent a separate email, and contains the information
+   * required to generate it with appropriate permissions and configuration.
+   *
+   * @param list<phid> List of "To" PHIDs.
+   * @param list<phid> List of "CC" PHIDs.
+   * @return list<PhabricatorMailTarget> List of targets.
+   */
+  final public function getMailTargets(array $raw_to, array $raw_cc) {
+    list($to, $cc) = $this->expandRecipientPHIDs($raw_to, $raw_cc);
+    list($to, $cc) = $this->loadRecipientUsers($to, $cc);
+    list($to, $cc) = $this->filterRecipientUsers($to, $cc);
+
+    if (!$to && !$cc) {
+      return array();
+    }
+
+    $template = id(new PhabricatorMailTarget())
+      ->setRawToPHIDs($raw_to)
+      ->setRawCCPHIDs($raw_cc);
+
+    // Set the public reply address as the default, if one exists. We
+    // might replace this with a private address later.
+    if ($this->supportsPublicReplies()) {
+      $reply_to = $this->getPublicReplyHandlerEmailAddress();
+      if ($reply_to) {
+        $template->setReplyTo($reply_to);
+      }
+    }
+
+    $supports_private_replies = $this->supportsPrivateReplies();
+    $mail_all = !PhabricatorEnv::getEnvConfig('metamta.one-mail-per-recipient');
+    $targets = array();
+    if ($mail_all) {
+      $target = id(clone $template)
+        ->setViewer(PhabricatorUser::getOmnipotentUser())
+        ->setToMap($to)
+        ->setCCMap($cc);
+
+      $targets[] = $target;
+    } else {
+      $map = $to + $cc;
+
+      foreach ($map as $phid => $user) {
+        // Preserve the original To/Cc information on the target.
+        if (isset($to[$phid])) {
+          $target_to = array($phid => $user);
+          $target_cc = array();
+        } else {
+          $target_to = array();
+          $target_cc = array($phid => $user);
+        }
+
+        $target = id(clone $template)
+          ->setViewer($user)
+          ->setToMap($target_to)
+          ->setCCMap($target_cc);
+
+        if ($supports_private_replies) {
+          $reply_to = $this->getPrivateReplyHandlerEmailAddress($user);
+          if ($reply_to) {
+            $target->setReplyTo($reply_to);
+          }
+        }
+
+        $targets[] = $target;
+      }
+    }
+
+    return $targets;
+  }
+
+
+  /**
+   * Expand lists of recipient PHIDs.
+   *
+   * This takes any compound recipients (like projects) and looks up all their
+   * members.
+   *
+   * @param list<phid> List of To PHIDs.
+   * @param list<phid> List of CC PHIDs.
+   * @return pair<list<phid>, list<phid>> Expanded PHID lists.
+   */
+  private function expandRecipientPHIDs(array $to, array $cc) {
+    $to_result = array();
+    $cc_result = array();
+
+    // "Unexpandable" users have disengaged from an object (for example,
+    // by resigning from a revision).
+
+    // If such a user is still a direct recipient (for example, they're still
+    // on the Subscribers list) they're fair game, but group targets (like
+    // projects) will no longer include them when expanded.
+
+    $unexpandable = $this->getUnexpandablePHIDs();
+    $unexpandable = array_fuse($unexpandable);
+
+    $all_phids = array_merge($to, $cc);
+    if ($all_phids) {
+      $map = id(new PhabricatorMetaMTAMemberQuery())
+        ->setViewer(PhabricatorUser::getOmnipotentUser())
+        ->withPHIDs($all_phids)
+        ->execute();
+      foreach ($to as $phid) {
+        foreach ($map[$phid] as $expanded) {
+          if ($expanded !== $phid) {
+            if (isset($unexpandable[$expanded])) {
+              continue;
+            }
+          }
+          $to_result[$expanded] = $expanded;
+        }
+      }
+      foreach ($cc as $phid) {
+        foreach ($map[$phid] as $expanded) {
+          if ($expanded !== $phid) {
+            if (isset($unexpandable[$expanded])) {
+              continue;
+            }
+          }
+          $cc_result[$expanded] = $expanded;
+        }
+      }
+    }
+
+    // Remove recipients from "CC" if they're also present in "To".
+    $cc_result = array_diff_key($cc_result, $to_result);
+
+    return array(array_values($to_result), array_values($cc_result));
+  }
+
+
+  /**
+   * Load @{class:PhabricatorUser} objects for each recipient.
+   *
+   * Invalid recipients are dropped from the results.
+   *
+   * @param list<phid> List of To PHIDs.
+   * @param list<phid> List of CC PHIDs.
+   * @return pair<wild, wild> Maps from PHIDs to users.
+   */
+  private function loadRecipientUsers(array $to, array $cc) {
+    $to_result = array();
+    $cc_result = array();
+
+    $all_phids = array_merge($to, $cc);
+    if ($all_phids) {
+      // We need user settings here because we'll check translations later
+      // when generating mail.
+      $users = id(new PhabricatorPeopleQuery())
+        ->setViewer(PhabricatorUser::getOmnipotentUser())
+        ->withPHIDs($all_phids)
+        ->needUserSettings(true)
+        ->execute();
+      $users = mpull($users, null, 'getPHID');
+
+      foreach ($to as $phid) {
+        if (isset($users[$phid])) {
+          $to_result[$phid] = $users[$phid];
+        }
+      }
+      foreach ($cc as $phid) {
+        if (isset($users[$phid])) {
+          $cc_result[$phid] = $users[$phid];
+        }
+      }
+    }
+
+    return array($to_result, $cc_result);
+  }
+
+
+  /**
+   * Remove recipients who do not have permission to view the mail receiver.
+   *
+   * @param map<string, PhabricatorUser> Map of "To" users.
+   * @param map<string, PhabricatorUser> Map of "CC" users.
+   * @return pair<wild, wild> Filtered user maps.
+   */
+  private function filterRecipientUsers(array $to, array $cc) {
+    $to_result = array();
+    $cc_result = array();
+
+    $all_users = $to + $cc;
+    if ($all_users) {
+      $can_see = array();
+      $object = $this->getMailReceiver();
+      foreach ($all_users as $phid => $user) {
+        $visible = PhabricatorPolicyFilter::hasCapability(
+          $user,
+          $object,
+          PhabricatorPolicyCapability::CAN_VIEW);
+        if ($visible) {
+          $can_see[$phid] = true;
+        }
+      }
+
+      foreach ($to as $phid => $user) {
+        if (!empty($can_see[$phid])) {
+          $to_result[$phid] = $all_users[$phid];
+        }
+      }
+
+      foreach ($cc as $phid => $user) {
+        if (!empty($can_see[$phid])) {
+          $cc_result[$phid] = $all_users[$phid];
+        }
+      }
+    }
+
+    return array($to_result, $cc_result);
   }
 
 }

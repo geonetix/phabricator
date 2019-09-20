@@ -1,6 +1,6 @@
 <?php
 
-final class PhabricatorFeedStoryPublisher {
+final class PhabricatorFeedStoryPublisher extends Phobject {
 
   private $relatedPHIDs;
   private $storyType;
@@ -10,6 +10,27 @@ final class PhabricatorFeedStoryPublisher {
   private $primaryObjectPHID;
   private $subscribedPHIDs = array();
   private $mailRecipientPHIDs = array();
+  private $notifyAuthor;
+  private $mailTags = array();
+  private $unexpandablePHIDs = array();
+
+  public function setMailTags(array $mail_tags) {
+    $this->mailTags = $mail_tags;
+    return $this;
+  }
+
+  public function getMailTags() {
+    return $this->mailTags;
+  }
+
+  public function setNotifyAuthor($notify_author) {
+    $this->notifyAuthor = $notify_author;
+    return $this;
+  }
+
+  public function getNotifyAuthor() {
+    return $this->notifyAuthor;
+  }
 
   public function setRelatedPHIDs(array $phids) {
     $this->relatedPHIDs = $phids;
@@ -24,6 +45,15 @@ final class PhabricatorFeedStoryPublisher {
   public function setPrimaryObjectPHID($phid) {
     $this->primaryObjectPHID = $phid;
     return $this;
+  }
+
+  public function setUnexpandablePHIDs(array $unexpandable_phids) {
+    $this->unexpandablePHIDs = $unexpandable_phids;
+    return $this;
+  }
+
+  public function getUnexpandablePHIDs() {
+    return $this->unexpandablePHIDs;
   }
 
   public function setStoryType($story_type) {
@@ -54,21 +84,29 @@ final class PhabricatorFeedStoryPublisher {
   public function publish() {
     $class = $this->storyType;
     if (!$class) {
-      throw new Exception("Call setStoryType() before publishing!");
+      throw new Exception(
+        pht(
+          'Call %s before publishing!',
+          'setStoryType()'));
     }
 
     if (!class_exists($class)) {
       throw new Exception(
-        "Story type must be a valid class name and must subclass ".
-        "PhabricatorFeedStory. ".
-        "'{$class}' is not a loadable class.");
+        pht(
+          "Story type must be a valid class name and must subclass %s. ".
+          "'%s' is not a loadable class.",
+          'PhabricatorFeedStory',
+          $class));
     }
 
     if (!is_subclass_of($class, 'PhabricatorFeedStory')) {
       throw new Exception(
-        "Story type must be a valid class name and must subclass ".
-        "PhabricatorFeedStory. ".
-        "'{$class}' is not a subclass of PhabricatorFeedStory.");
+        pht(
+          "Story type must be a valid class name and must subclass %s. ".
+          "'%s' is not a subclass of %s.",
+          'PhabricatorFeedStory',
+          $class,
+          'PhabricatorFeedStory'));
     }
 
     $chrono_key = $this->generateChronologicalKey();
@@ -95,14 +133,16 @@ final class PhabricatorFeedStoryPublisher {
 
       queryfx(
         $conn,
-        'INSERT INTO %T (objectPHID, chronologicalKey) VALUES %Q',
+        'INSERT INTO %T (objectPHID, chronologicalKey) VALUES %LQ',
         $ref->getTableName(),
-        implode(', ', $sql));
+        $sql);
     }
 
-    $this->insertNotifications($chrono_key);
-    if (PhabricatorEnv::getEnvConfig('notification.enabled')) {
-      $this->sendNotification($chrono_key);
+    $subscribed_phids = $this->subscribedPHIDs;
+    if ($subscribed_phids) {
+      $subscribed_phids = $this->filterSubscribedPHIDs($subscribed_phids);
+      $this->insertNotifications($chrono_key, $subscribed_phids);
+      $this->sendNotification($chrono_key, $subscribed_phids);
     }
 
     PhabricatorWorker::scheduleTask(
@@ -114,19 +154,13 @@ final class PhabricatorFeedStoryPublisher {
     return $story;
   }
 
-  private function insertNotifications($chrono_key) {
-    $subscribed_phids = $this->subscribedPHIDs;
-    $subscribed_phids = array_diff(
-      $subscribed_phids,
-      array($this->storyAuthorPHID));
-
-    if (!$subscribed_phids) {
-      return;
-    }
-
+  private function insertNotifications($chrono_key, array $subscribed_phids) {
     if (!$this->primaryObjectPHID) {
       throw new Exception(
-        "You must call setPrimaryObjectPHID() if you setSubscribedPHIDs()!");
+        pht(
+          'You must call %s if you %s!',
+          'setPrimaryObjectPHID()',
+          'setSubscribedPHIDs()'));
     }
 
     $notif = new PhabricatorFeedStoryNotification();
@@ -135,7 +169,8 @@ final class PhabricatorFeedStoryPublisher {
 
     $will_receive_mail = array_fill_keys($this->mailRecipientPHIDs, true);
 
-    foreach (array_unique($subscribed_phids) as $user_phid) {
+    $user_phids = array_unique($subscribed_phids);
+    foreach ($user_phids as $user_phid) {
       if (isset($will_receive_mail[$user_phid])) {
         $mark_read = 1;
       } else {
@@ -151,26 +186,114 @@ final class PhabricatorFeedStoryPublisher {
         $mark_read);
     }
 
-    queryfx(
-      $conn,
-      'INSERT INTO %T
-     (primaryObjectPHID, userPHID, chronologicalKey, hasViewed)
-     VALUES %Q',
-      $notif->getTableName(),
-      implode(', ', $sql));
+    if ($sql) {
+      queryfx(
+        $conn,
+        'INSERT INTO %T '.
+        '(primaryObjectPHID, userPHID, chronologicalKey, hasViewed) '.
+        'VALUES %LQ',
+        $notif->getTableName(),
+        $sql);
+    }
+
+    PhabricatorUserCache::clearCaches(
+      PhabricatorUserNotificationCountCacheType::KEY_COUNT,
+      $user_phids);
   }
 
-  private function sendNotification($chrono_key) {
-    $server_uri = PhabricatorEnv::getEnvConfig('notification.server-uri');
-
+  private function sendNotification($chrono_key, array $subscribed_phids) {
     $data = array(
-      'key' => (string)$chrono_key,
+      'key'         => (string)$chrono_key,
+      'type'        => 'notification',
+      'subscribers' => $subscribed_phids,
     );
 
-    id(new HTTPSFuture($server_uri, $data))
-      ->setMethod('POST')
-      ->setTimeout(1)
-      ->resolve();
+    PhabricatorNotificationClient::tryToPostMessage($data);
+  }
+
+  /**
+   * Remove PHIDs who should not receive notifications from a subscriber list.
+   *
+   * @param list<phid> List of potential subscribers.
+   * @return list<phid> List of actual subscribers.
+   */
+  private function filterSubscribedPHIDs(array $phids) {
+    $phids = $this->expandRecipients($phids);
+
+    $tags = $this->getMailTags();
+    if ($tags) {
+      $all_prefs = id(new PhabricatorUserPreferencesQuery())
+        ->setViewer(PhabricatorUser::getOmnipotentUser())
+        ->withUserPHIDs($phids)
+        ->needSyntheticPreferences(true)
+        ->execute();
+      $all_prefs = mpull($all_prefs, null, 'getUserPHID');
+    }
+
+    $pref_default = PhabricatorEmailTagsSetting::VALUE_EMAIL;
+    $pref_ignore = PhabricatorEmailTagsSetting::VALUE_IGNORE;
+
+    $keep = array();
+    foreach ($phids as $phid) {
+      if (($phid == $this->storyAuthorPHID) && !$this->getNotifyAuthor()) {
+        continue;
+      }
+
+      if ($tags && isset($all_prefs[$phid])) {
+        $mailtags = $all_prefs[$phid]->getSettingValue(
+          PhabricatorEmailTagsSetting::SETTINGKEY);
+
+        $notify = false;
+        foreach ($tags as $tag) {
+          // If this is set to "email" or "notify", notify the user.
+          if ((int)idx($mailtags, $tag, $pref_default) != $pref_ignore) {
+            $notify = true;
+            break;
+          }
+        }
+
+        if (!$notify) {
+          continue;
+        }
+      }
+
+      $keep[] = $phid;
+    }
+
+    return array_values(array_unique($keep));
+  }
+
+  private function expandRecipients(array $phids) {
+    $expanded_phids = id(new PhabricatorMetaMTAMemberQuery())
+      ->setViewer(PhabricatorUser::getOmnipotentUser())
+      ->withPHIDs($phids)
+      ->executeExpansion();
+
+    // Filter out unexpandable PHIDs from the results. The typical case for
+    // this is that resigned reviewers should not be notified just because
+    // they are a member of some project or package reviewer.
+
+    $original_map = array_fuse($phids);
+    $unexpandable_map = array_fuse($this->unexpandablePHIDs);
+
+    foreach ($expanded_phids as $key => $phid) {
+      // We can keep this expanded PHID if it was present originally.
+      if (isset($original_map[$phid])) {
+        continue;
+      }
+
+      // We can also keep it if it isn't marked as unexpandable.
+      if (!isset($unexpandable_map[$phid])) {
+        continue;
+      }
+
+      // If it's unexpandable and we produced it by expanding recipients,
+      // throw it away.
+      unset($expanded_phids[$key]);
+    }
+    $expanded_phids = array_values($expanded_phids);
+
+    return $expanded_phids;
   }
 
   /**

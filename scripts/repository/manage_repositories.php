@@ -5,7 +5,7 @@ $root = dirname(dirname(dirname(__FILE__)));
 require_once $root.'/scripts/__init_script__.php';
 
 $args = new PhutilArgumentParser($argv);
-$args->setTagline('manage repositories');
+$args->setTagline(pht('manage repositories'));
 $args->setSynopsis(<<<EOSYNOPSIS
 **repository** __command__ [__options__]
     Manage and debug Phabricator repository configuration, tracking,
@@ -15,14 +15,8 @@ EOSYNOPSIS
   );
 $args->parseStandardArguments();
 
-$workflows = array(
-  new PhabricatorRepositoryManagementPullWorkflow(),
-  new PhabricatorRepositoryManagementDiscoverWorkflow(),
-  new PhabricatorRepositoryManagementListWorkflow(),
-  new PhabricatorRepositoryManagementDeleteWorkflow(),
-  new PhabricatorRepositoryManagementMarkImportedWorkflow(),
-  new PhabricatorRepositoryManagementImportingWorkflow(),
-  new PhutilHelpArgumentWorkflow(),
-);
-
+$workflows = id(new PhutilClassMapQuery())
+  ->setAncestorClass('PhabricatorRepositoryManagementWorkflow')
+  ->execute();
+$workflows[] = new PhutilHelpArgumentWorkflow();
 $args->parseWorkflows($workflows);

@@ -1,101 +1,36 @@
 <?php
 
-final class HarbormasterBuildableListController
-  extends HarbormasterController
-  implements PhabricatorApplicationSearchResultsControllerInterface {
-
-  private $queryKey;
+final class HarbormasterBuildableListController extends HarbormasterController {
 
   public function shouldAllowPublic() {
     return true;
   }
 
-  public function willProcessRequest(array $data) {
-    $this->queryKey = idx($data, 'queryKey');
-  }
+  public function handleRequest(AphrontRequest $request) {
+    $items = array();
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $controller = id(new PhabricatorApplicationSearchController($request))
-      ->setQueryKey($this->queryKey)
-      ->setSearchEngine(new HarbormasterBuildableSearchEngine())
-      ->setNavigation($this->buildSideNavView());
+    $items[] = id(new PHUIListItemView())
+      ->setType(PHUIListItemView::TYPE_LABEL)
+      ->setName(pht('Builds'));
 
-    return $this->delegateToController($controller);
-  }
+    $items[] = id(new PHUIListItemView())
+      ->setType(PHUIListItemView::TYPE_LINK)
+      ->setName(pht('Browse Builds'))
+      ->setHref($this->getApplicationURI('build/'));
 
-  public function renderResultsList(
-    array $buildables,
-    PhabricatorSavedQuery $query) {
-    assert_instances_of($buildables, 'HarbormasterBuildable');
+    $items[] = id(new PHUIListItemView())
+      ->setType(PHUIListItemView::TYPE_LABEL)
+      ->setName(pht('Build Plans'));
 
-    $viewer = $this->getRequest()->getUser();
+    $items[] = id(new PHUIListItemView())
+      ->setType(PHUIListItemView::TYPE_LINK)
+      ->setName(pht('Manage Build Plans'))
+      ->setHref($this->getApplicationURI('plan/'));
 
-    $list = new PHUIObjectItemListView();
-    foreach ($buildables as $buildable) {
-      $id = $buildable->getID();
-
-      $item = id(new PHUIObjectItemView())
-        ->setHeader(pht('Buildable %d', $buildable->getID()));
-      $item->addAttribute($buildable->getBuildableHandle()->getFullName());
-
-      if ($id) {
-        $item->setHref("/B{$id}");
-      }
-
-      $list->addItem($item);
-
-      // TODO: This is proof-of-concept for getting meaningful status
-      // information into this list, and should get an improvement pass
-      // once we're a little farther along.
-
-      $all_pass = true;
-      $any_fail = false;
-      foreach ($buildable->getBuilds() as $build) {
-        if ($build->getBuildStatus() != HarbormasterBuild::STATUS_PASSED) {
-          $all_pass = false;
-        }
-        if ($build->getBuildStatus() == HarbormasterBuild::STATUS_FAILED ||
-            $build->getBuildStatus() == HarbormasterBuild::STATUS_ERROR) {
-          $any_fail = true;
-        }
-      }
-
-      if ($any_fail) {
-        $item->setBarColor('red');
-      } else if ($all_pass) {
-        $item->setBarColor('green');
-      }
-    }
-
-    return $list;
-  }
-
-  public function buildSideNavView($for_app = false) {
-    $user = $this->getRequest()->getUser();
-
-    $nav = new AphrontSideNavFilterView();
-    $nav->setBaseURI(new PhutilURI($this->getApplicationURI()));
-
-    id(new HarbormasterBuildableSearchEngine())
-      ->setViewer($user)
-      ->addNavigationItems($nav->getMenu());
-
-    if ($for_app) {
-      $nav->addFilter('new/', pht('New Build Plan'));
-    }
-
-    $nav->addLabel('Utilities');
-    $nav->addFilter('buildable/edit/', pht('New Manual Build'));
-    $nav->addFilter('plan/', pht('Manage Build Plans'));
-
-    $nav->selectFilter(null);
-
-    return $nav;
-  }
-
-  public function buildApplicationMenu() {
-    return $this->buildSideNavView(true)->getMenu();
+    return id(new HarbormasterBuildableSearchEngine())
+      ->setController($this)
+      ->setNavigationItems($items)
+      ->buildResponse();
   }
 
 }

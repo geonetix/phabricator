@@ -1,13 +1,8 @@
 <?php
 
-final class PhabricatorPolicyPHIDTypePolicy
-  extends PhabricatorPHIDType {
+final class PhabricatorPolicyPHIDTypePolicy extends PhabricatorPHIDType {
 
   const TYPECONST = 'PLCY';
-
-  public function getTypeConstant() {
-    return self::TYPECONST;
-  }
 
   public function getTypeName() {
     return pht('Policy');
@@ -15,6 +10,10 @@ final class PhabricatorPolicyPHIDTypePolicy
 
   public function newObject() {
     return new PhabricatorPolicy();
+  }
+
+  public function getPHIDTypeApplicationClass() {
+    return 'PhabricatorPolicyApplication';
   }
 
   protected function buildQueryForObjects(
@@ -36,10 +35,6 @@ final class PhabricatorPolicyPHIDTypePolicy
       $handle->setName($policy->getName());
       $handle->setURI($policy->getHref());
     }
-  }
-
-  public function canLoadNamedObject($name) {
-    return false;
   }
 
 }

@@ -18,6 +18,10 @@ final class PhabricatorStandardCustomFieldInt
     return $indexes;
   }
 
+  public function buildOrderIndex() {
+    return $this->newNumericIndex(0);
+  }
+
   public function getValueForStorage() {
     $value = $this->getFieldValue();
     if (strlen($value)) {
@@ -58,8 +62,7 @@ final class PhabricatorStandardCustomFieldInt
   public function appendToApplicationSearchForm(
     PhabricatorApplicationSearchEngine $engine,
     AphrontFormView $form,
-    $value,
-    array $handles) {
+    $value) {
 
     $form->appendChild(
       id(new AphrontFormTextControl())
@@ -93,6 +96,36 @@ final class PhabricatorStandardCustomFieldInt
     }
 
     return $errors;
+  }
+
+  public function getApplicationTransactionHasEffect(
+    PhabricatorApplicationTransaction $xaction) {
+
+    $old = $xaction->getOldValue();
+    $new = $xaction->getNewValue();
+    if (!strlen($old) && strlen($new)) {
+      return true;
+    } else if (strlen($old) && !strlen($new)) {
+      return true;
+    } else {
+      return ((int)$old !== (int)$new);
+    }
+  }
+
+  protected function getHTTPParameterType() {
+    return new AphrontIntHTTPParameterType();
+  }
+
+  protected function newConduitSearchParameterType() {
+    return new ConduitIntParameterType();
+  }
+
+  protected function newConduitEditParameterType() {
+    return new ConduitIntParameterType();
+  }
+
+  protected function newExportFieldType() {
+    return new PhabricatorIntExportField();
   }
 
 }

@@ -1,22 +1,46 @@
 <?php
 
 /**
- * Run builds
+ * Start a build.
  */
-final class HarbormasterBuildWorker extends PhabricatorWorker {
+final class HarbormasterBuildWorker extends HarbormasterWorker {
 
-  public function getRequiredLeaseTime() {
-    return 60 * 60 * 24;
+  public function renderForDisplay(PhabricatorUser $viewer) {
+    try {
+      $build = $this->loadBuild();
+    } catch (Exception $ex) {
+      return null;
+    }
+
+    return $viewer->renderHandle($build->getPHID());
   }
 
-  public function doWork() {
+  protected function doWork() {
+    $viewer = $this->getViewer();
+
+    $engine = id(new HarbormasterBuildEngine())
+      ->setViewer($viewer);
+
+    $data = $this->getTaskData();
+    $build_id = idx($data, 'buildID');
+
+    if ($build_id) {
+      $build = $this->loadBuild();
+      $engine->setBuild($build);
+      $engine->continueBuild();
+    } else {
+      $buildable = $this->loadBuildable();
+      $engine->updateBuildable($buildable);
+    }
+  }
+
+  private function loadBuild() {
     $data = $this->getTaskData();
     $id = idx($data, 'buildID');
 
-    // Get a reference to the build.
+    $viewer = $this->getViewer();
     $build = id(new HarbormasterBuildQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
-      ->withBuildStatuses(array(HarbormasterBuild::STATUS_PENDING))
+      ->setViewer($viewer)
       ->withIDs(array($id))
       ->executeOne();
     if (!$build) {
@@ -24,61 +48,24 @@ final class HarbormasterBuildWorker extends PhabricatorWorker {
         pht('Invalid build ID "%s".', $id));
     }
 
-    // It's possible for the user to request cancellation before
-    // a worker picks up a build.  We check to see if the build
-    // is already cancelled, and return if it is.
-    if ($build->checkForCancellation()) {
-      return;
+    return $build;
+  }
+
+  private function loadBuildable() {
+    $data = $this->getTaskData();
+    $phid = idx($data, 'buildablePHID');
+
+    $viewer = $this->getViewer();
+    $buildable = id(new HarbormasterBuildableQuery())
+      ->setViewer($viewer)
+      ->withPHIDs(array($phid))
+      ->executeOne();
+    if (!$buildable) {
+      throw new PhabricatorWorkerPermanentFailureException(
+        pht('Invalid buildable PHID "%s".', $phid));
     }
 
-    try {
-      $build->setBuildStatus(HarbormasterBuild::STATUS_BUILDING);
-      $build->save();
-
-      $buildable = $build->getBuildable();
-      $plan = $build->getBuildPlan();
-
-      $steps = id(new HarbormasterBuildStepQuery())
-        ->setViewer(PhabricatorUser::getOmnipotentUser())
-        ->withBuildPlanPHIDs(array($plan->getPHID()))
-        ->execute();
-
-      // Perform the build.
-      foreach ($steps as $step) {
-        $implementation = $step->getStepImplementation();
-        if (!$implementation->validateSettings()) {
-          $build->setBuildStatus(HarbormasterBuild::STATUS_ERROR);
-          break;
-        }
-        $implementation->execute($build, $step);
-        if ($build->getBuildStatus() !== HarbormasterBuild::STATUS_BUILDING) {
-          break;
-        }
-        if ($build->checkForCancellation()) {
-          break;
-        }
-      }
-
-      // Check to see if the user requested cancellation.  If they did and
-      // we get to here, they might have either cancelled too late, or the
-      // step isn't cancellation aware.  In either case we ignore the result
-      // and move to a cancelled state.
-      $build->checkForCancellation();
-
-      // If we get to here, then the build has finished.  Set it to passed
-      // if no build step explicitly set the status.
-      if ($build->getBuildStatus() === HarbormasterBuild::STATUS_BUILDING) {
-        $build->setBuildStatus(HarbormasterBuild::STATUS_PASSED);
-      }
-      $build->save();
-    } catch (Exception $e) {
-      // If any exception is raised, the build is marked as a failure and
-      // the exception is re-thrown (this ensures we don't leave builds
-      // in an inconsistent state).
-      $build->setBuildStatus(HarbormasterBuild::STATUS_ERROR);
-      $build->save();
-      throw $e;
-    }
+    return $buildable;
   }
 
 }

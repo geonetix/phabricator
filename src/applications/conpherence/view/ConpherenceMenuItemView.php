@@ -1,8 +1,5 @@
 <?php
 
-/**
- * @group conpherence
- */
 final class ConpherenceMenuItemView extends AphrontTagView {
 
   private $title;
@@ -66,9 +63,11 @@ final class ConpherenceMenuItemView extends AphrontTagView {
   }
 
   protected function getTagAttributes() {
-    $classes = array('conpherence-menu-item-view');
+    $classes = array();
+    $classes[] = 'conpherence-menu-item-view';
+    $classes[] = 'phui-list-item-href';
     return array(
-      'class' => $classes,
+      'class' => implode(' ', $classes),
       'href' => $this->href,
     );
   }
@@ -80,7 +79,7 @@ final class ConpherenceMenuItemView extends AphrontTagView {
         'span',
         array(
           'class' => 'conpherence-menu-item-image',
-          'style' => 'background-image: url('.$this->imageURI.');'
+          'style' => 'background-image: url('.$this->imageURI.');',
         ),
         '');
     }
@@ -102,21 +101,12 @@ final class ConpherenceMenuItemView extends AphrontTagView {
         ),
         $this->subtitle);
     }
-    $epoch = null;
-    if ($this->epoch) {
-      $epoch = phutil_tag(
-        'span',
-        array(
-          'class' => 'conpherence-menu-item-date',
-        ),
-        phabricator_relative_date($this->epoch, $this->user));
-    }
     $unread_count = null;
     if ($this->unreadCount) {
       $unread_count = phutil_tag(
         'span',
         array(
-          'class' => 'conpherence-menu-item-unread-count'
+          'class' => 'conpherence-menu-item-unread-count',
         ),
         (int)$this->unreadCount);
     }
@@ -125,8 +115,8 @@ final class ConpherenceMenuItemView extends AphrontTagView {
       $image,
       $title,
       $subtitle,
-      $epoch,
       $unread_count,
     );
   }
+
 }

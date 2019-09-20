@@ -1,161 +1,270 @@
 <?php
 
 final class HarbormasterStepEditController
-  extends HarbormasterController {
+  extends HarbormasterPlanController {
 
-  private $id;
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
+    $id = $request->getURIData('id');
 
-  public function willProcessRequest(array $data) {
-    $this->id = idx($data, 'id');
-  }
+    if ($id) {
+      $step = id(new HarbormasterBuildStepQuery())
+        ->setViewer($viewer)
+        ->withIDs(array($id))
+        ->requireCapabilities(
+          array(
+            PhabricatorPolicyCapability::CAN_VIEW,
+            PhabricatorPolicyCapability::CAN_EDIT,
+          ))
+        ->executeOne();
+      if (!$step) {
+        return new Aphront404Response();
+      }
+      $plan = $step->getBuildPlan();
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+      $is_new = false;
+    } else {
+      $plan_id = $request->getURIData('plan');
+      $class = $request->getURIData('class');
 
-    $this->requireApplicationCapability(
-      HarbormasterCapabilityManagePlans::CAPABILITY);
+      $plan = id(new HarbormasterBuildPlanQuery())
+        ->setViewer($viewer)
+        ->withIDs(array($plan_id))
+        ->requireCapabilities(
+          array(
+            PhabricatorPolicyCapability::CAN_VIEW,
+            PhabricatorPolicyCapability::CAN_EDIT,
+          ))
+        ->executeOne();
+      if (!$plan) {
+        return new Aphront404Response();
+      }
 
-    $step = id(new HarbormasterBuildStepQuery())
-      ->setViewer($viewer)
-      ->withIDs(array($this->id))
-      ->executeOne();
-    if (!$step) {
-      return new Aphront404Response();
+      $impl = HarbormasterBuildStepImplementation::getImplementation($class);
+      if (!$impl) {
+        return new Aphront404Response();
+      }
+
+      if ($impl->shouldRequireAutotargeting()) {
+        // No manual creation of autotarget steps.
+        return new Aphront404Response();
+      }
+
+      $step = HarbormasterBuildStep::initializeNewStep($viewer)
+        ->setBuildPlanPHID($plan->getPHID())
+        ->setClassName($class);
+
+      $is_new = true;
     }
 
-    $plan = id(new HarbormasterBuildPlanQuery())
-      ->setViewer($viewer)
-      ->withPHIDs(array($step->getBuildPlanPHID()))
-      ->executeOne();
-    if (!$plan) {
-      return new Aphront404Response();
+    $plan_uri = $this->getApplicationURI('plan/'.$plan->getID().'/');
+
+    if ($is_new) {
+      $cancel_uri = $plan_uri;
+    } else {
+      $cancel_uri = $this->getApplicationURI('step/view/'.$step->getID().'/');
     }
 
     $implementation = $step->getStepImplementation();
-    $implementation->validateSettingDefinitions();
-    $settings = $implementation->getSettings();
+
+    $field_list = PhabricatorCustomField::getObjectFields(
+      $step,
+      PhabricatorCustomField::ROLE_EDIT);
+    $field_list
+      ->setViewer($viewer)
+      ->readFieldsFromStorage($step);
+
+    $e_name = true;
+    $v_name = $step->getName();
+    $e_description = null;
+    $v_description = $step->getDescription();
+    $e_depends_on = null;
+    $v_depends_on = $step->getDetail('dependsOn', array());
 
     $errors = array();
+    $validation_exception = null;
     if ($request->isFormPost()) {
-      foreach ($implementation->getSettingDefinitions() as $name => $opt) {
-        $readable_name = $this->getReadableName($name, $opt);
-        $value = $this->getValueFromRequest($request, $name, $opt['type']);
+      $e_name = null;
+      $v_name = $request->getStr('name');
+      $v_description = $request->getStr('description');
+      $v_depends_on = $request->getArr('dependsOn');
 
-        // TODO: This won't catch any validation issues unless the field
-        // is missing completely.  How should we check if the user is
-        // required to enter an integer?
-        if ($value === null) {
-          $errors[] = $readable_name.' is not valid.';
-        } else {
-          $step->setDetail($name, $value);
-        }
+      $xactions = $field_list->buildFieldTransactionsFromRequest(
+        new HarbormasterBuildStepTransaction(),
+        $request);
+
+      $editor = id(new HarbormasterBuildStepEditor())
+        ->setActor($viewer)
+        ->setContinueOnNoEffect(true)
+        ->setContentSourceFromRequest($request);
+
+      $name_xaction = id(new HarbormasterBuildStepTransaction())
+        ->setTransactionType(HarbormasterBuildStepTransaction::TYPE_NAME)
+        ->setNewValue($v_name);
+      array_unshift($xactions, $name_xaction);
+
+      $depends_on_xaction = id(new HarbormasterBuildStepTransaction())
+        ->setTransactionType(
+          HarbormasterBuildStepTransaction::TYPE_DEPENDS_ON)
+        ->setNewValue($v_depends_on);
+      array_unshift($xactions, $depends_on_xaction);
+
+      $description_xaction = id(new HarbormasterBuildStepTransaction())
+        ->setTransactionType(
+          HarbormasterBuildStepTransaction::TYPE_DESCRIPTION)
+        ->setNewValue($v_description);
+      array_unshift($xactions, $description_xaction);
+
+      if ($is_new) {
+        // When creating a new step, make sure we have a create transaction
+        // so we'll apply the transactions even if the step has no
+        // configurable options.
+        $create_xaction = id(new HarbormasterBuildStepTransaction())
+          ->setTransactionType(HarbormasterBuildStepTransaction::TYPE_CREATE);
+        array_unshift($xactions, $create_xaction);
       }
 
-      if (count($errors) === 0) {
-        $step->save();
+      try {
+        $editor->applyTransactions($step, $xactions);
 
-        return id(new AphrontRedirectResponse())
-          ->setURI($this->getApplicationURI('plan/'.$plan->getID().'/'));
+        $step_uri = $this->getApplicationURI('step/view/'.$step->getID().'/');
+
+        return id(new AphrontRedirectResponse())->setURI($step_uri);
+      } catch (PhabricatorApplicationTransactionValidationException $ex) {
+        $validation_exception = $ex;
       }
     }
 
     $form = id(new AphrontFormView())
       ->setUser($viewer);
 
-    $instructions = $implementation->getSettingRemarkupInstructions();
-    if ($instructions !== null) {
+    $instructions = $implementation->getEditInstructions();
+    if (strlen($instructions)) {
       $form->appendRemarkupInstructions($instructions);
     }
 
-    // We need to render out all of the fields for the settings that
-    // the implementation has.
-    foreach ($implementation->getSettingDefinitions() as $name => $opt) {
-      if ($request->isFormPost()) {
-        $value = $this->getValueFromRequest($request, $name, $opt['type']);
-      } else {
-        $value = $settings[$name];
-      }
-
-      switch ($opt['type']) {
-        case BuildStepImplementation::SETTING_TYPE_STRING:
-        case BuildStepImplementation::SETTING_TYPE_INTEGER:
-          $control = id(new AphrontFormTextControl())
-            ->setLabel($this->getReadableName($name, $opt))
-            ->setName($name)
-            ->setValue($value);
-          break;
-        case BuildStepImplementation::SETTING_TYPE_BOOLEAN:
-          $control = id(new AphrontFormCheckboxControl())
-            ->setLabel($this->getReadableName($name, $opt))
-            ->setName($name)
-            ->setValue($value);
-          break;
-        default:
-          throw new Exception("Unable to render field with unknown type.");
-      }
-
-      if (isset($opt['description'])) {
-        $control->setCaption($opt['description']);
-      }
-
-      $form->appendChild($control);
-    }
-
     $form->appendChild(
-      id(new AphrontFormSubmitControl())
-        ->setValue(pht('Save Step Configuration'))
-        ->addCancelButton(
-          $this->getApplicationURI('plan/'.$plan->getID().'/')));
+      id(new AphrontFormTextControl())
+        ->setName('name')
+        ->setLabel(pht('Name'))
+        ->setError($e_name)
+        ->setValue($v_name));
 
-    $box = id(new PHUIObjectBoxView())
-      ->setHeaderText('Edit Step: '.$implementation->getName())
-      ->setValidationException(null)
-      ->setForm($form);
+    $form->appendChild(id(new AphrontFormDividerControl()));
+
+    $field_list->appendFieldsToForm($form);
+
+    $form->appendChild(id(new AphrontFormDividerControl()));
+
+    $form
+      ->appendControl(
+        id(new AphrontFormTokenizerControl())
+          ->setDatasource(id(new HarbormasterBuildDependencyDatasource())
+            ->setParameters(array(
+              'planPHID' => $plan->getPHID(),
+              'stepPHID' => $is_new ? null : $step->getPHID(),
+            )))
+          ->setName('dependsOn')
+          ->setLabel(pht('Depends On'))
+          ->setError($e_depends_on)
+          ->setValue($v_depends_on));
+
+    $form
+      ->appendChild(
+        id(new PhabricatorRemarkupControl())
+          ->setUser($viewer)
+          ->setName('description')
+          ->setLabel(pht('Description'))
+          ->setError($e_description)
+          ->setValue($v_description));
 
     $crumbs = $this->buildApplicationCrumbs();
     $id = $plan->getID();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht("Plan %d", $id))
-        ->setHref($this->getApplicationURI("plan/{$id}/")));
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('Edit Step')));
+    $crumbs->addTextCrumb(pht('Plan %d', $id), $plan_uri);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
+    if ($is_new) {
+      $submit = pht('Create Build Step');
+      $header = id(new PHUIHeaderView())
+        ->setHeader(pht('New Step: %s', $implementation->getName()))
+        ->setHeaderIcon('fa-plus-square');
+      $crumbs->addTextCrumb(pht('Add Step'));
+    } else {
+      $submit = pht('Save Build Step');
+      $header = id(new PHUIHeaderView())
+        ->setHeader(pht('Edit Step: %s', $implementation->getName()))
+        ->setHeaderIcon('fa-pencil');
+      $crumbs->addTextCrumb(pht('Step %d', $step->getID()), $cancel_uri);
+      $crumbs->addTextCrumb(pht('Edit Step'));
+    }
+    $crumbs->setBorder(true);
+
+    $form->appendChild(
+      id(new AphrontFormSubmitControl())
+        ->setValue($submit)
+        ->addCancelButton($cancel_uri));
+
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Step'))
+      ->setValidationException($validation_exception)
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->setForm($form);
+
+    $variables = $this->renderBuildVariablesTable();
+
+    if ($is_new) {
+      $xaction_view = null;
+      $timeline = null;
+    } else {
+      $timeline = $this->buildTransactionTimeline(
+        $step,
+        new HarbormasterBuildStepTransactionQuery());
+      $timeline->setShouldTerminate(true);
+    }
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter(array(
         $box,
-      ),
-      array(
-        'title' => $implementation->getName(),
-        'device' => true,
+        $variables,
+        $timeline,
       ));
+
+    return $this->newPage()
+      ->setTitle($implementation->getName())
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
+
   }
 
-  public function getReadableName($name, $opt) {
-    $readable_name = $name;
-    if (isset($opt['name'])) {
-      $readable_name = $opt['name'];
-    }
-    return $readable_name;
-  }
+  private function renderBuildVariablesTable() {
+    $viewer = $this->getRequest()->getUser();
 
-  public function getValueFromRequest(AphrontRequest $request, $name, $type) {
-    switch ($type) {
-      case BuildStepImplementation::SETTING_TYPE_STRING:
-        return $request->getStr($name);
-        break;
-      case BuildStepImplementation::SETTING_TYPE_INTEGER:
-        return $request->getInt($name);
-        break;
-      case BuildStepImplementation::SETTING_TYPE_BOOLEAN:
-        return $request->getBool($name);
-        break;
-      default:
-        throw new Exception("Unsupported setting type '".$type."'.");
+    $variables = HarbormasterBuild::getAvailableBuildVariables();
+    ksort($variables);
+
+    $rows = array();
+    $rows[] = pht(
+      'The following variables can be used in most fields. '.
+      'To reference a variable, use `%s` in a field.',
+      '${name}');
+    $rows[] = sprintf(
+      '| %s | %s |',
+      pht('Variable'),
+      pht('Description'));
+    $rows[] = '|---|---|';
+    foreach ($variables as $name => $description) {
+      $rows[] = '| `'.$name.'` | '.$description.' |';
     }
+    $rows = implode("\n", $rows);
+
+    $form = id(new AphrontFormView())
+      ->setUser($viewer)
+      ->appendRemarkupInstructions($rows);
+
+    return id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Build Variables'))
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->appendChild($form);
   }
 
 }

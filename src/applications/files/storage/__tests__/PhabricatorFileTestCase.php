@@ -1,14 +1,252 @@
 <?php
 
-/**
- * @group file
- */
 final class PhabricatorFileTestCase extends PhabricatorTestCase {
 
-  public function getPhabricatorTestCaseConfiguration() {
+  protected function getPhabricatorTestCaseConfiguration() {
     return array(
       self::PHABRICATOR_TESTCONFIG_BUILD_STORAGE_FIXTURES => true,
     );
+  }
+
+  public function testFileDirectScramble() {
+    // Changes to a file's view policy should scramble the file secret.
+
+    $engine = new PhabricatorTestStorageEngine();
+    $data = Filesystem::readRandomCharacters(64);
+
+    $author = $this->generateNewTestUser();
+
+    $params = array(
+      'name' => 'test.dat',
+      'viewPolicy' => PhabricatorPolicies::POLICY_USER,
+      'authorPHID' => $author->getPHID(),
+      'storageEngines' => array(
+        $engine,
+      ),
+    );
+
+    $file = PhabricatorFile::newFromFileData($data, $params);
+
+    $secret1 = $file->getSecretKey();
+
+    // First, change the name: this should not scramble the secret.
+    $xactions = array();
+    $xactions[] = id(new PhabricatorFileTransaction())
+      ->setTransactionType(PhabricatorFileNameTransaction::TRANSACTIONTYPE)
+      ->setNewValue('test.dat2');
+
+    $engine = id(new PhabricatorFileEditor())
+      ->setActor($author)
+      ->setContentSource($this->newContentSource())
+      ->applyTransactions($file, $xactions);
+
+    $file = $file->reload();
+
+    $secret2 = $file->getSecretKey();
+
+    $this->assertEqual(
+      $secret1,
+      $secret2,
+      pht('No secret scramble on non-policy edit.'));
+
+    // Now, change the view policy. This should scramble the secret.
+    $xactions = array();
+    $xactions[] = id(new PhabricatorFileTransaction())
+      ->setTransactionType(PhabricatorTransactions::TYPE_VIEW_POLICY)
+      ->setNewValue($author->getPHID());
+
+    $engine = id(new PhabricatorFileEditor())
+      ->setActor($author)
+      ->setContentSource($this->newContentSource())
+      ->applyTransactions($file, $xactions);
+
+    $file = $file->reload();
+    $secret3 = $file->getSecretKey();
+
+    $this->assertTrue(
+      ($secret1 !== $secret3),
+      pht('Changing file view policy should scramble secret.'));
+  }
+
+  public function testFileIndirectScramble() {
+    // When a file is attached to an object like a task and the task view
+    // policy changes, the file secret should be scrambled. This invalidates
+    // old URIs if tasks get locked down.
+
+    $engine = new PhabricatorTestStorageEngine();
+    $data = Filesystem::readRandomCharacters(64);
+
+    $author = $this->generateNewTestUser();
+
+    $params = array(
+      'name' => 'test.dat',
+      'viewPolicy' => $author->getPHID(),
+      'authorPHID' => $author->getPHID(),
+      'storageEngines' => array(
+        $engine,
+      ),
+    );
+
+    $file = PhabricatorFile::newFromFileData($data, $params);
+    $secret1 = $file->getSecretKey();
+
+    $task = ManiphestTask::initializeNewTask($author);
+
+    $xactions = array();
+    $xactions[] = id(new ManiphestTransaction())
+      ->setTransactionType(ManiphestTaskTitleTransaction::TRANSACTIONTYPE)
+      ->setNewValue(pht('File Scramble Test Task'));
+
+    $xactions[] = id(new ManiphestTransaction())
+      ->setTransactionType(
+        ManiphestTaskDescriptionTransaction::TRANSACTIONTYPE)
+      ->setNewValue('{'.$file->getMonogram().'}');
+
+    id(new ManiphestTransactionEditor())
+      ->setActor($author)
+      ->setContentSource($this->newContentSource())
+      ->applyTransactions($task, $xactions);
+
+    $file = $file->reload();
+    $secret2 = $file->getSecretKey();
+
+    $this->assertEqual(
+      $secret1,
+      $secret2,
+      pht(
+        'File policy should not scramble when attached to '.
+        'newly created object.'));
+
+    $xactions = array();
+    $xactions[] = id(new ManiphestTransaction())
+      ->setTransactionType(PhabricatorTransactions::TYPE_VIEW_POLICY)
+      ->setNewValue($author->getPHID());
+
+    id(new ManiphestTransactionEditor())
+      ->setActor($author)
+      ->setContentSource($this->newContentSource())
+      ->applyTransactions($task, $xactions);
+
+    $file = $file->reload();
+    $secret3 = $file->getSecretKey();
+
+    $this->assertTrue(
+      ($secret1 !== $secret3),
+      pht('Changing attached object view policy should scramble secret.'));
+  }
+
+
+  public function testFileVisibility() {
+    $engine = new PhabricatorTestStorageEngine();
+    $data = Filesystem::readRandomCharacters(64);
+
+    $author = $this->generateNewTestUser();
+    $viewer = $this->generateNewTestUser();
+    $users = array($author, $viewer);
+
+    $params = array(
+      'name' => 'test.dat',
+      'viewPolicy' => PhabricatorPolicies::POLICY_NOONE,
+      'authorPHID' => $author->getPHID(),
+      'storageEngines' => array(
+        $engine,
+      ),
+    );
+
+    $file = PhabricatorFile::newFromFileData($data, $params);
+    $filter = new PhabricatorPolicyFilter();
+
+    // Test bare file policies.
+    $this->assertEqual(
+      array(
+        true,
+        false,
+      ),
+      $this->canViewFile($users, $file),
+      pht('File Visibility'));
+
+    // Create an object and test object policies.
+
+    $object = ManiphestTask::initializeNewTask($author);
+    $object->setViewPolicy(PhabricatorPolicies::getMostOpenPolicy());
+    $object->save();
+
+    $this->assertTrue(
+      $filter->hasCapability(
+        $author,
+        $object,
+        PhabricatorPolicyCapability::CAN_VIEW),
+      pht('Object Visible to Author'));
+
+    $this->assertTrue(
+      $filter->hasCapability(
+        $viewer,
+        $object,
+        PhabricatorPolicyCapability::CAN_VIEW),
+      pht('Object Visible to Others'));
+
+    // Attach the file to the object and test that the association opens a
+    // policy exception for the non-author viewer.
+
+    $file->attachToObject($object->getPHID());
+
+    // Test the attached file's visibility.
+    $this->assertEqual(
+      array(
+        true,
+        true,
+      ),
+      $this->canViewFile($users, $file),
+      pht('Attached File Visibility'));
+
+    // Create a "thumbnail" of the original file.
+    $params = array(
+      'name' => 'test.thumb.dat',
+      'viewPolicy' => PhabricatorPolicies::POLICY_NOONE,
+      'storageEngines' => array(
+        $engine,
+      ),
+    );
+
+    $xform = PhabricatorFile::newFromFileData($data, $params);
+
+    id(new PhabricatorTransformedFile())
+      ->setOriginalPHID($file->getPHID())
+      ->setTransform('test-thumb')
+      ->setTransformedPHID($xform->getPHID())
+      ->save();
+
+    // Test the thumbnail's visibility.
+    $this->assertEqual(
+      array(
+        true,
+        true,
+      ),
+      $this->canViewFile($users, $xform),
+      pht('Attached Thumbnail Visibility'));
+
+    // Detach the object and make sure it affects the thumbnail.
+    $file->detachFromObject($object->getPHID());
+
+    // Test the detached thumbnail's visibility.
+    $this->assertEqual(
+      array(
+        true,
+        false,
+      ),
+      $this->canViewFile($users, $xform),
+      pht('Detached Thumbnail Visibility'));
+  }
+
+  private function canViewFile(array $users, PhabricatorFile $file) {
+    $results = array();
+    foreach ($users as $user) {
+      $results[] = (bool)id(new PhabricatorFileQuery())
+        ->setViewer($user)
+        ->withPHIDs(array($file->getPHID()))
+        ->execute();
+    }
+    return $results;
   }
 
   public function testFileStorageReadWrite() {
@@ -51,19 +289,23 @@ final class PhabricatorFileTestCase extends PhabricatorTestCase {
 
     $second_file = PhabricatorFile::newFromFileData($other_data, $params);
 
-    // Test that the the second file uses  different storage handle from
+    // Test that the second file uses  different storage handle from
     // the first file.
     $first_handle = $first_file->getStorageHandle();
     $second_handle = $second_file->getStorageHandle();
 
-    $this->assertEqual(true, ($first_handle != $second_handle));
+    $this->assertTrue($first_handle != $second_handle);
   }
-
 
   public function testFileStorageUploadSameFile() {
     $engine = new PhabricatorTestStorageEngine();
 
     $data = Filesystem::readRandomCharacters(64);
+
+    $hash = PhabricatorFile::hashFileContent($data);
+    if ($hash === null) {
+      $this->assertSkipped(pht('File content hashing is not available.'));
+    }
 
     $params = array(
       'name' => 'test.dat',
@@ -76,7 +318,7 @@ final class PhabricatorFileTestCase extends PhabricatorTestCase {
 
     $second_file = PhabricatorFile::newFromFileData($data, $params);
 
-    // Test that the the second file uses the same storage handle as
+    // Test that the second file uses the same storage handle as
     // the first file.
     $handle = $first_file->getStorageHandle();
     $second_handle = $second_file->getStorageHandle();
@@ -107,7 +349,7 @@ final class PhabricatorFileTestCase extends PhabricatorTestCase {
       $caught = $ex;
     }
 
-    $this->assertEqual(true, $caught instanceof Exception);
+    $this->assertTrue($caught instanceof Exception);
   }
 
   public function testFileStorageDeleteSharedHandle() {
@@ -134,11 +376,11 @@ final class PhabricatorFileTestCase extends PhabricatorTestCase {
 
     $data = Filesystem::readRandomCharacters(64);
 
-    $ttl = (time() + 60 * 60 * 24);
+    $ttl = (PhabricatorTime::getNow() + phutil_units('24 hours in seconds'));
 
     $params = array(
       'name' => 'test.dat',
-      'ttl'  => ($ttl),
+      'ttl.absolute' => $ttl,
       'storageEngines' => array(
         $engine,
       ),

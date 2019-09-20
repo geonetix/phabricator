@@ -1,86 +1,173 @@
 <?php
 
-final class DrydockLogQuery extends PhabricatorOffsetPagedQuery {
+final class DrydockLogQuery extends DrydockQuery {
 
-  const ORDER_EPOCH   = 'order-epoch';
-  const ORDER_ID      = 'order-id';
+  private $ids;
+  private $blueprintPHIDs;
+  private $resourcePHIDs;
+  private $leasePHIDs;
+  private $operationPHIDs;
 
-  private $resourceIDs;
-  private $leaseIDs;
-  private $afterID;
-  private $order = self::ORDER_EPOCH;
-
-  public function withResourceIDs(array $ids) {
-    $this->resourceIDs = $ids;
+  public function withIDs(array $ids) {
+    $this->ids = $ids;
     return $this;
   }
 
-  public function withLeaseIDs(array $ids) {
-    $this->leaseIDs = $ids;
+  public function withBlueprintPHIDs(array $phids) {
+    $this->blueprintPHIDs = $phids;
     return $this;
   }
 
-  public function setOrder($order) {
-    $this->order = $order;
+  public function withResourcePHIDs(array $phids) {
+    $this->resourcePHIDs = $phids;
     return $this;
   }
 
-  public function withAfterID($id) {
-    $this->afterID = $id;
+  public function withLeasePHIDs(array $phids) {
+    $this->leasePHIDs = $phids;
     return $this;
   }
 
-  public function execute() {
-    $table = new DrydockLog();
-    $conn_r = $table->establishConnection('r');
-
-    $data = queryfx_all(
-      $conn_r,
-      'SELECT log.* FROM %T log %Q %Q %Q',
-      $table->getTableName(),
-      $this->buildWhereClause($conn_r),
-      $this->buildOrderClause($conn_r),
-      $this->buildLimitClause($conn_r));
-
-    return $table->loadAllFromArray($data);
+  public function withOperationPHIDs(array $phids) {
+    $this->operationPHIDs = $phids;
+    return $this;
   }
 
-  private function buildWhereClause(AphrontDatabaseConnection $conn_r) {
-    $where = array();
+  public function newResultObject() {
+    return new DrydockLog();
+  }
 
-    if ($this->resourceIDs) {
+  protected function loadPage() {
+    return $this->loadStandardPage($this->newResultObject());
+  }
+
+  protected function didFilterPage(array $logs) {
+    $blueprint_phids = array_filter(mpull($logs, 'getBlueprintPHID'));
+    if ($blueprint_phids) {
+      $blueprints = id(new DrydockBlueprintQuery())
+        ->setParentQuery($this)
+        ->setViewer($this->getViewer())
+        ->withPHIDs($blueprint_phids)
+        ->execute();
+      $blueprints = mpull($blueprints, null, 'getPHID');
+    } else {
+      $blueprints = array();
+    }
+
+    foreach ($logs as $key => $log) {
+      $blueprint = null;
+      $blueprint_phid = $log->getBlueprintPHID();
+      if ($blueprint_phid) {
+        $blueprint = idx($blueprints, $blueprint_phid);
+      }
+      $log->attachBlueprint($blueprint);
+    }
+
+    $resource_phids = array_filter(mpull($logs, 'getResourcePHID'));
+    if ($resource_phids) {
+      $resources = id(new DrydockResourceQuery())
+        ->setParentQuery($this)
+        ->setViewer($this->getViewer())
+        ->withPHIDs($resource_phids)
+        ->execute();
+      $resources = mpull($resources, null, 'getPHID');
+    } else {
+      $resources = array();
+    }
+
+    foreach ($logs as $key => $log) {
+      $resource = null;
+      $resource_phid = $log->getResourcePHID();
+      if ($resource_phid) {
+        $resource = idx($resources, $resource_phid);
+      }
+      $log->attachResource($resource);
+    }
+
+    $lease_phids = array_filter(mpull($logs, 'getLeasePHID'));
+    if ($lease_phids) {
+      $leases = id(new DrydockLeaseQuery())
+        ->setParentQuery($this)
+        ->setViewer($this->getViewer())
+        ->withPHIDs($lease_phids)
+        ->execute();
+      $leases = mpull($leases, null, 'getPHID');
+    } else {
+      $leases = array();
+    }
+
+    foreach ($logs as $key => $log) {
+      $lease = null;
+      $lease_phid = $log->getLeasePHID();
+      if ($lease_phid) {
+        $lease = idx($leases, $lease_phid);
+      }
+      $log->attachLease($lease);
+    }
+
+    $operation_phids = array_filter(mpull($logs, 'getOperationPHID'));
+    if ($operation_phids) {
+      $operations = id(new DrydockRepositoryOperationQuery())
+        ->setParentQuery($this)
+        ->setViewer($this->getViewer())
+        ->withPHIDs($operation_phids)
+        ->execute();
+      $operations = mpull($operations, null, 'getPHID');
+    } else {
+      $operations = array();
+    }
+
+    foreach ($logs as $key => $log) {
+      $operation = null;
+      $operation_phid = $log->getOperationPHID();
+      if ($operation_phid) {
+        $operation = idx($operations, $operation_phid);
+      }
+      $log->attachOperation($operation);
+    }
+
+    return $logs;
+  }
+
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
+
+    if ($this->ids !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'resourceID IN (%Ld)',
-        $this->resourceIDs);
+        $conn,
+        'id IN (%Ls)',
+        $this->ids);
     }
 
-    if ($this->leaseIDs) {
+    if ($this->blueprintPHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'leaseID IN (%Ld)',
-        $this->leaseIDs);
+        $conn,
+        'blueprintPHID IN (%Ls)',
+        $this->blueprintPHIDs);
     }
 
-    if ($this->afterID) {
+    if ($this->resourcePHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'id > %d',
-        $this->afterID);
+        $conn,
+        'resourcePHID IN (%Ls)',
+        $this->resourcePHIDs);
     }
 
-    return $this->formatWhereClause($where);
-  }
-
-  private function buildOrderClause(AphrontDatabaseConnection $conn_r) {
-    switch ($this->order) {
-      case self::ORDER_EPOCH:
-        return 'ORDER BY log.epoch DESC, log.id DESC';
-      case self::ORDER_ID:
-        return 'ORDER BY id ASC';
-      default:
-        throw new Exception("Unknown order '{$this->order}'!");
+    if ($this->leasePHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'leasePHID IN (%Ls)',
+        $this->leasePHIDs);
     }
+
+    if ($this->operationPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'operationPHID IN (%Ls)',
+        $this->operationPHIDs);
+    }
+
+    return $where;
   }
 
 }

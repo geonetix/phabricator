@@ -3,25 +3,39 @@
 final class PhabricatorDaemonManagementStopWorkflow
   extends PhabricatorDaemonManagementWorkflow {
 
-  public function didConstruct() {
+  protected function didConstruct() {
     $this
       ->setName('stop')
-      ->setSynopsis(
-        pht(
-          'Stop all running daemons, or specific daemons identified by PIDs. '.
-          'Use **phd status** to find PIDs.'))
+      ->setSynopsis(pht('Stop daemon processes on this host.'))
       ->setArguments(
         array(
           array(
-            'name' => 'pids',
-            'wildcard' => true,
+            'name' => 'graceful',
+            'param' => 'seconds',
+            'help' => pht(
+              'Grace period for daemons to attempt a clean shutdown, in '.
+              'seconds. Defaults to __15__ seconds.'),
+            'default' => 15,
+          ),
+          array(
+            'name' => 'force',
+            'help' => pht(
+              'Stop all daemon processes on this host, even if they belong '.
+              'to another Phabricator instance.'),
+          ),
+          array(
+            'name' => 'gently',
+            'help' => pht('Deprecated. Has no effect.'),
           ),
         ));
   }
 
   public function execute(PhutilArgumentParser $args) {
-    $pids = $args->getArg('pids');
-    return $this->executeStopCommand($pids);
+    return $this->executeStopCommand(
+      array(
+        'graceful' => $args->getArg('graceful'),
+        'force' => $args->getArg('force'),
+      ));
   }
 
 }

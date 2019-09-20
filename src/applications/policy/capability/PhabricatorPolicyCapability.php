@@ -5,6 +5,7 @@ abstract class PhabricatorPolicyCapability extends Phobject {
   const CAN_VIEW        = 'view';
   const CAN_EDIT        = 'edit';
   const CAN_JOIN        = 'join';
+  const CAN_INTERACT    = 'interact';
 
   /**
    * Get the unique key identifying this capability. This key must be globally
@@ -14,7 +15,9 @@ abstract class PhabricatorPolicyCapability extends Phobject {
    *
    * @return string Globally unique capability key.
    */
-  abstract public function getCapabilityKey();
+  final public function getCapabilityKey() {
+    return $this->getPhobjectClassConstant('CAPABILITY');
+  }
 
 
   /**
@@ -55,18 +58,10 @@ abstract class PhabricatorPolicyCapability extends Phobject {
   }
 
   final public static function getCapabilityMap() {
-    static $map;
-    if ($map === null) {
-      $capabilities = id(new PhutilSymbolLoader())
-        ->setAncestorClass(__CLASS__)
-        ->loadObjects();
-
-      $map = mpull($capabilities, null, 'getCapabilityKey');
-    }
-
-    return $map;
+    return id(new PhutilClassMapQuery())
+      ->setAncestorClass(__CLASS__)
+      ->setUniqueMethod('getCapabilityKey')
+      ->execute();
   }
 
 }
-
-

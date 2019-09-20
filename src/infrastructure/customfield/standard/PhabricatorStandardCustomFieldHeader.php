@@ -7,7 +7,7 @@ final class PhabricatorStandardCustomFieldHeader
     return 'header';
   }
 
-  public function renderEditControl() {
+  public function renderEditControl(array $handles) {
     $header = phutil_tag(
       'div',
       array(
@@ -26,8 +26,16 @@ final class PhabricatorStandardCustomFieldHeader
     return 'header';
   }
 
-  public function renderPropertyViewValue() {
+  public function renderPropertyViewValue(array $handles) {
     return $this->getFieldName();
+  }
+
+  public function shouldAppearInApplicationSearch() {
+    return false;
+  }
+
+  public function shouldAppearInConduitTransactions() {
+    return false;
   }
 
 }

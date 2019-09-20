@@ -14,6 +14,7 @@
   margin: 0;
   padding: 0;
   display: block;
+  border-left: 4px solid transparent;
 }
 
 .phabricator-filetree span.phabricator-filetree-icon {
@@ -28,7 +29,7 @@
 .phabricator-filetree span.phabricator-filetree-name {
   padding: 0;
   margin-left: 4px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: normal;
   line-height: 20px;
   white-space: nowrap;
@@ -36,22 +37,55 @@
 
 .phabricator-filetree span.phabricator-filetree-item
   .phabricator-filetree-name {
-  color: #a0a0a0;
+  color: {$darkbluetext};
 }
 
 .phabricator-filetree a.phabricator-filetree-item
   .phabricator-filetree-name {
-  color: #fff;
+  color: {$darkbluetext};
 }
 
 .phabricator-filetree a.phabricator-filetree-item:hover {
   text-decoration: none;
+  background-color: {$hovergrey};
 }
 
-.phabricator-filetree-icon-file {
-  background-image: url(/rsrc/image/icon/fatcow/page_white_text.png);
+.phabricator-filetree .filetree-added {
+  background: {$sh-greenbackground};
 }
 
-.phabricator-filetree-icon-dir {
-  background-image: url(/rsrc/image/icon/fatcow/folder.png);
+.phabricator-filetree .filetree-deleted {
+  background: {$sh-redbackground};
+}
+
+.phabricator-filetree .filetree-movecopy {
+  background: {$sh-orangebackground};
+}
+
+.phabricator-filetree .phabricator-active-nav-focus {
+  background-color: {$hovergrey};
+  border-left: 4px solid {$sky};
+}
+
+.phabricator-filetree .filetree-progress-hint {
+  width: 24px;
+  margin-right: 6px;
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: smaller;
+  background: {$greybackground};
+  text-align: center;
+  opacity: 0.5;
+}
+
+.phabricator-filetree .filetree-comments-visible {
+  background: {$lightblue};
+  opacity: 0.75;
+  color: {$darkgreytext};
+}
+
+.phabricator-filetree .filetree-comments-completed {
+  background: {$darkgreybackground};
+  color: {$greytext};
 }

@@ -6,26 +6,42 @@ final class DiffusionBranchTableController extends DiffusionController {
     return true;
   }
 
-  public function processRequest() {
-    $drequest = $this->getDiffusionRequest();
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $response = $this->loadDiffusionContext();
+    if ($response) {
+      return $response;
+    }
 
+    $viewer = $this->getViewer();
+    $drequest = $this->getDiffusionRequest();
     $repository = $drequest->getRepository();
 
-    $pager = new AphrontPagerView();
-    $pager->setURI($request->getRequestURI(), 'offset');
-    $pager->setOffset($request->getInt('offset'));
+    $pager = id(new PHUIPagerView())
+      ->readFromRequest($request);
 
-    // TODO: Add support for branches that contain commit
-    $branches = DiffusionBranchInformation::newFromConduit(
-      $this->callConduitWithDiffusionRequest(
-        'diffusion.branchquery',
-        array(
-          'offset' => $pager->getOffset(),
-          'limit' => $pager->getPageSize() + 1
-        )));
+    $params = array(
+      'offset' => $pager->getOffset(),
+      'limit' => $pager->getPageSize() + 1,
+      'branch' => null,
+    );
+
+    $contains = $drequest->getSymbolicCommit();
+    if (strlen($contains)) {
+      $params['contains'] = $contains;
+    }
+
+    $branches = $this->callConduitWithDiffusionRequest(
+      'diffusion.branchquery',
+      $params);
     $branches = $pager->sliceResults($branches);
+
+    $branches = DiffusionRepositoryRef::loadAllFromDictionaries($branches);
+
+    // If there is one page of results or fewer, sort branches so the default
+    // branch is on top and permanent branches are below it.
+    if (!$pager->getOffset() && !$pager->getHasMorePages()) {
+      $branches = $this->sortBranches($repository, $branches);
+    }
 
     $content = null;
     if (!$branches) {
@@ -35,40 +51,90 @@ final class DiffusionBranchTableController extends DiffusionController {
     } else {
       $commits = id(new DiffusionCommitQuery())
         ->setViewer($viewer)
-        ->withIdentifiers(mpull($branches, 'getHeadCommitIdentifier'))
+        ->withIdentifiers(mpull($branches, 'getCommitIdentifier'))
         ->withRepository($repository)
         ->execute();
 
-      $view = id(new DiffusionBranchTableView())
+      $list = id(new DiffusionBranchListView())
         ->setUser($viewer)
         ->setBranches($branches)
         ->setCommits($commits)
         ->setDiffusionRequest($drequest);
 
-      $panel = id(new AphrontPanelView())
-        ->setNoBackground(true)
-        ->appendChild($view)
-        ->appendChild($pager);
-
-      $content = $panel;
+      $content = id(new PHUIObjectBoxView())
+        ->setHeaderText($repository->getName())
+        ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+        ->addClass('diffusion-mobile-view')
+        ->setTable($list)
+        ->setPager($pager);
     }
 
     $crumbs = $this->buildCrumbs(
       array(
         'branches' => true,
       ));
+    $crumbs->setBorder(true);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $content,
-      ),
-      array(
-        'title' => array(
-          pht('Branches'),
-          'r'.$repository->getCallsign(),
-        ),
+    $header = id(new PHUIHeaderView())
+      ->setHeader(pht('Branches'))
+      ->setHeaderIcon('fa-code-fork');
+
+    if (!$repository->isSVN()) {
+      $branch_tag = $this->renderBranchTag($drequest);
+      $header->addTag($branch_tag);
+    }
+
+    $tabs = $this->buildTabsView('branch');
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setTabs($tabs)
+      ->setFooter(array(
+          $content,
       ));
+
+    return $this->newPage()
+      ->setTitle(
+        array(
+          pht('Branches'),
+          $repository->getDisplayName(),
+        ))
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
+  }
+
+  private function sortBranches(
+    PhabricatorRepository $repository,
+    array $branches) {
+
+    $publisher = $repository->newPublisher();
+    $default_branch = $repository->getDefaultBranch();
+
+    $vectors = array();
+    foreach ($branches as $key => $branch) {
+      $short_name = $branch->getShortName();
+
+      if ($short_name === $default_branch) {
+        $order_default = 0;
+      } else {
+        $order_default = 1;
+      }
+
+      if ($publisher->shouldPublishRef($branch)) {
+        $order_permanent = 0;
+      } else {
+        $order_permanent = 1;
+      }
+
+      $vectors[$key] = id(new PhutilSortVector())
+        ->addInt($order_default)
+        ->addInt($order_permanent)
+        ->addString($short_name);
+    }
+
+    $vectors = msortv($vectors, 'getSelf');
+
+    return array_select_keys($branches, array_keys($vectors));
   }
 
 }

@@ -3,26 +3,34 @@
 final class PhabricatorEmailVerificationController
   extends PhabricatorAuthController {
 
-  private $code;
-
-  public function willProcessRequest(array $data) {
-    $this->code = $data['code'];
-  }
-
   public function shouldRequireEmailVerification() {
     // Since users need to be able to hit this endpoint in order to verify
     // email, we can't ever require email verification here.
     return false;
   }
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function shouldRequireEnabledUser() {
+    // Unapproved users are allowed to verify their email addresses. We'll kick
+    // disabled users out later.
+    return false;
+  }
+
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
+    $code = $request->getURIData('code');
+
+    if ($viewer->getIsDisabled()) {
+      // We allowed unapproved and disabled users to hit this controller, but
+      // want to kick out disabled users now.
+      return new Aphront400Response();
+    }
 
     $email = id(new PhabricatorUserEmail())->loadOneWhere(
       'userPHID = %s AND verificationCode = %s',
-      $user->getPHID(),
-      $this->code);
+      $viewer->getPHID(),
+      $code);
+
+    $submit = null;
 
     if (!$email) {
       $title = pht('Unable to Verify Email');
@@ -32,45 +40,50 @@ final class PhabricatorEmailVerificationController
         'user. Make sure you followed the link in the email correctly and are '.
         'logged in with the user account associated with the email address.');
       $continue = pht('Rats!');
-    } else if ($email->getIsVerified()) {
+    } else if ($email->getIsVerified() && $viewer->getIsEmailVerified()) {
       $title = pht('Address Already Verified');
       $content = pht(
         'This email address has already been verified.');
       $continue = pht('Continue to Phabricator');
-    } else {
-      $guard = AphrontWriteGuard::beginScopedUnguardedWrites();
-        $email->setIsVerified(1);
-        $email->save();
-      unset($guard);
+    } else if ($request->isFormPost()) {
+
+      id(new PhabricatorUserEditor())
+        ->setActor($viewer)
+        ->verifyEmail($viewer, $email);
 
       $title = pht('Address Verified');
       $content = pht(
         'The email address %s is now verified.',
         phutil_tag('strong', array(), $email->getAddress()));
       $continue = pht('Continue to Phabricator');
+    } else {
+      $title = pht('Verify Email Address');
+      $content = pht(
+        'Verify this email address (%s) and attach it to your account?',
+        phutil_tag('strong', array(), $email->getAddress()));
+      $continue = pht('Cancel');
+      $submit = pht('Verify %s', $email->getAddress());
     }
 
     $dialog = id(new AphrontDialogView())
-      ->setUser($user)
+      ->setUser($viewer)
       ->setTitle($title)
-      ->setMethod('GET')
       ->addCancelButton('/', $continue)
       ->appendChild($content);
 
-    $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('Verify Email')));
+    if ($submit) {
+      $dialog->addSubmitButton($submit);
+    }
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $dialog,
-      ),
-      array(
-        'title' => pht('Verify Email'),
-        'device' => true,
-      ));
+    $crumbs = $this->buildApplicationCrumbs();
+    $crumbs->addTextCrumb(pht('Verify Email'));
+    $crumbs->setBorder(true);
+
+    return $this->newPage()
+      ->setTitle(pht('Verify Email'))
+      ->setCrumbs($crumbs)
+      ->appendChild($dialog);
+
   }
 
 }

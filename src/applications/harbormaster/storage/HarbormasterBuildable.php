@@ -1,25 +1,35 @@
 <?php
 
-final class HarbormasterBuildable extends HarbormasterDAO
-  implements PhabricatorPolicyInterface {
+final class HarbormasterBuildable
+  extends HarbormasterDAO
+  implements
+    PhabricatorApplicationTransactionInterface,
+    PhabricatorPolicyInterface,
+    HarbormasterBuildableInterface,
+    PhabricatorConduitResultInterface,
+    PhabricatorDestructibleInterface {
 
   protected $buildablePHID;
   protected $containerPHID;
-  protected $buildStatus;
   protected $buildableStatus;
+  protected $isManualBuildable;
 
   private $buildableObject = self::ATTACHABLE;
   private $containerObject = self::ATTACHABLE;
-  private $buildableHandle = self::ATTACHABLE;
-  private $containerHandle = self::ATTACHABLE;
   private $builds = self::ATTACHABLE;
-
-  const STATUS_WHATEVER = 'whatever';
 
   public static function initializeNewBuildable(PhabricatorUser $actor) {
     return id(new HarbormasterBuildable())
-      ->setBuildStatus(self::STATUS_WHATEVER)
-      ->setBuildableStatus(self::STATUS_WHATEVER);
+      ->setIsManualBuildable(0)
+      ->setBuildableStatus(HarbormasterBuildableStatus::STATUS_PREPARING);
+  }
+
+  public function getMonogram() {
+    return 'B'.$this->getID();
+  }
+
+  public function getURI() {
+    return '/'.$this->getMonogram();
   }
 
   /**
@@ -34,12 +44,13 @@ final class HarbormasterBuildable extends HarbormasterDAO
     $buildable = id(new HarbormasterBuildableQuery())
       ->setViewer($actor)
       ->withBuildablePHIDs(array($buildable_object_phid))
+      ->withManualBuildables(false)
       ->setLimit(1)
       ->executeOne();
     if ($buildable) {
       return $buildable;
     }
-    $buildable = HarbormasterBuildable::initializeNewBuildable($actor)
+    $buildable = self::initializeNewBuildable($actor)
       ->setBuildablePHID($buildable_object_phid)
       ->setContainerPHID($container_object_phid);
     $buildable->save();
@@ -47,60 +58,136 @@ final class HarbormasterBuildable extends HarbormasterDAO
   }
 
   /**
-   * Looks up the plan PHIDs and applies the plans to the specified
-   * object identified by it's PHID.
+   * Start builds for a given buildable.
+   *
+   * @param phid PHID of the object to build.
+   * @param phid Container PHID for the buildable.
+   * @param list<HarbormasterBuildRequest> List of builds to perform.
+   * @return void
    */
   public static function applyBuildPlans(
     $phid,
     $container_phid,
-    array $plan_phids) {
+    array $requests) {
 
-    if (count($plan_phids) === 0) {
+    assert_instances_of($requests, 'HarbormasterBuildRequest');
+
+    if (!$requests) {
       return;
     }
 
     // Skip all of this logic if the Harbormaster application
     // isn't currently installed.
 
-    $harbormaster_app = 'PhabricatorApplicationHarbormaster';
+    $harbormaster_app = 'PhabricatorHarbormasterApplication';
     if (!PhabricatorApplication::isClassInstalled($harbormaster_app)) {
       return;
     }
 
-    $buildable = HarbormasterBuildable::createOrLoadExisting(
-      PhabricatorUser::getOmnipotentUser(),
+    $viewer = PhabricatorUser::getOmnipotentUser();
+
+    $buildable = self::createOrLoadExisting(
+      $viewer,
       $phid,
       $container_phid);
 
+    $plan_phids = mpull($requests, 'getBuildPlanPHID');
     $plans = id(new HarbormasterBuildPlanQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
+      ->setViewer($viewer)
       ->withPHIDs($plan_phids)
       ->execute();
-    foreach ($plans as $plan) {
-      $build = HarbormasterBuild::initializeNewBuild(
-        PhabricatorUser::getOmnipotentUser());
-      $build->setBuildablePHID($buildable->getPHID());
-      $build->setBuildPlanPHID($plan->getPHID());
-      $build->setBuildStatus(HarbormasterBuild::STATUS_PENDING);
-      $build->save();
+    $plans = mpull($plans, null, 'getPHID');
 
-      PhabricatorWorker::scheduleTask(
-        'HarbormasterBuildWorker',
-        array(
-          'buildID' => $build->getID()
-        ));
+    foreach ($requests as $request) {
+      $plan_phid = $request->getBuildPlanPHID();
+      $plan = idx($plans, $plan_phid);
+
+      if (!$plan) {
+        throw new Exception(
+          pht(
+            'Failed to load build plan ("%s").',
+            $plan_phid));
+      }
+
+      if ($plan->isDisabled()) {
+        // TODO: This should be communicated more clearly -- maybe we should
+        // create the build but set the status to "disabled" or "derelict".
+        continue;
+      }
+
+      $parameters = $request->getBuildParameters();
+      $buildable->applyPlan($plan, $parameters, $request->getInitiatorPHID());
     }
   }
 
-  public function getConfiguration() {
+  public function applyPlan(
+    HarbormasterBuildPlan $plan,
+    array $parameters,
+    $initiator_phid) {
+
+    $viewer = PhabricatorUser::getOmnipotentUser();
+    $build = HarbormasterBuild::initializeNewBuild($viewer)
+      ->setBuildablePHID($this->getPHID())
+      ->setBuildPlanPHID($plan->getPHID())
+      ->setBuildParameters($parameters)
+      ->setBuildStatus(HarbormasterBuildStatus::STATUS_PENDING);
+    if ($initiator_phid) {
+      $build->setInitiatorPHID($initiator_phid);
+    }
+
+    $auto_key = $plan->getPlanAutoKey();
+    if ($auto_key) {
+      $build->setPlanAutoKey($auto_key);
+    }
+
+    $build->save();
+
+    $steps = id(new HarbormasterBuildStepQuery())
+      ->setViewer($viewer)
+      ->withBuildPlanPHIDs(array($plan->getPHID()))
+      ->execute();
+
+    foreach ($steps as $step) {
+      $step->willStartBuild($viewer, $this, $build, $plan);
+    }
+
+    PhabricatorWorker::scheduleTask(
+      'HarbormasterBuildWorker',
+      array(
+        'buildID' => $build->getID(),
+      ),
+      array(
+        'objectPHID' => $build->getPHID(),
+      ));
+
+    return $build;
+  }
+
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID => true,
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'containerPHID' => 'phid?',
+        'buildableStatus' => 'text32',
+        'isManualBuildable' => 'bool',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_buildable' => array(
+          'columns' => array('buildablePHID'),
+        ),
+        'key_container' => array(
+          'columns' => array('containerPHID'),
+        ),
+        'key_manual' => array(
+          'columns' => array('isManualBuildable'),
+        ),
+      ),
     ) + parent::getConfiguration();
   }
 
   public function generatePHID() {
     return PhabricatorPHID::generateNewPHID(
-      HarbormasterPHIDTypeBuildable::TYPECONST);
+      HarbormasterBuildablePHIDType::TYPECONST);
   }
 
   public function attachBuildableObject($buildable_object) {
@@ -121,24 +208,6 @@ final class HarbormasterBuildable extends HarbormasterDAO
     return $this->assertAttached($this->containerObject);
   }
 
-  public function attachContainerHandle($container_handle) {
-    $this->containerHandle = $container_handle;
-    return $this;
-  }
-
-  public function getContainerHandle() {
-    return $this->assertAttached($this->containerHandle);
-  }
-
-  public function attachBuildableHandle($buildable_handle) {
-    $this->buildableHandle = $buildable_handle;
-    return $this;
-  }
-
-  public function getBuildableHandle() {
-    return $this->assertAttached($this->buildableHandle);
-  }
-
   public function attachBuilds(array $builds) {
     assert_instances_of($builds, 'HarbormasterBuild');
     $this->builds = $builds;
@@ -150,12 +219,82 @@ final class HarbormasterBuildable extends HarbormasterDAO
   }
 
 
+/* -(  Status  )------------------------------------------------------------- */
+
+
+  public function getBuildableStatusObject() {
+    $status = $this->getBuildableStatus();
+    return HarbormasterBuildableStatus::newBuildableStatusObject($status);
+  }
+
+  public function getStatusIcon() {
+    return $this->getBuildableStatusObject()->getIcon();
+  }
+
+  public function getStatusDisplayName() {
+    return $this->getBuildableStatusObject()->getDisplayName();
+  }
+
+  public function getStatusColor() {
+    return $this->getBuildableStatusObject()->getColor();
+  }
+
+  public function isPreparing() {
+    return $this->getBuildableStatusObject()->isPreparing();
+  }
+
+  public function isBuilding() {
+    return $this->getBuildableStatusObject()->isBuilding();
+  }
+
+
+/* -(  Messages  )----------------------------------------------------------- */
+
+
+  public function sendMessage(
+    PhabricatorUser $viewer,
+    $message_type,
+    $queue_update) {
+
+    $message = HarbormasterBuildMessage::initializeNewMessage($viewer)
+      ->setReceiverPHID($this->getPHID())
+      ->setType($message_type)
+      ->save();
+
+    if ($queue_update) {
+      PhabricatorWorker::scheduleTask(
+        'HarbormasterBuildWorker',
+        array(
+          'buildablePHID' => $this->getPHID(),
+        ),
+        array(
+          'objectPHID' => $this->getPHID(),
+        ));
+    }
+
+    return $message;
+  }
+
+
+/* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
+
+
+  public function getApplicationTransactionEditor() {
+    return new HarbormasterBuildableTransactionEditor();
+  }
+
+  public function getApplicationTransactionTemplate() {
+    return new HarbormasterBuildableTransaction();
+  }
+
+
 /* -(  PhabricatorPolicyInterface  )----------------------------------------- */
 
 
   public function getCapabilities() {
     return array(
       PhabricatorPolicyCapability::CAN_VIEW,
+      PhabricatorPolicyCapability::CAN_EDIT,
     );
   }
 
@@ -170,9 +309,108 @@ final class HarbormasterBuildable extends HarbormasterDAO
   }
 
   public function describeAutomaticCapability($capability) {
-    return pht(
-      'Users must be able to see the revision or repository to see a '.
-      'buildable.');
+    return pht('A buildable inherits policies from the underlying object.');
+  }
+
+
+
+/* -(  HarbormasterBuildableInterface  )------------------------------------- */
+
+
+  public function getHarbormasterBuildableDisplayPHID() {
+    return $this->getBuildableObject()->getHarbormasterBuildableDisplayPHID();
+  }
+
+  public function getHarbormasterBuildablePHID() {
+    // NOTE: This is essentially just for convenience, as it allows you create
+    // a copy of a buildable by specifying `B123` without bothering to go
+    // look up the underlying object.
+    return $this->getBuildablePHID();
+  }
+
+  public function getHarbormasterContainerPHID() {
+    return $this->getContainerPHID();
+  }
+
+  public function getBuildVariables() {
+    return array();
+  }
+
+  public function getAvailableBuildVariables() {
+    return array();
+  }
+
+  public function newBuildableEngine() {
+    return $this->getBuildableObject()->newBuildableEngine();
+  }
+
+
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
+
+
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('objectPHID')
+        ->setType('phid')
+        ->setDescription(pht('PHID of the object that is built.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('containerPHID')
+        ->setType('phid')
+        ->setDescription(pht('PHID of the object containing this buildable.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('buildableStatus')
+        ->setType('map<string, wild>')
+        ->setDescription(pht('The current status of this buildable.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('isManual')
+        ->setType('bool')
+        ->setDescription(pht('True if this is a manual buildable.')),
+    );
+  }
+
+  public function getFieldValuesForConduit() {
+    return array(
+      'objectPHID' => $this->getBuildablePHID(),
+      'containerPHID' => $this->getContainerPHID(),
+      'buildableStatus' => array(
+        'value' => $this->getBuildableStatus(),
+      ),
+      'isManual' => (bool)$this->getIsManualBuildable(),
+    );
+  }
+
+  public function getConduitSearchAttachments() {
+    return array();
+  }
+
+
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+    $viewer = $engine->getViewer();
+
+    $this->openTransaction();
+      $builds = id(new HarbormasterBuildQuery())
+        ->setViewer($viewer)
+        ->withBuildablePHIDs(array($this->getPHID()))
+        ->execute();
+      foreach ($builds as $build) {
+        $engine->destroyObject($build);
+      }
+
+      $messages = id(new HarbormasterBuildMessageQuery())
+        ->setViewer($viewer)
+        ->withReceiverPHIDs(array($this->getPHID()))
+        ->execute();
+      foreach ($messages as $message) {
+        $engine->destroyObject($message);
+      }
+
+      $this->delete();
+    $this->saveTransaction();
   }
 
 }

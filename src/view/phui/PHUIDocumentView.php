@@ -2,45 +2,18 @@
 
 final class PHUIDocumentView extends AphrontTagView {
 
-  /* For mobile displays, where do you want the sidebar */
-  const NAV_BOTTOM = 'nav_bottom';
-  const NAV_TOP = 'nav_top';
-
-  private $offset;
   private $header;
-  private $sidenav;
-  private $topnav;
-  private $crumbs;
   private $bookname;
   private $bookdescription;
-  private $mobileview;
-
-  public function setOffset($offset) {
-    $this->offset = $offset;
-    return $this;
-  }
+  private $fluid;
+  private $toc;
+  private $foot;
+  private $curtain;
+  private $banner;
 
   public function setHeader(PHUIHeaderView $header) {
-    $header->setGradient(PhabricatorActionHeaderView::HEADER_LIGHTBLUE);
+    $header->setTall(true);
     $this->header = $header;
-    return $this;
-  }
-
-  public function setSideNav(PHUIListView $list, $display = self::NAV_BOTTOM) {
-    $list->setType(PHUIListView::SIDENAV_LIST);
-    $this->sidenav = $list;
-    $this->mobileview = $display;
-    return $this;
-  }
-
-  public function setTopNav(PHUIListView $list) {
-    $list->setType(PHUIListView::NAVBAR_LIST);
-    $this->topnav = $list;
-    return $this;
-  }
-
-  public function setCrumbs(PHUIListView $list) {
-    $this->crumbs  = $list;
     return $this;
   }
 
@@ -50,112 +23,184 @@ final class PHUIDocumentView extends AphrontTagView {
     return $this;
   }
 
-  public function getTagAttributes() {
+  public function setFluid($fluid) {
+    $this->fluid = $fluid;
+    return $this;
+  }
+
+  public function setToc($toc) {
+    $this->toc = $toc;
+    return $this;
+  }
+
+  public function setFoot($foot) {
+    $this->foot = $foot;
+    return $this;
+  }
+
+  public function setCurtain(PHUICurtainView $curtain) {
+    $this->curtain = $curtain;
+    return $this;
+  }
+
+  public function getCurtain() {
+    return $this->curtain;
+  }
+
+  public function setBanner($banner) {
+    $this->banner = $banner;
+    return $this;
+  }
+
+  public function getBanner() {
+    return $this->banner;
+  }
+
+  protected function getTagAttributes() {
     $classes = array();
 
-    if ($this->offset) {
-      $classes[] = 'phui-document-offset';
-    };
+    $classes[] = 'phui-document-container';
+    if ($this->fluid) {
+      $classes[] = 'phui-document-fluid';
+    }
+    if ($this->foot) {
+      $classes[] = 'document-has-foot';
+    }
 
     return array(
-      'class' => $classes,
+      'class' => implode(' ', $classes),
     );
   }
 
-  public function getTagContent() {
+  protected function getTagContent() {
     require_celerity_resource('phui-document-view-css');
+    require_celerity_resource('phui-document-view-pro-css');
+    Javelin::initBehavior('phabricator-reveal-content');
 
     $classes = array();
     $classes[] = 'phui-document-view';
-    if ($this->offset) {
-      $classes[] = 'phui-offset-view';
-    }
-    if ($this->sidenav) {
-      $classes[] = 'phui-sidenav-view';
+    $classes[] = 'phui-document-view-pro';
+
+    if ($this->curtain) {
+      $classes[] = 'has-curtain';
+    } else {
+      $classes[] = 'has-no-curtain';
     }
 
-    $sidenav = null;
-    if ($this->sidenav) {
-      $sidenav = phutil_tag(
-        'div',
-        array(
-          'class' => 'phui-document-sidenav'
-        ),
-        $this->sidenav);
+    if ($this->curtain) {
+      $action_list = $this->curtain->getActionList();
+      $this->header->setActionListID($action_list->getID());
     }
 
     $book = null;
     if ($this->bookname) {
-      $book = phutil_tag(
-        'div',
-        array(
-          'class' => 'phui-document-bookname grouped'
-        ),
-        array(
-          phutil_tag(
-            'span',
-            array('class' => 'bookname'),
-            $this->bookname),
-          phutil_tag(
-            'span',
-            array('class' => 'bookdescription'),
-          $this->bookdescription)));
+      $book = pht('%s (%s)', $this->bookname, $this->bookdescription);
     }
 
-    $topnav = null;
-    if ($this->topnav) {
-      $topnav = phutil_tag(
-        'div',
-        array(
-          'class' => 'phui-document-topnav'
-        ),
-        $this->topnav);
+    $main_content = $this->renderChildren();
+
+    if ($book) {
+      $this->header->setSubheader($book);
     }
 
-    $crumbs = null;
-    if ($this->crumbs) {
-      $crumbs = phutil_tag(
-        'div',
-        array(
-          'class' => 'phui-document-crumbs'
-        ),
-        $this->bookName);
-    }
-
-    $content_inner = phutil_tag(
-        'div',
-        array(
-          'class' => 'phui-document-inner',
-        ),
-        array(
-          $book,
-          $this->header,
-          $topnav,
-          $this->renderChildren(),
-          $crumbs
+    $table_of_contents = null;
+    if ($this->toc) {
+      $toc = array();
+      $toc_id = celerity_generate_unique_node_id();
+      $toc[] = id(new PHUIButtonView())
+        ->setTag('a')
+        ->setIcon('fa-align-left')
+        ->setButtonType(PHUIButtonView::BUTTONTYPE_SIMPLE)
+        ->addClass('phui-document-toc')
+        ->addSigil('jx-toggle-class')
+        ->setMetaData(array(
+          'map' => array(
+            $toc_id => 'phui-document-toc-open',
+          ),
         ));
 
-    if ($this->mobileview == self::NAV_BOTTOM) {
-      $order = array($content_inner, $sidenav);
-    } else {
-      $order = array($sidenav, $content_inner);
-    }
-
-    $content = phutil_tag(
+      $toc[] = phutil_tag(
         'div',
         array(
-          'class' => 'phui-document-content',
+          'class' => 'phui-list-sidenav phui-document-toc-list',
         ),
-        $order);
+        $this->toc);
 
-    $view = phutil_tag(
+      $table_of_contents = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-document-toc-container',
+          'id' => $toc_id,
+        ),
+        $toc);
+    }
+
+    $foot_content = null;
+    if ($this->foot) {
+      $foot_content = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-document-foot-content',
+        ),
+        $this->foot);
+    }
+
+    $curtain = null;
+    if ($this->curtain) {
+      $curtain = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-document-curtain',
+        ),
+        $this->curtain);
+    }
+
+    $main_content = phutil_tag(
+      'div',
+      array(
+        'class' => 'phui-document-content-view',
+      ),
+      $main_content);
+
+    $content_inner = phutil_tag(
+      'div',
+      array(
+        'class' => 'phui-document-inner',
+      ),
+      array(
+        $table_of_contents,
+        $this->header,
+        $this->banner,
+        phutil_tag(
+          'div',
+          array(
+            'class' => 'phui-document-content-outer',
+          ),
+          phutil_tag(
+            'div',
+            array(
+              'class' => 'phui-document-content-inner',
+            ),
+            array(
+              $main_content,
+              $curtain,
+            ))),
+        $foot_content,
+      ));
+
+    $content = phutil_tag(
+      'div',
+      array(
+        'class' => 'phui-document-content',
+      ),
+      $content_inner);
+
+    return phutil_tag(
       'div',
       array(
         'class' => implode(' ', $classes),
       ),
       $content);
-
-    return $view;
   }
 
 }

@@ -3,14 +3,51 @@
 final class PHUIIconExample extends PhabricatorUIExample {
 
   public function getName() {
-    return 'Icons and Images';
+    return pht('Icons and Images');
   }
 
   public function getDescription() {
-    return 'Easily render icons or images with links and sprites.';
+    return pht('Easily render icons or images with links and sprites.');
+  }
+
+  public function getCategory() {
+    return pht('Catalogs');
+  }
+
+  private function listTransforms() {
+    return array(
+      'ph-rotate-90',
+      'ph-rotate-180',
+      'ph-rotate-270',
+      'ph-flip-horizontal',
+      'ph-flip-vertical',
+      'ph-spin',
+    );
   }
 
   public function renderExample() {
+
+    $colors = PHUIIconView::getIconColors();
+    $colors = array_merge(array(null), $colors);
+    $fas = PHUIIconView::getIcons();
+
+    $trans = $this->listTransforms();
+
+    $cicons = array();
+    foreach ($colors as $color) {
+      $cicons[] = id(new PHUIIconView())
+        ->addClass('phui-example-icon-transform')
+        ->setIcon('fa-tag '.$color)
+        ->setText(pht('fa-tag %s', $color));
+    }
+    $ficons = array();
+    sort($fas);
+    foreach ($fas as $fa) {
+      $ficons[] = id(new PHUIIconView())
+        ->addClass('phui-example-icon-name')
+        ->setIcon($fa)
+        ->setText($fa);
+    }
 
     $person1 = new PHUIIconView();
     $person1->setHeadSize(PHUIIconView::HEAD_MEDIUM);
@@ -48,50 +85,12 @@ final class PHUIIconExample extends PhabricatorUIExample {
     $person6->setImage(
       celerity_get_resource_uri('/rsrc/image/people/taft.png'));
 
-    $card1 = id(new PHUIIconView())
-      ->setSpriteSheet(PHUIIconView::SPRITE_PAYMENTS)
-      ->setSpriteIcon('visa')
-      ->addClass(PHUI::MARGIN_SMALL_RIGHT);
-
-    $card2 = id(new PHUIIconView())
-      ->setSpriteSheet(PHUIIconView::SPRITE_PAYMENTS)
-      ->setSpriteIcon('mastercard')
-      ->addClass(PHUI::MARGIN_SMALL_RIGHT);
-
-    $card3 = id(new PHUIIconView())
-      ->setSpriteSheet(PHUIIconView::SPRITE_PAYMENTS)
-      ->setSpriteIcon('paypal')
-      ->addClass(PHUI::MARGIN_SMALL_RIGHT);
-
-    $card4 = id(new PHUIIconView())
-      ->setSpriteSheet(PHUIIconView::SPRITE_PAYMENTS)
-      ->setSpriteIcon('americanexpress')
-      ->addClass(PHUI::MARGIN_SMALL_RIGHT);
-
-    $card5 = id(new PHUIIconView())
-      ->setSpriteSheet(PHUIIconView::SPRITE_PAYMENTS)
-      ->setSpriteIcon('googlecheckout');
-
-    $actions = array(
-      'settings-grey',
-      'heart-grey',
-      'tag-grey',
-      'new-grey',
-      'search-grey',
-      'move-grey');
-    $actionview = array();
-    foreach ($actions as $action) {
-      $actionview[] = id(new PHUIIconView())
-        ->setSpriteSheet(PHUIIconView::SPRITE_ACTIONS)
-        ->setSpriteIcon($action)
-        ->setHref('#');
-    }
-
     $tokens = array(
       'like-1',
       'like-2',
       'heart-1',
-      'heart-2');
+      'heart-2',
+    );
     $tokenview = array();
     foreach ($tokens as $token) {
       $tokenview[] =
@@ -104,7 +103,8 @@ final class PHUIIconExample extends PhabricatorUIExample {
       'Asana',
       'Dropbox',
       'Google',
-      'Github');
+      'Github',
+    );
     $loginview = array();
     foreach ($logins as $login) {
       $loginview[] =
@@ -114,88 +114,122 @@ final class PHUIIconExample extends PhabricatorUIExample {
           ->addClass(PHUI::MARGIN_SMALL_RIGHT);
     }
 
-    $layout1 =
-      array(
-        id(new PHUIBoxView())
-          ->appendChild($actionview)
-          ->addMargin(PHUI::MARGIN_MEDIUM)
-          ->addPadding(PHUI::PADDING_SMALL)
-          ->setShadow(true));
+    $circles = array('fa-pencil', 'fa-chevron-left', 'fa-chevron-right');
+    $circleview = array();
+    foreach ($circles as $circle) {
+      $circleview[] =
+        id(new PHUIIconCircleView())
+          ->setIcon($circle)
+          ->setHref('#')
+          ->addClass('mmr');
+    }
 
-    $layout2 =
-      array(
-        id(new PHUIBoxView())
-          ->appendChild(array($person1, $person2, $person3))
-          ->addMargin(PHUI::MARGIN_MEDIUM)
-          ->addPadding(PHUI::PADDING_SMALL)
-          ->setShadow(true));
+    $circles = array('fa-plus', 'fa-bars', 'fa-paw');
+    foreach ($circles as $circle) {
+      $circleview[] =
+        id(new PHUIIconCircleView())
+          ->setIcon($circle)
+          ->setSize(PHUIIconCircleView::MEDIUM)
+          ->setHref('#')
+          ->addClass('mmr');
+    }
 
-    $layout2a =
-      array(
-        id(new PHUIBoxView())
-          ->appendChild(array($person4, $person5, $person6))
-          ->addMargin(PHUI::MARGIN_MEDIUM)
-          ->addPadding(PHUI::PADDING_SMALL)
-          ->setShadow(true));
+    $circles = array('fa-gear', 'fa-recycle');
+    $colors = array('green', 'pink', 'red', 'sky', 'violet');
+    foreach ($circles as $circle) {
+      $states = PHUIIconCircleView::getStateMap();
+      foreach ($states as $state => $name) {
+        $i = array_rand($colors);
+        $circleview[] =
+          id(new PHUIIconCircleView())
+            ->setIcon($circle)
+            ->setSize(PHUIIconCircleView::SMALL)
+            ->setState($state)
+            ->setColor($colors[$i])
+            ->setHref('#')
+            ->addClass('mmr');
+      }
+    }
 
-    $layout3 =
-      array(
-        id(new PHUIBoxView())
-          ->appendChild($tokenview)
-          ->addMargin(PHUI::MARGIN_MEDIUM)
-          ->addPadding(PHUI::PADDING_SMALL)
-          ->setShadow(true));
+    $squares = array('fa-briefcase', 'fa-code', 'fa-globe', 'fa-home');
+    $squareview = array();
+    foreach ($squares as $icon) {
+      $squareview[] =
+        id(new PHUIIconView())
+          ->setIcon($icon)
+          ->setBackground('bg-blue')
+          ->setHref('#')
+          ->addClass('mmr')
+          ->setTooltip($icon);
+    }
 
-    $layout4 =
-      array(
-        id(new PHUIBoxView())
-          ->appendChild(array($card1, $card2, $card3, $card4, $card5))
-          ->addMargin(PHUI::MARGIN_MEDIUM)
-          ->addPadding(PHUI::PADDING_MEDIUM)
-          ->setShadow(true));
-
-    $layout5 =
-      array(
-        id(new PHUIBoxView())
-          ->appendChild($loginview)
-          ->addMargin(PHUI::MARGIN_MEDIUM)
-          ->addPadding(PHUI::PADDING_MEDIUM)
-          ->setShadow(true));
-
-    $head1 = id(new PHUIHeaderView())
-      ->setHeader(pht('Action Icons!'));
-
-    $head2 = id(new PHUIHeaderView())
-      ->setHeader(pht('People!'));
-
-    $head3 = id(new PHUIHeaderView())
-      ->setHeader(pht('Tokens'));
-
-    $head4 = id(new PHUIHeaderView())
-      ->setHeader(pht('Payments'));
-
-    $head5 = id(new PHUIHeaderView())
-      ->setHeader(pht('Authentication'));
-
-    $wrap1 = id(new PHUIBoxView())
-      ->appendChild($layout1)
+    $layout_cicons = id(new PHUIBoxView())
+      ->appendChild($cicons)
       ->addMargin(PHUI::MARGIN_LARGE);
 
-    $wrap2 = id(new PHUIBoxView())
-      ->appendChild(array($layout2, $layout2a))
+    $layout_fa = id(new PHUIBoxView())
+      ->appendChild($ficons)
       ->addMargin(PHUI::MARGIN_LARGE);
 
-    $wrap3 = id(new PHUIBoxView())
-      ->appendChild($layout3)
-      ->addMargin(PHUI::MARGIN_LARGE);
+    $layout2 = id(new PHUIBoxView())
+      ->appendChild(array($person1, $person2, $person3))
+      ->addMargin(PHUI::MARGIN_MEDIUM);
 
-    $wrap4 = id(new PHUIBoxView())
-      ->appendChild($layout4)
-      ->addMargin(PHUI::MARGIN_LARGE);
+    $layout2a = id(new PHUIBoxView())
+      ->appendChild(array($person4, $person5, $person6))
+      ->addMargin(PHUI::MARGIN_MEDIUM);
 
-    $wrap5 = id(new PHUIBoxView())
-      ->appendChild($layout5)
-      ->addMargin(PHUI::MARGIN_LARGE);
+    $layout3 = id(new PHUIBoxView())
+      ->appendChild($tokenview)
+      ->addMargin(PHUI::MARGIN_MEDIUM);
+
+    $layout4 = id(new PHUIBoxView())
+      ->appendChild($circleview)
+      ->addMargin(PHUI::MARGIN_MEDIUM);
+
+    $layout5 = id(new PHUIBoxView())
+      ->appendChild($squareview)
+      ->addMargin(PHUI::MARGIN_MEDIUM);
+
+    $layout6 = id(new PHUIBoxView())
+      ->appendChild($loginview)
+      ->addMargin(PHUI::MARGIN_MEDIUM);
+
+    $fa_link = phutil_tag(
+      'a',
+      array(
+        'href' => 'http://fontawesome.io',
+      ),
+      'http://fontawesome.io');
+    $fa_text = pht('Font Awesome by Dave Gandy - %s', $fa_link);
+
+    $fontawesome = id(new PHUIObjectBoxView())
+      ->setHeaderText($fa_text)
+      ->appendChild($layout_fa);
+
+    $transforms = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Colors and Transforms'))
+      ->appendChild($layout_cicons);
+
+    $wrap2 = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('People!'))
+      ->appendChild(array($layout2, $layout2a));
+
+    $wrap3 = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Tokens'))
+      ->appendChild($layout3);
+
+    $wrap4 = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Circles'))
+      ->appendChild($layout4);
+
+    $wrap5 = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Squares'))
+      ->appendChild($layout5);
+
+    $wrap6 = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Authentication'))
+      ->appendChild($layout6);
 
     return phutil_tag(
       'div',
@@ -203,16 +237,13 @@ final class PHUIIconExample extends PhabricatorUIExample {
           'class' => 'phui-icon-example',
         ),
         array(
-          $head1,
-          $wrap1,
-          $head2,
+          $fontawesome,
+          $transforms,
           $wrap2,
-          $head3,
           $wrap3,
-          $head4,
           $wrap4,
-          $head5,
-          $wrap5
+          $wrap5,
+          $wrap6,
         ));
-        }
+  }
 }

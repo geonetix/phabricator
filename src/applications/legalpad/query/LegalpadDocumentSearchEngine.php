@@ -1,106 +1,195 @@
 <?php
 
-/**
- * @group legalpad
- */
 final class LegalpadDocumentSearchEngine
   extends PhabricatorApplicationSearchEngine {
 
-  public function buildSavedQueryFromRequest(AphrontRequest $request) {
-    $saved = new PhabricatorSavedQuery();
-    $saved->setParameter(
-      'creatorPHIDs',
-      $this->readUsersFromRequest($request, 'creators'));
-
-    $saved->setParameter(
-      'contributorPHIDs',
-      $this->readUsersFromRequest($request, 'contributors'));
-
-    $saved->setParameter('createdStart', $request->getStr('createdStart'));
-    $saved->setParameter('createdEnd', $request->getStr('createdEnd'));
-
-    return $saved;
+  public function getResultTypeDescription() {
+    return pht('Legalpad Documents');
   }
 
-  public function buildQueryFromSavedQuery(PhabricatorSavedQuery $saved) {
-    $query = id(new LegalpadDocumentQuery())
-      ->withCreatorPHIDs($saved->getParameter('creatorPHIDs', array()))
-      ->withContributorPHIDs($saved->getParameter('contributorPHIDs', array()));
+  public function getApplicationClassName() {
+    return 'PhabricatorLegalpadApplication';
+  }
 
-    $start = $this->parseDateTime($saved->getParameter('createdStart'));
-    $end = $this->parseDateTime($saved->getParameter('createdEnd'));
+  public function newQuery() {
+    return id(new LegalpadDocumentQuery())
+      ->needViewerSignatures(true);
+  }
 
-    if ($start) {
-      $query->withDateCreatedAfter($start);
+  protected function buildCustomSearchFields() {
+    return array(
+      id(new PhabricatorUsersSearchField())
+        ->setLabel(pht('Signed By'))
+        ->setKey('signerPHIDs')
+        ->setAliases(array('signer', 'signers', 'signerPHID'))
+        ->setDescription(
+          pht('Search for documents signed by given users.')),
+      id(new PhabricatorUsersSearchField())
+        ->setLabel(pht('Creators'))
+        ->setKey('creatorPHIDs')
+        ->setAliases(array('creator', 'creators', 'creatorPHID'))
+        ->setDescription(
+          pht('Search for documents with given creators.')),
+      id(new PhabricatorUsersSearchField())
+        ->setLabel(pht('Contributors'))
+        ->setKey('contributorPHIDs')
+        ->setAliases(array('contributor', 'contributors', 'contributorPHID'))
+        ->setDescription(
+          pht('Search for documents with given contributors.')),
+      id(new PhabricatorSearchDateField())
+        ->setLabel(pht('Created After'))
+        ->setKey('createdStart'),
+      id(new PhabricatorSearchDateField())
+        ->setLabel(pht('Created Before'))
+        ->setKey('createdEnd'),
+    );
+  }
+
+  protected function buildQueryFromParameters(array $map) {
+    $query = $this->newQuery();
+
+    if ($map['signerPHIDs']) {
+      $query->withSignerPHIDs($map['signerPHIDs']);
     }
 
-    if ($end) {
-      $query->withDateCreatedBefore($end);
+    if ($map['contributorPHIDs']) {
+      $query->withContributorPHIDs($map['creatorPHIDs']);
+    }
+
+    if ($map['creatorPHIDs']) {
+      $query->withCreatorPHIDs($map['creatorPHIDs']);
+    }
+
+    if ($map['createdStart']) {
+      $query->withDateCreatedAfter($map['createdStart']);
+    }
+
+    if ($map['createdEnd']) {
+      $query->withDateCreatedAfter($map['createdStart']);
     }
 
     return $query;
-  }
-
-  public function buildSearchForm(
-    AphrontFormView $form,
-    PhabricatorSavedQuery $saved_query) {
-
-    $creator_phids = $saved_query->getParameter('creatorPHIDs', array());
-    $contributor_phids = $saved_query->getParameter(
-      'contributorPHIDs', array());
-    $phids = array_merge($creator_phids, $contributor_phids);
-    $handles = id(new PhabricatorHandleQuery())
-      ->setViewer($this->requireViewer())
-      ->withPHIDs($phids)
-      ->execute();
-
-    $form
-      ->appendChild(
-        id(new AphrontFormTokenizerControl())
-          ->setDatasource('/typeahead/common/users/')
-          ->setName('creators')
-          ->setLabel(pht('Creators'))
-          ->setValue(array_select_keys($handles, $creator_phids)))
-      ->appendChild(
-        id(new AphrontFormTokenizerControl())
-          ->setDatasource('/typeahead/common/users/')
-          ->setName('contributors')
-          ->setLabel(pht('Contributors'))
-          ->setValue(array_select_keys($handles, $contributor_phids)));
-
-    $this->buildDateRange(
-      $form,
-      $saved_query,
-      'createdStart',
-      pht('Created After'),
-      'createdEnd',
-      pht('Created Before'));
-
   }
 
   protected function getURI($path) {
     return '/legalpad/'.$path;
   }
 
-  public function getBuiltinQueryNames() {
-    $names = array(
-      'all' => pht('All Documents'),
-    );
+  protected function getBuiltinQueryNames() {
+    $names = array();
+
+    if ($this->requireViewer()->isLoggedIn()) {
+      $names['signed'] = pht('Signed Documents');
+    }
+
+    $names['all'] = pht('All Documents');
 
     return $names;
   }
 
   public function buildSavedQueryFromBuiltin($query_key) {
-
     $query = $this->newSavedQuery();
     $query->setQueryKey($query_key);
 
+    $viewer = $this->requireViewer();
+
     switch ($query_key) {
+      case 'signed':
+        return $query->setParameter('signerPHIDs', array($viewer->getPHID()));
       case 'all':
         return $query;
     }
 
     return parent::buildSavedQueryFromBuiltin($query_key);
+  }
+
+  protected function renderResultList(
+    array $documents,
+    PhabricatorSavedQuery $query,
+    array $handles) {
+    assert_instances_of($documents, 'LegalpadDocument');
+
+    $viewer = $this->requireViewer();
+
+    $list = new PHUIObjectItemListView();
+    $list->setUser($viewer);
+    foreach ($documents as $document) {
+      $last_updated = phabricator_date($document->getDateModified(), $viewer);
+
+      $title = $document->getTitle();
+
+      $item = id(new PHUIObjectItemView())
+        ->setObjectName($document->getMonogram())
+        ->setHeader($title)
+        ->setHref('/'.$document->getMonogram())
+        ->setObject($document);
+
+      $no_signatures = LegalpadDocument::SIGNATURE_TYPE_NONE;
+      if ($document->getSignatureType() == $no_signatures) {
+        $item->addIcon('none', pht('Not Signable'));
+      } else {
+
+        $type_name = $document->getSignatureTypeName();
+        $type_icon = $document->getSignatureTypeIcon();
+        $item->addIcon($type_icon, $type_name);
+
+        if ($viewer->getPHID()) {
+          $signature = $document->getUserSignature($viewer->getPHID());
+        } else {
+          $signature = null;
+        }
+
+        if ($signature) {
+          $item->addAttribute(
+            array(
+              id(new PHUIIconView())->setIcon('fa-check-square-o', 'green'),
+              ' ',
+              pht(
+                'Signed on %s',
+                phabricator_date($signature->getDateCreated(), $viewer)),
+            ));
+        } else {
+          $item->addAttribute(
+            array(
+              id(new PHUIIconView())->setIcon('fa-square-o', 'grey'),
+              ' ',
+              pht('Not Signed'),
+            ));
+        }
+      }
+
+      $item->addIcon(
+        'fa-pencil grey',
+        pht('Version %d (%s)', $document->getVersions(), $last_updated));
+
+      $list->addItem($item);
+    }
+
+    $result = new PhabricatorApplicationSearchResultView();
+    $result->setObjectList($list);
+    $result->setNoDataString(pht('No documents found.'));
+
+    return $result;
+  }
+
+  protected function getNewUserBody() {
+    $create_button = id(new PHUIButtonView())
+      ->setTag('a')
+      ->setText(pht('Create a Document'))
+      ->setHref('/legalpad/edit/')
+      ->setColor(PHUIButtonView::GREEN);
+
+    $icon = $this->getApplication()->getIcon();
+    $app_name =  $this->getApplication()->getName();
+    $view = id(new PHUIBigInfoView())
+      ->setIcon($icon)
+      ->setTitle(pht('Welcome to %s', $app_name))
+      ->setDescription(
+        pht('Create documents and track signatures. Can also be re-used in '.
+            'other areas of Phabricator, like CLAs.'))
+      ->addAction($create_button);
+
+      return $view;
   }
 
 }

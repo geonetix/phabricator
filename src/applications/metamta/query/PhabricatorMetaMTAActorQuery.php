@@ -33,14 +33,11 @@ final class PhabricatorMetaMTAActorQuery extends PhabricatorQuery {
 
     foreach ($type_map as $type => $phids) {
       switch ($type) {
-        case PhabricatorPeoplePHIDTypeUser::TYPECONST:
+        case PhabricatorPeopleUserPHIDType::TYPECONST:
           $this->loadUserActors($actors, $phids);
           break;
-        case PhabricatorPeoplePHIDTypeExternal::TYPECONST:
+        case PhabricatorPeopleExternalPHIDType::TYPECONST:
           $this->loadExternalUserActors($actors, $phids);
-          break;
-        case PhabricatorMailingListPHIDTypeList::TYPECONST:
-          $this->loadMailingListActors($actors, $phids);
           break;
         default:
           $this->loadUnknownActors($actors, $phids);
@@ -62,6 +59,7 @@ final class PhabricatorMetaMTAActorQuery extends PhabricatorQuery {
     $users = id(new PhabricatorPeopleQuery())
       ->setViewer($this->getViewer())
       ->withPHIDs($phids)
+      ->needUserSettings(true)
       ->execute();
     $users = mpull($users, null, 'getPHID');
 
@@ -70,26 +68,28 @@ final class PhabricatorMetaMTAActorQuery extends PhabricatorQuery {
 
       $user = idx($users, $phid);
       if (!$user) {
-        $actor->setUndeliverable(
-          pht('Unable to load user record for this PHID.'));
+        $actor->setUndeliverable(PhabricatorMetaMTAActor::REASON_UNLOADABLE);
       } else {
         $actor->setName($this->getUserName($user));
         if ($user->getIsDisabled()) {
-          $actor->setUndeliverable(
-            pht('This user is disabled; disabled users do not receive mail.'));
+          $actor->setUndeliverable(PhabricatorMetaMTAActor::REASON_DISABLED);
         }
         if ($user->getIsSystemAgent()) {
-          $actor->setUndeliverable(
-            pht('This user is a bot; bot accounts do not receive mail.'));
+          $actor->setUndeliverable(PhabricatorMetaMTAActor::REASON_BOT);
         }
+
+        // NOTE: We do send email to unapproved users, and to unverified users,
+        // because it would otherwise be impossible to get them to verify their
+        // email addresses. Possibly we should white-list this kind of mail and
+        // deny all other types of mail.
       }
 
       $email = idx($emails, $phid);
       if (!$email) {
-        $actor->setUndeliverable(
-          pht('Unable to load email record for this PHID.'));
+        $actor->setUndeliverable(PhabricatorMetaMTAActor::REASON_NO_ADDRESS);
       } else {
         $actor->setEmailAddress($email->getAddress());
+        $actor->setIsVerified($email->getIsVerified());
       }
     }
   }
@@ -108,54 +108,33 @@ final class PhabricatorMetaMTAActorQuery extends PhabricatorQuery {
 
       $xuser = idx($xusers, $phid);
       if (!$xuser) {
-        $actor->setUndeliverable(
-          pht('Unable to load external user record for this PHID.'));
+        $actor->setUndeliverable(PhabricatorMetaMTAActor::REASON_UNLOADABLE);
         continue;
       }
 
       $actor->setName($xuser->getDisplayName());
 
       if ($xuser->getAccountType() != 'email') {
-        $actor->setUndeliverable(
-          pht(
-            'Only external accounts of type "email" are deliverable; this '.
-            'account has a different type.'));
+        $actor->setUndeliverable(PhabricatorMetaMTAActor::REASON_EXTERNAL_TYPE);
         continue;
       }
 
       $actor->setEmailAddress($xuser->getAccountID());
+
+      // Circa T7477, it appears that we never intentionally send email to
+      // external users (even when they email "bugs@" to create a task).
+      // Mark these users as unverified so mail to them is always dropped.
+      // See also T12237. In the future, we might change this behavior.
+
+      $actor->setIsVerified(false);
     }
   }
 
-  private function loadMailingListActors(array $actors, array $phids) {
-    assert_instances_of($actors, 'PhabricatorMetaMTAActor');
-
-    $lists = id(new PhabricatorMailingListQuery())
-      ->setViewer($this->getViewer())
-      ->withPHIDs($phids)
-      ->execute();
-    $lists = mpull($lists, null, 'getPHID');
-
-    foreach ($phids as $phid) {
-      $actor = $actors[$phid];
-
-      $list = idx($lists, $phid);
-      if (!$list) {
-        $actor->setUndeliverable(
-          pht(
-            'Unable to load mailing list record for this PHID.'));
-        continue;
-      }
-
-      $actor->setName($list->getName());
-      $actor->setEmailAddress($list->getEmail());
-    }
-  }
 
   private function loadUnknownActors(array $actors, array $phids) {
     foreach ($phids as $phid) {
       $actor = $actors[$phid];
-      $actor->setUndeliverable(pht('This PHID type is not mailable.'));
+      $actor->setUndeliverable(PhabricatorMetaMTAActor::REASON_UNMAILABLE);
     }
   }
 
@@ -172,7 +151,8 @@ final class PhabricatorMetaMTAActorQuery extends PhabricatorQuery {
         $name = $user->getUserName();
         break;
       case 'real':
-        $name = $user->getRealName();
+        $name = strlen($user->getRealName()) ?
+          $user->getRealName() : $user->getUserName();
         break;
       case 'full':
       default:

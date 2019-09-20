@@ -3,80 +3,70 @@
 final class PhabricatorProjectTestDataGenerator
   extends PhabricatorTestDataGenerator {
 
-  private $xactions = array();
+  const GENERATORKEY = 'projects';
 
-  public function generate() {
-    $title = $this->generateTitle();
-    $author = $this->loadPhabrictorUser();
-    $authorPHID = $author->getPHID();
-    $project = id(new PhabricatorProject())
-      ->setName($title)
-      ->setAuthorPHID($authorPHID);
-
-    $this->addTransaction(
-      PhabricatorProjectTransaction::TYPE_NAME,
-      $title);
-    $this->addTransaction(
-      PhabricatorProjectTransaction::TYPE_MEMBERS,
-      $this->loadMembersWithAuthor($authorPHID));
-    $this->addTransaction(
-      PhabricatorProjectTransaction::TYPE_STATUS,
-      $this->generateProjectStatus());
-    $this->addTransaction(
-      PhabricatorTransactions::TYPE_VIEW_POLICY,
-      PhabricatorPolicies::POLICY_PUBLIC);
-    $this->addTransaction(
-      PhabricatorTransactions::TYPE_EDIT_POLICY,
-      PhabricatorPolicies::POLICY_PUBLIC);
-    $this->addTransaction(
-      PhabricatorTransactions::TYPE_JOIN_POLICY,
-      PhabricatorPolicies::POLICY_PUBLIC);
-
-    $editor = id(new PhabricatorProjectEditor($project))
-      ->setActor($author)
-      ->applyTransactions($this->xactions);
-
-    $profile = id(new PhabricatorProjectProfile())
-      ->setBlurb($this->generateDescription())
-      ->setProjectPHID($project->getPHID())
-      ->save();
-
-    return $project->save();
+  public function getGeneratorName() {
+    return pht('Projects');
   }
 
-  private function addTransaction($type, $value) {
-    $this->xactions[] = id(new PhabricatorProjectTransaction())
-      ->setTransactionType($type)
-      ->setNewValue($value);
-  }
+  public function generateObject() {
+    $author = $this->loadRandomUser();
+    $project = PhabricatorProject::initializeNewProject($author);
 
+    $xactions = array();
 
-  public function loadMembersWithAuthor($author) {
-    $members = array($author);
-    for ($i = 0; $i < rand(10, 20);$i++) {
-      $members[] = $this->loadPhabrictorUserPHID();
+    $xactions[] = $this->newTransaction(
+      PhabricatorProjectNameTransaction::TRANSACTIONTYPE,
+      $this->newProjectTitle());
+
+    $xactions[] = $this->newTransaction(
+      PhabricatorProjectStatusTransaction::TRANSACTIONTYPE,
+      $this->newProjectStatus());
+
+    // Almost always make the author a member.
+    $members = array();
+    if ($this->roll(1, 20) > 2) {
+      $members[] = $author->getPHID();
     }
-    return $members;
+
+    // Add a few other members.
+    $size = $this->roll(2, 6, -2);
+    for ($ii = 0; $ii < $size; $ii++) {
+      $members[] = $this->loadRandomUser()->getPHID();
+    }
+
+    $xactions[] = $this->newTransaction(
+      PhabricatorTransactions::TYPE_EDGE,
+      array(
+        '+' => array_fuse($members),
+      ),
+      array(
+        'edge:type' => PhabricatorProjectProjectHasMemberEdgeType::EDGECONST,
+      ));
+
+    $editor = id(new PhabricatorProjectTransactionEditor())
+      ->setActor($author)
+      ->setContentSource($this->getLipsumContentSource())
+      ->setContinueOnNoEffect(true)
+      ->applyTransactions($project, $xactions);
+
+    return $project;
   }
 
-  public function generateTitle() {
-    return id(new PhutilLipsumContextFreeGrammar())
+  protected function newEmptyTransaction() {
+    return new PhabricatorProjectTransaction();
+  }
+
+  public function newProjectTitle() {
+    return id(new PhabricatorProjectNameContextFreeGrammar())
       ->generate();
   }
 
-  public function generateDescription() {
-    return id(new PhutilLipsumContextFreeGrammar())
-      ->generateSeveral(rand(30, 40));
-  }
-
-  public function generateProjectStatus() {
-    $statuses = array_keys(PhabricatorProjectStatus::getStatusMap());
-    // Make sure 4/5th of all generated Projects are active
-    $random = rand(0, 4);
-    if ($random != 0) {
-      return $statuses[0];
+  public function newProjectStatus() {
+    if ($this->roll(1, 20) > 5) {
+      return PhabricatorProjectStatus::STATUS_ACTIVE;
     } else {
-      return $statuses[1];
+      return PhabricatorProjectStatus::STATUS_ARCHIVED;
     }
   }
 }

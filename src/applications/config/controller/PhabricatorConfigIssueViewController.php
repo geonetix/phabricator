@@ -3,23 +3,23 @@
 final class PhabricatorConfigIssueViewController
   extends PhabricatorConfigController {
 
-  private $issueKey;
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
+    $issue_key = $request->getURIData('key');
 
-  public function willProcessRequest(array $data) {
-    $this->issueKey = $data['key'];
-  }
+    $engine = new PhabricatorSetupEngine();
+    $response = $engine->execute();
+    if ($response) {
+      return $response;
+    }
+    $issues = $engine->getIssues();
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+    $nav = $this->buildSideNavView();
+    $nav->selectFilter('issue/');
 
-    $issues = PhabricatorSetupCheck::runAllChecks();
-    PhabricatorSetupCheck::setOpenSetupIssueCount(
-      PhabricatorSetupCheck::countUnignoredIssues($issues));
-
-    if (empty($issues[$this->issueKey])) {
-      $content = id(new AphrontErrorView())
-        ->setSeverity(AphrontErrorView::SEVERITY_NOTICE)
+    if (empty($issues[$issue_key])) {
+      $content = id(new PHUIInfoView())
+        ->setSeverity(PHUIInfoView::SEVERITY_NOTICE)
         ->setTitle(pht('Issue Resolved'))
         ->appendChild(pht('This setup issue has been resolved. '))
         ->appendChild(
@@ -31,31 +31,30 @@ final class PhabricatorConfigIssueViewController
             pht('Return to Open Issue List')));
       $title = pht('Resolved Issue');
     } else {
-      $issue = $issues[$this->issueKey];
+      $issue = $issues[$issue_key];
       $content = $this->renderIssue($issue);
       $title = $issue->getShortName();
     }
 
+    $header = $this->buildHeaderView($title);
+
     $crumbs = $this
       ->buildApplicationCrumbs()
-      ->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName(pht('Setup Issues'))
-          ->setHref($this->getApplicationURI('issue/')))
-      ->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName($title)
-          ->setHref($request->getRequestURI()));
+      ->setBorder(true)
+      ->addTextCrumb(pht('Setup Issues'), $this->getApplicationURI('issue/'))
+      ->addTextCrumb($title, $request->getRequestURI())
+      ->setBorder(true);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $content,
-      ),
-      array(
-        'title' => $title,
-        'device' => true,
-      ));
+    $content = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setNavigation($nav)
+      ->setFixed(true)
+      ->setMainColumn($content);
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($content);
   }
 
   private function renderIssue(PhabricatorSetupIssue $issue) {

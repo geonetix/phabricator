@@ -3,56 +3,53 @@
 final class PhabricatorConfigListController
   extends PhabricatorConfigController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
 
     $nav = $this->buildSideNavView();
     $nav->selectFilter('/');
 
     $groups = PhabricatorApplicationConfigOptions::loadAll();
-    $list = $this->buildConfigOptionsList($groups);
+    $core_list = $this->buildConfigOptionsList($groups, 'core');
+    $core_list = $this->buildConfigBoxView(pht('Core'), $core_list);
 
-    $title = pht('Phabricator Configuration');
+    $title = pht('Core Settings');
+    $header = $this->buildHeaderView($title);
 
-    $header = id(new PHUIHeaderView())
-      ->setHeader($title);
+    $crumbs = $this->buildApplicationCrumbs()
+      ->addTextCrumb($title)
+      ->setBorder(true);
 
-    $nav->appendChild(
-      array(
-        $header,
-        $list,
-      ));
+    $content = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setNavigation($nav)
+      ->setFixed(true)
+      ->setMainColumn($core_list);
 
-    $crumbs = $this
-      ->buildApplicationCrumbs()
-      ->addCrumb(
-        id(new PhabricatorCrumbView())
-          ->setName(pht('Config'))
-          ->setHref($this->getApplicationURI()));
-
-    $nav->setCrumbs($crumbs);
-
-    return $this->buildApplicationPage(
-      $nav,
-      array(
-        'title' => $title,
-        'device' => true,
-      ));
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild($content);
   }
 
-  private function buildConfigOptionsList(array $groups) {
+  private function buildConfigOptionsList(array $groups, $type) {
     assert_instances_of($groups, 'PhabricatorApplicationConfigOptions');
 
     $list = new PHUIObjectItemListView();
-    $list->setStackable(true);
+    $list->setBig(true);
     $groups = msort($groups, 'getName');
     foreach ($groups as $group) {
-      $item = id(new PHUIObjectItemView())
-        ->setHeader($group->getName())
-        ->setHref('/config/group/'.$group->getKey().'/')
-        ->addAttribute($group->getDescription());
-      $list->addItem($item);
+      if ($group->getGroup() == $type) {
+        $icon = id(new PHUIIconView())
+          ->setIcon($group->getIcon())
+          ->setBackground('bg-blue');
+        $item = id(new PHUIObjectItemView())
+          ->setHeader($group->getName())
+          ->setHref('/config/group/'.$group->getKey().'/')
+          ->addAttribute($group->getDescription())
+          ->setImageIcon($icon);
+        $list->addItem($item);
+      }
     }
 
     return $list;

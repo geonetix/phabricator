@@ -8,11 +8,39 @@ final class PhabricatorWorkerArchiveTask extends PhabricatorWorkerTask {
 
   protected $duration;
   protected $result;
+  protected $archivedEpoch;
+
+  protected function getConfiguration() {
+    $parent = parent::getConfiguration();
+
+    $config = array(
+      // We manage the IDs in this table; they are allocated in the ActiveTask
+      // table and moved here without alteration.
+      self::CONFIG_IDS => self::IDS_MANUAL,
+    ) + $parent;
+
+
+    $config[self::CONFIG_COLUMN_SCHEMA] = array(
+      'result' => 'uint32',
+      'duration' => 'uint64',
+      'archivedEpoch' => 'epoch?',
+    ) + $config[self::CONFIG_COLUMN_SCHEMA];
+
+    $config[self::CONFIG_KEY_SCHEMA] = array(
+      'dateCreated' => array(
+        'columns' => array('dateCreated'),
+      ),
+      'key_modified' => array(
+        'columns' => array('dateModified'),
+      ),
+    ) + $parent[self::CONFIG_KEY_SCHEMA];
+
+    return $config;
+  }
 
   public function save() {
     if ($this->getID() === null) {
-      throw new Exception(
-        "Trying to archive a task with no ID.");
+      throw new Exception(pht('Trying to archive a task with no ID.'));
     }
 
     $other = new PhabricatorWorkerActiveTask();
@@ -57,6 +85,9 @@ final class PhabricatorWorkerArchiveTask extends PhabricatorWorkerTask {
         ->setLeaseExpires(0)
         ->setFailureCount(0)
         ->setDataID($this->getDataID())
+        ->setPriority($this->getPriority())
+        ->setObjectPHID($this->getObjectPHID())
+        ->setDateCreated($this->getDateCreated())
         ->insert();
 
       $this->setDataID(null);

@@ -1,15 +1,23 @@
 <?php
 
-final class HeraldEngine {
+final class HeraldEngine extends Phobject {
 
   protected $rules = array();
   protected $results = array();
   protected $stack = array();
-  protected $activeRule = null;
+  protected $activeRule;
+  protected $transcript;
 
   protected $fieldCache = array();
-  protected $object = null;
+  protected $object;
   private $dryRun;
+
+  private $forbiddenFields = array();
+  private $forbiddenActions = array();
+  private $skipEffects = array();
+
+  private $profilerStack = array();
+  private $profilerFrames = array();
 
   public function setDryRun($dry_run) {
     $this->dryRun = $dry_run;
@@ -20,12 +28,12 @@ final class HeraldEngine {
     return $this->dryRun;
   }
 
-  public function getRule($id) {
-    return idx($this->rules, $id);
+  public function getRule($phid) {
+    return idx($this->rules, $phid);
   }
 
-  public static function loadAndApplyRules(HeraldAdapter $adapter) {
-    $rules = id(new HeraldRuleQuery())
+  public function loadRulesForAdapter(HeraldAdapter $adapter) {
+    return id(new HeraldRuleQuery())
       ->setViewer(PhabricatorUser::getOmnipotentUser())
       ->withDisabled(false)
       ->withContentTypes(array($adapter->getAdapterContentType()))
@@ -33,8 +41,12 @@ final class HeraldEngine {
       ->needAppliedToPHIDs(array($adapter->getPHID()))
       ->needValidateAuthors(true)
       ->execute();
+  }
 
+  public static function loadAndApplyRules(HeraldAdapter $adapter) {
     $engine = new HeraldEngine();
+
+    $rules = $engine->loadRulesForAdapter($adapter);
     $effects = $engine->applyRules($rules, $adapter);
     $engine->applyEffects($effects, $adapter, $rules);
 
@@ -45,7 +57,9 @@ final class HeraldEngine {
     assert_instances_of($rules, 'HeraldRule');
     $t_start = microtime(true);
 
-    $rules = mpull($rules, null, 'getID');
+    // Rules execute in a well-defined order: sort them into execution order.
+    $rules = msort($rules, 'getRuleExecutionOrderSortKey');
+    $rules = mpull($rules, null, 'getPHID');
 
     $this->transcript = new HeraldTranscript();
     $this->transcript->setObjectPHID((string)$object->getPHID());
@@ -55,50 +69,58 @@ final class HeraldEngine {
     $this->object  = $object;
 
     $effects = array();
-    foreach ($rules as $id => $rule) {
+    foreach ($rules as $phid => $rule) {
       $this->stack = array();
+
+      $is_first_only = $rule->isRepeatFirst();
+
       try {
         if (!$this->getDryRun() &&
-            ($rule->getRepetitionPolicy() ==
-             HeraldRepetitionPolicyConfig::FIRST) &&
+            $is_first_only &&
             $rule->getRuleApplied($object->getPHID())) {
           // This is not a dry run, and this rule is only supposed to be
           // applied a single time, and it's already been applied...
           // That means automatic failure.
-          $xscript = id(new HeraldRuleTranscript())
-            ->setRuleID($id)
+          $this->newRuleTranscript($rule)
             ->setResult(false)
-            ->setRuleName($rule->getName())
-            ->setRuleOwner($rule->getAuthorPHID())
             ->setReason(
-              "This rule is only supposed to be repeated a single time, ".
-              "and it has already been applied.");
-          $this->transcript->addRuleTranscript($xscript);
+              pht(
+                'This rule is only supposed to be repeated a single time, '.
+                'and it has already been applied.'));
+
           $rule_matches = false;
         } else {
-          $rule_matches = $this->doesRuleMatch($rule, $object);
+          if ($this->isForbidden($rule, $object)) {
+            $this->newRuleTranscript($rule)
+              ->setResult(HeraldRuleTranscript::RESULT_FORBIDDEN)
+              ->setReason(
+                pht(
+                  'Object state is not compatible with rule.'));
+
+            $rule_matches = false;
+          } else {
+            $rule_matches = $this->doesRuleMatch($rule, $object);
+          }
         }
       } catch (HeraldRecursiveConditionsException $ex) {
         $names = array();
-        foreach ($this->stack as $rule_id => $ignored) {
-          $names[] = '"'.$rules[$rule_id]->getName().'"';
+        foreach ($this->stack as $rule_phid => $ignored) {
+          $names[] = '"'.$rules[$rule_phid]->getName().'"';
         }
         $names = implode(', ', $names);
-        foreach ($this->stack as $rule_id => $ignored) {
-          $xscript = new HeraldRuleTranscript();
-          $xscript->setRuleID($rule_id);
-          $xscript->setResult(false);
-          $xscript->setReason(
-            "Rules {$names} are recursively dependent upon one another! ".
-            "Don't do this! You have formed an unresolvable cycle in the ".
-            "dependency graph!");
-          $xscript->setRuleName($rules[$rule_id]->getName());
-          $xscript->setRuleOwner($rules[$rule_id]->getAuthorPHID());
-          $this->transcript->addRuleTranscript($xscript);
+        foreach ($this->stack as $rule_phid => $ignored) {
+          $this->newRuleTranscript($rules[$rule_phid])
+            ->setResult(false)
+            ->setReason(
+              pht(
+                "Rules %s are recursively dependent upon one another! ".
+                "Don't do this! You have formed an unresolvable cycle in the ".
+                "dependency graph!",
+                $names));
         }
         $rule_matches = false;
       }
-      $this->results[$id] = $rule_matches;
+      $this->results[$phid] = $rule_matches;
 
       if ($rule_matches) {
         foreach ($this->getRuleEffects($rule, $object) as $effect) {
@@ -107,11 +129,19 @@ final class HeraldEngine {
       }
     }
 
-    $object_transcript = new HeraldObjectTranscript();
-    $object_transcript->setPHID($object->getPHID());
-    $object_transcript->setName($object->getHeraldName());
-    $object_transcript->setType($object->getAdapterContentType());
-    $object_transcript->setFields($this->fieldCache);
+    $xaction_phids = null;
+    $xactions = $object->getAppliedTransactions();
+    if ($xactions !== null) {
+      $xaction_phids = mpull($xactions, 'getPHID');
+    }
+
+    $object_transcript = id(new HeraldObjectTranscript())
+      ->setPHID($object->getPHID())
+      ->setName($object->getHeraldName())
+      ->setType($object->getAdapterContentType())
+      ->setFields($this->fieldCache)
+      ->setAppliedTransactionPHIDs($xaction_phids)
+      ->setProfile($this->getProfile());
 
     $this->transcript->setObjectTranscript($object_transcript);
 
@@ -153,15 +183,31 @@ final class HeraldEngine {
       return;
     }
 
-    $rules = mpull($rules, null, 'getID');
-    $applied_ids = array();
-    $first_policy = HeraldRepetitionPolicyConfig::toInt(
-      HeraldRepetitionPolicyConfig::FIRST);
+    // Update the "applied" state table. How this table works depends on the
+    // repetition policy for the rule.
+    //
+    // REPEAT_EVERY: We delete existing rows for the rule, then write nothing.
+    // This policy doesn't use any state.
+    //
+    // REPEAT_FIRST: We keep existing rows, then write additional rows for
+    // rules which fired. This policy accumulates state over the life of the
+    // object.
+    //
+    // REPEAT_CHANGE: We delete existing rows, then write all the rows which
+    // matched. This policy only uses the state from the previous run.
 
-    // Mark all the rules that have had their effects applied as having been
-    // executed for the current object.
+    $rules = mpull($rules, null, 'getID');
     $rule_ids = mpull($xscripts, 'getRuleID');
 
+    $delete_ids = array();
+    foreach ($rules as $rule_id => $rule) {
+      if ($rule->isRepeatFirst()) {
+        continue;
+      }
+      $delete_ids[] = $rule_id;
+    }
+
+    $applied_ids = array();
     foreach ($rule_ids as $rule_id) {
       if (!$rule_id) {
         // Some apply transcripts are purely informational and not associated
@@ -174,26 +220,44 @@ final class HeraldEngine {
         continue;
       }
 
-      if ($rule->getRepetitionPolicy() == $first_policy) {
+      if ($rule->isRepeatFirst() || $rule->isRepeatOnChange()) {
         $applied_ids[] = $rule_id;
       }
     }
 
-    if ($applied_ids) {
+    // Also include "only if this rule did not match the last time" rules
+    // which matched but were skipped in the "applied" list.
+    foreach ($this->skipEffects as $rule_id => $ignored) {
+      $applied_ids[] = $rule_id;
+    }
+
+    if ($delete_ids || $applied_ids) {
       $conn_w = id(new HeraldRule())->establishConnection('w');
-      $sql = array();
-      foreach ($applied_ids as $id) {
-        $sql[] = qsprintf(
+
+      if ($delete_ids) {
+        queryfx(
           $conn_w,
-          '(%s, %d)',
+          'DELETE FROM %T WHERE phid = %s AND ruleID IN (%Ld)',
+          HeraldRule::TABLE_RULE_APPLIED,
           $adapter->getPHID(),
-          $id);
+          $delete_ids);
       }
-      queryfx(
-        $conn_w,
-        'INSERT IGNORE INTO %T (phid, ruleID) VALUES %Q',
-        HeraldRule::TABLE_RULE_APPLIED,
-        implode(', ', $sql));
+
+      if ($applied_ids) {
+        $sql = array();
+        foreach ($applied_ids as $id) {
+          $sql[] = qsprintf(
+            $conn_w,
+            '(%s, %d)',
+            $adapter->getPHID(),
+            $id);
+        }
+        queryfx(
+          $conn_w,
+          'INSERT IGNORE INTO %T (phid, ruleID) VALUES %LQ',
+          HeraldRule::TABLE_RULE_APPLIED,
+          $sql);
+      }
     }
   }
 
@@ -206,25 +270,25 @@ final class HeraldEngine {
     HeraldRule $rule,
     HeraldAdapter $object) {
 
-    $id = $rule->getID();
+    $phid = $rule->getPHID();
 
-    if (isset($this->results[$id])) {
+    if (isset($this->results[$phid])) {
       // If we've already evaluated this rule because another rule depends
       // on it, we don't need to reevaluate it.
-      return $this->results[$id];
+      return $this->results[$phid];
     }
 
-    if (isset($this->stack[$id])) {
+    if (isset($this->stack[$phid])) {
       // We've recursed, fail all of the rules on the stack. This happens when
       // there's a dependency cycle with "Rule conditions match for rule ..."
       // conditions.
-      foreach ($this->stack as $rule_id => $ignored) {
-        $this->results[$rule_id] = false;
+      foreach ($this->stack as $rule_phid => $ignored) {
+        $this->results[$rule_phid] = false;
       }
       throw new HeraldRecursiveConditionsException();
     }
 
-    $this->stack[$id] = true;
+    $this->stack[$phid] = true;
 
     $all = $rule->getMustMatchAll();
 
@@ -235,35 +299,79 @@ final class HeraldEngine {
     $local_version = id(new HeraldRule())->getConfigVersion();
     if ($rule->getConfigVersion() > $local_version) {
       $reason = pht(
-        "Rule could not be processed, it was created with a newer version ".
-        "of Herald.");
+        'Rule could not be processed, it was created with a newer version '.
+        'of Herald.');
       $result = false;
     } else if (!$conditions) {
       $reason = pht(
-        "Rule failed automatically because it has no conditions.");
+        'Rule failed automatically because it has no conditions.');
       $result = false;
     } else if (!$rule->hasValidAuthor()) {
       $reason = pht(
-        "Rule failed automatically because its owner is invalid ".
-        "or disabled.");
+        'Rule failed automatically because its owner is invalid '.
+        'or disabled.');
       $result = false;
     } else if (!$this->canAuthorViewObject($rule, $object)) {
       $reason = pht(
-        "Rule failed automatically because it is a personal rule and its ".
-        "owner can not see the object.");
+        'Rule failed automatically because it is a personal rule and its '.
+        'owner can not see the object.');
+      $result = false;
+    } else if (!$this->canRuleApplyToObject($rule, $object)) {
+      $reason = pht(
+        'Rule failed automatically because it is an object rule which is '.
+        'not relevant for this object.');
       $result = false;
     } else {
       foreach ($conditions as $condition) {
-        $match = $this->doesConditionMatch($rule, $condition, $object);
+        try {
+          $this->getConditionObjectValue($condition, $object);
+        } catch (Exception $ex) {
+          $reason = pht(
+            'Field "%s" does not exist!',
+            $condition->getFieldName());
+          $result = false;
+          break;
+        }
+
+        // Here, we're profiling the cost to match the condition value against
+        // whatever test is configured. Normally, this cost should be very
+        // small (<<1ms) since it amounts to a single comparison:
+        //
+        //   [ Task author ][ is any of ][ alice ]
+        //
+        // However, it may be expensive in some cases, particularly if you
+        // write a rule with a very creative regular expression that backtracks
+        // explosively.
+        //
+        // At time of writing, the "Another Herald Rule" field is also
+        // evaluated inside the matching function. This may be arbitrarily
+        // expensive (it can prompt us to execute any finite number of other
+        // Herald rules), although we'll push the profiler stack appropriately
+        // so we don't count the evaluation time against this rule in the final
+        // profile.
+
+        $caught = null;
+
+        $this->pushProfilerRule($rule);
+        try {
+          $match = $this->doesConditionMatch($rule, $condition, $object);
+        } catch (Exception $ex) {
+          $caught = $ex;
+        }
+        $this->popProfilerRule($rule);
+
+        if ($caught) {
+          throw $ex;
+        }
 
         if (!$all && $match) {
-          $reason = "Any condition matched.";
+          $reason = pht('Any condition matched.');
           $result = true;
           break;
         }
 
         if ($all && !$match) {
-          $reason = "Not all conditions matched.";
+          $reason = pht('Not all conditions matched.');
           $result = false;
           break;
         }
@@ -271,23 +379,42 @@ final class HeraldEngine {
 
       if ($result === null) {
         if ($all) {
-          $reason = "All conditions matched.";
+          $reason = pht('All conditions matched.');
           $result = true;
         } else {
-          $reason = "No conditions matched.";
+          $reason = pht('No conditions matched.');
           $result = false;
         }
       }
     }
 
-    $rule_transcript = new HeraldRuleTranscript();
-    $rule_transcript->setRuleID($rule->getID());
-    $rule_transcript->setResult($result);
-    $rule_transcript->setReason($reason);
-    $rule_transcript->setRuleName($rule->getName());
-    $rule_transcript->setRuleOwner($rule->getAuthorPHID());
+    // If this rule matched, and is set to run "if it did not match the last
+    // time", and we matched the last time, we're going to return a match in
+    // the transcript but set a flag so we don't actually apply any effects.
 
-    $this->transcript->addRuleTranscript($rule_transcript);
+    // We need the rule to match so that storage gets updated properly. If we
+    // just pretend the rule didn't match it won't cause any effects (which
+    // is correct), but it also won't set the "it matched" flag in storage,
+    // so the next run after this one would incorrectly trigger again.
+
+    $is_dry_run = $this->getDryRun();
+    if ($result && !$is_dry_run) {
+      $is_on_change = $rule->isRepeatOnChange();
+      if ($is_on_change) {
+        $did_apply = $rule->getRuleApplied($object->getPHID());
+        if ($did_apply) {
+          $reason = pht(
+            'This rule matched, but did not take any actions because it '.
+            'is configured to act only if it did not match the last time.');
+
+          $this->skipEffects[$rule->getID()] = true;
+        }
+      }
+    }
+
+    $this->newRuleTranscript($rule)
+      ->setResult($result)
+      ->setReason($reason);
 
     return $result;
   }
@@ -298,16 +425,7 @@ final class HeraldEngine {
     HeraldAdapter $object) {
 
     $object_value = $this->getConditionObjectValue($condition, $object);
-    $test_value   = $condition->getValue();
-
-    $cond = $condition->getFieldCondition();
-
-    $transcript = new HeraldConditionTranscript();
-    $transcript->setRuleID($rule->getID());
-    $transcript->setConditionID($condition->getID());
-    $transcript->setFieldName($condition->getFieldName());
-    $transcript->setCondition($cond);
-    $transcript->setTestValue($test_value);
+    $transcript = $this->newConditionTranscript($rule, $condition);
 
     try {
       $result = $object->doesConditionMatch(
@@ -322,8 +440,6 @@ final class HeraldEngine {
 
     $transcript->setResult($result);
 
-    $this->transcript->addConditionTranscript($transcript);
-
     return $result;
   }
 
@@ -337,33 +453,54 @@ final class HeraldEngine {
   }
 
   public function getObjectFieldValue($field) {
-    if (isset($this->fieldCache[$field])) {
-      return $this->fieldCache[$field];
+    if (!array_key_exists($field, $this->fieldCache)) {
+      $adapter = $this->object;
+
+      $adapter->willGetHeraldField($field);
+
+      $caught = null;
+
+      $this->pushProfilerField($field);
+      try {
+        $value = $adapter->getHeraldField($field);
+      } catch (Exception $ex) {
+        $caught = $ex;
+      }
+      $this->popProfilerField($field);
+
+      if ($caught) {
+        throw $caught;
+      }
+
+      $this->fieldCache[$field] = $value;
     }
 
-    $result = $this->object->getHeraldField($field);
-
-    $this->fieldCache[$field] = $result;
-    return $result;
+    return $this->fieldCache[$field];
   }
 
   protected function getRuleEffects(
     HeraldRule $rule,
     HeraldAdapter $object) {
 
+    $rule_id = $rule->getID();
+    if (isset($this->skipEffects[$rule_id])) {
+      return array();
+    }
+
     $effects = array();
     foreach ($rule->getActions() as $action) {
-      $effect = new HeraldEffect();
-      $effect->setObjectPHID($object->getPHID());
-      $effect->setAction($action->getAction());
-      $effect->setTarget($action->getTarget());
-
-      $effect->setRuleID($rule->getID());
+      $effect = id(new HeraldEffect())
+        ->setObjectPHID($object->getPHID())
+        ->setAction($action->getAction())
+        ->setTarget($action->getTarget())
+        ->setRule($rule);
 
       $name = $rule->getName();
-      $id   = $rule->getID();
+      $id = $rule->getID();
       $effect->setReason(
-        'Conditions were met for Herald rule "'.$name.'" (#'.$id.').');
+        pht(
+          'Conditions were met for %s',
+          "H{$id} {$name}"));
 
       $effects[] = $effect;
     }
@@ -374,8 +511,8 @@ final class HeraldEngine {
     HeraldRule $rule,
     HeraldAdapter $adapter) {
 
-    // Authorship is irrelevant for global rules.
-    if ($rule->isGlobalRule()) {
+    // Authorship is irrelevant for global rules and object rules.
+    if ($rule->isGlobalRule() || $rule->isObjectRule()) {
       return true;
     }
 
@@ -397,5 +534,252 @@ final class HeraldEngine {
       $object,
       PhabricatorPolicyCapability::CAN_VIEW);
   }
+
+  private function canRuleApplyToObject(
+    HeraldRule $rule,
+    HeraldAdapter $adapter) {
+
+    // Rules which are not object rules can apply to anything.
+    if (!$rule->isObjectRule()) {
+      return true;
+    }
+
+    $trigger_phid = $rule->getTriggerObjectPHID();
+    $object_phids = $adapter->getTriggerObjectPHIDs();
+
+    if ($object_phids) {
+      if (in_array($trigger_phid, $object_phids)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private function newRuleTranscript(HeraldRule $rule) {
+    $xscript = id(new HeraldRuleTranscript())
+      ->setRuleID($rule->getID())
+      ->setRuleName($rule->getName())
+      ->setRuleOwner($rule->getAuthorPHID());
+
+    $this->transcript->addRuleTranscript($xscript);
+
+    return $xscript;
+  }
+
+  private function newConditionTranscript(
+    HeraldRule $rule,
+    HeraldCondition $condition) {
+
+    $xscript = id(new HeraldConditionTranscript())
+      ->setRuleID($rule->getID())
+      ->setConditionID($condition->getID())
+      ->setFieldName($condition->getFieldName())
+      ->setCondition($condition->getFieldCondition())
+      ->setTestValue($condition->getValue());
+
+    $this->transcript->addConditionTranscript($xscript);
+
+    return $xscript;
+  }
+
+  private function newApplyTranscript(
+    HeraldAdapter $adapter,
+    HeraldRule $rule,
+    HeraldActionRecord $action) {
+
+    $effect = id(new HeraldEffect())
+      ->setObjectPHID($adapter->getPHID())
+      ->setAction($action->getAction())
+      ->setTarget($action->getTarget())
+      ->setRule($rule);
+
+    $xscript = new HeraldApplyTranscript($effect, false);
+
+    $this->transcript->addApplyTranscript($xscript);
+
+    return $xscript;
+  }
+
+  private function isForbidden(
+    HeraldRule $rule,
+    HeraldAdapter $adapter) {
+
+    $forbidden = $adapter->getForbiddenActions();
+    if (!$forbidden) {
+      return false;
+    }
+
+    $forbidden = array_fuse($forbidden);
+
+    $is_forbidden = false;
+
+    foreach ($rule->getConditions() as $condition) {
+      $field_key = $condition->getFieldName();
+
+      if (!isset($this->forbiddenFields[$field_key])) {
+        $reason = null;
+
+        try {
+          $states = $adapter->getRequiredFieldStates($field_key);
+        } catch (Exception $ex) {
+          $states = array();
+        }
+
+        foreach ($states as $state) {
+          if (!isset($forbidden[$state])) {
+            continue;
+          }
+          $reason = $adapter->getForbiddenReason($state);
+          break;
+        }
+
+        $this->forbiddenFields[$field_key] = $reason;
+      }
+
+      $forbidden_reason = $this->forbiddenFields[$field_key];
+      if ($forbidden_reason !== null) {
+        $this->newConditionTranscript($rule, $condition)
+          ->setResult(HeraldConditionTranscript::RESULT_FORBIDDEN)
+          ->setNote($forbidden_reason);
+
+        $is_forbidden = true;
+      }
+    }
+
+    foreach ($rule->getActions() as $action_record) {
+      $action_key = $action_record->getAction();
+
+      if (!isset($this->forbiddenActions[$action_key])) {
+        $reason = null;
+
+        try {
+          $states = $adapter->getRequiredActionStates($action_key);
+        } catch (Exception $ex) {
+          $states = array();
+        }
+
+        foreach ($states as $state) {
+          if (!isset($forbidden[$state])) {
+            continue;
+          }
+          $reason = $adapter->getForbiddenReason($state);
+          break;
+        }
+
+        $this->forbiddenActions[$action_key] = $reason;
+      }
+
+      $forbidden_reason = $this->forbiddenActions[$action_key];
+      if ($forbidden_reason !== null) {
+        $this->newApplyTranscript($adapter, $rule, $action_record)
+          ->setAppliedReason(
+            array(
+              array(
+                'type' => HeraldAction::DO_STANDARD_FORBIDDEN,
+                'data' => $forbidden_reason,
+              ),
+            ));
+
+        $is_forbidden = true;
+      }
+    }
+
+    return $is_forbidden;
+  }
+
+/* -(  Profiler  )----------------------------------------------------------- */
+
+  private function pushProfilerField($field_key) {
+    return $this->pushProfilerStack('field', $field_key);
+  }
+
+  private function popProfilerField($field_key) {
+    return $this->popProfilerStack('field', $field_key);
+  }
+
+  private function pushProfilerRule(HeraldRule $rule) {
+    return $this->pushProfilerStack('rule', $rule->getPHID());
+  }
+
+  private function popProfilerRule(HeraldRule $rule) {
+    return $this->popProfilerStack('rule', $rule->getPHID());
+  }
+
+  private function pushProfilerStack($type, $key) {
+    $this->profilerStack[] = array(
+      'type' => $type,
+      'key' => $key,
+      'start' => microtime(true),
+    );
+
+    return $this;
+  }
+
+  private function popProfilerStack($type, $key) {
+    if (!$this->profilerStack) {
+      throw new Exception(
+        pht(
+          'Unable to pop profiler stack: profiler stack is empty.'));
+    }
+
+    $frame = last($this->profilerStack);
+    if (($frame['type'] !== $type) || ($frame['key'] !== $key)) {
+      throw new Exception(
+        pht(
+          'Unable to pop profiler stack: expected frame of type "%s" with '.
+          'key "%s", but found frame of type "%s" with key "%s".',
+          $type,
+          $key,
+          $frame['type'],
+          $frame['key']));
+    }
+
+    // Accumulate the new timing information into the existing profile. If this
+    // is the first time we've seen this particular rule or field, we'll
+    // create a new empty frame first.
+
+    $elapsed = microtime(true) - $frame['start'];
+    $frame_key = sprintf('%s/%s', $type, $key);
+
+    if (!isset($this->profilerFrames[$frame_key])) {
+      $current = array(
+        'type' => $type,
+        'key' => $key,
+        'elapsed' => 0,
+        'count' => 0,
+      );
+    } else {
+      $current = $this->profilerFrames[$frame_key];
+    }
+
+    $current['elapsed'] += $elapsed;
+    $current['count']++;
+
+    $this->profilerFrames[$frame_key] = $current;
+
+    array_pop($this->profilerStack);
+  }
+
+  private function getProfile() {
+    if ($this->profilerStack) {
+      $frame = last($this->profilerStack);
+      $frame_type = $frame['type'];
+      $frame_key = $frame['key'];
+      $frame_count = count($this->profilerStack);
+
+      throw new Exception(
+        pht(
+          'Unable to retrieve profile: profiler stack is not empty. The '.
+          'stack has %s frame(s); the final frame has type "%s" and key '.
+          '"%s".',
+          new PhutilNumber($frame_count),
+          $frame_type,
+          $frame_key));
+    }
+
+    return array_values($this->profilerFrames);
+  }
+
 
 }

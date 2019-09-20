@@ -2,89 +2,71 @@
 
 final class PhabricatorFactChartController extends PhabricatorFactController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $request->getViewer();
 
-    $table = new PhabricatorFactRaw();
-    $conn_r = $table->establishConnection('r');
-    $table_name = $table->getTableName();
-
-    $series = $request->getStr('y1');
-
-    $specs = PhabricatorFactSpec::newSpecsForFactTypes(
-      PhabricatorFactEngine::loadAllEngines(),
-      array($series));
-    $spec = idx($specs, $series);
-
-    $data = queryfx_all(
-      $conn_r,
-      'SELECT valueX, epoch FROM %T WHERE factType = %s ORDER BY epoch ASC',
-      $table_name,
-      $series);
-
-    $points = array();
-    $sum = 0;
-    foreach ($data as $key => $row) {
-      $sum += (int)$row['valueX'];
-      $points[(int)$row['epoch']] = $sum;
+    $chart_key = $request->getURIData('chartKey');
+    if ($chart_key === null) {
+      return $this->newDemoChart();
     }
 
-    if (!$points) {
-      // NOTE: Raphael crashes Safari if you hand it series with no points.
-      throw new Exception("No data to show!");
+    $engine = id(new PhabricatorChartRenderingEngine())
+      ->setViewer($viewer);
+
+    $chart = $engine->loadChart($chart_key);
+    if (!$chart) {
+      return new Aphront404Response();
     }
 
-    // Limit amount of data passed to browser.
-    $count = count($points);
-    $limit = 2000;
-    if ($count > $limit) {
-      $i = 0;
-      $every = ceil($count / $limit);
-      foreach ($points as $epoch => $sum) {
-        $i++;
-        if ($i % $every && $i != $count) {
-          unset($points[$epoch]);
-        }
-      }
+    // When drawing a chart, we send down a placeholder piece of HTML first,
+    // then fetch the data via async request. Determine if we're drawing
+    // the structure or actually pulling the data.
+    $mode = $request->getURIData('mode');
+    $is_draw_mode = ($mode === 'draw');
+
+    // TODO: For now, always pull the data. We'll throw it away if we're just
+    // drawing the frame, but this makes errors easier to debug.
+    $chart_data = $engine->newChartData();
+
+    if ($is_draw_mode) {
+      return id(new AphrontAjaxResponse())->setContent($chart_data);
     }
 
-    $x = array_keys($points);
-    $y = array_values($points);
+    $chart_view = $engine->newChartView();
+    $tabular_view = $engine->newTabularView();
 
-    $id = celerity_generate_unique_node_id();
-    $chart = phutil_tag(
-      'div',
-      array(
-        'id' => $id,
-        'style' => 'border: 1px solid #6f6f6f; '.
-                   'margin: 1em 2em; '.
-                   'background: #ffffff; '.
-                   'height: 400px; ',
-      ),
-      '');
+    return $this->newChartResponse($chart_view, $tabular_view);
+  }
 
-    require_celerity_resource('raphael-core');
-    require_celerity_resource('raphael-g');
-    require_celerity_resource('raphael-g-line');
+  private function newChartResponse($chart_view, $tabular_view) {
+    $box = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Chart'))
+      ->appendChild($chart_view);
 
-    Javelin::initBehavior('line-chart', array(
-      'hardpoint' => $id,
-      'x' => array($x),
-      'y' => array($y),
-      'xformat' => 'epoch',
-      'colors' => array('#0000ff'),
-    ));
+    $crumbs = $this->buildApplicationCrumbs()
+      ->addTextCrumb(pht('Chart'))
+      ->setBorder(true);
 
-    $panel = new AphrontPanelView();
-    $panel->setHeader('Count of '.$spec->getName());
-    $panel->appendChild($chart);
+    $title = pht('Chart');
 
-    return $this->buildStandardPageResponse(
-      $panel,
-      array(
-        'title' => 'Chart',
-      ));
+    return $this->newPage()
+      ->setTitle($title)
+      ->setCrumbs($crumbs)
+      ->appendChild(
+        array(
+          $box,
+          $tabular_view,
+        ));
+  }
+
+  private function newDemoChart() {
+    $viewer = $this->getViewer();
+
+    $chart = id(new PhabricatorDemoChartEngine())
+      ->setViewer($viewer)
+      ->newStoredChart();
+
+    return id(new AphrontRedirectResponse())->setURI($chart->getURI());
   }
 
 }

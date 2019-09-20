@@ -37,11 +37,14 @@
  * @task markup Markup Pipeline
  * @task engine Engine Construction
  */
-final class PhabricatorMarkupEngine {
+final class PhabricatorMarkupEngine extends Phobject {
 
   private $objects = array();
   private $viewer;
-  private $version = 8;
+  private $contextObject;
+  private $version = 19;
+  private $engineCaches = array();
+  private $auxiliaryConfig = array();
 
 
 /* -(  Markup Pipeline  )---------------------------------------------------- */
@@ -54,15 +57,18 @@ final class PhabricatorMarkupEngine {
    * @param PhabricatorMarkupInterface  The object to render.
    * @param string                      The field to render.
    * @param PhabricatorUser             User viewing the markup.
+   * @param object                      A context object for policy checks
    * @return string                     Marked up output.
    * @task markup
    */
   public static function renderOneObject(
     PhabricatorMarkupInterface $object,
     $field,
-    PhabricatorUser $viewer) {
+    PhabricatorUser $viewer,
+    $context_object = null) {
     return id(new PhabricatorMarkupEngine())
       ->setViewer($viewer)
+      ->setContextObject($context_object)
       ->addObject($object, $field)
       ->process()
       ->getOutput($object, $field);
@@ -105,7 +111,7 @@ final class PhabricatorMarkupEngine {
     }
 
     if (!$keys) {
-      return;
+      return $this;
     }
 
     $objects = array_select_keys($this->objects, $keys);
@@ -116,6 +122,11 @@ final class PhabricatorMarkupEngine {
     foreach ($objects as $key => $info) {
       $engines[$key] = $info['object']->newMarkupEngine($info['field']);
       $engines[$key]->setConfig('viewer', $this->viewer);
+      $engines[$key]->setConfig('contextObject', $this->contextObject);
+
+      foreach ($this->auxiliaryConfig as $aux_key => $aux_value) {
+        $engines[$key]->setConfig($aux_key, $aux_value);
+      }
     }
 
     // Load or build the preprocessor caches.
@@ -185,12 +196,14 @@ final class PhabricatorMarkupEngine {
   private function requireKeyProcessed($key) {
     if (empty($this->objects[$key])) {
       throw new Exception(
-        "Call addObject() before using results (key = '{$key}').");
+        pht(
+          "Call %s before using results (key = '%s').",
+          'addObject()',
+          $key));
     }
 
     if (!isset($this->objects[$key]['output'])) {
-      throw new Exception(
-        "Call process() before using results.");
+      throw new PhutilInvalidStateException('process');
     }
   }
 
@@ -202,13 +215,16 @@ final class PhabricatorMarkupEngine {
     PhabricatorMarkupInterface $object,
     $field) {
 
-    $custom = array_merge(
-      self::loadCustomInlineRules(),
-      self::loadCustomBlockRules());
+    static $custom;
+    if ($custom === null) {
+      $custom = array_merge(
+        self::loadCustomInlineRules(),
+        self::loadCustomBlockRules());
 
-    $custom = mpull($custom, 'getRuleVersion', null);
-    ksort($custom);
-    $custom = PhabricatorHash::digestForIndex(serialize($custom));
+      $custom = mpull($custom, 'getRuleVersion', null);
+      ksort($custom);
+      $custom = PhabricatorHash::digestForIndex(serialize($custom));
+    }
 
     return $object->getMarkupFieldKey($field).'@'.$this->version.'@'.$custom;
   }
@@ -238,8 +254,12 @@ final class PhabricatorMarkupEngine {
       }
     }
 
+    $is_readonly = PhabricatorEnv::isReadOnly();
+
     foreach ($objects as $key => $info) {
-      if (isset($blocks[$key])) {
+      // False check in case MySQL doesn't support unicode characters
+      // in the string (T1191), resulting in unserialize returning false.
+      if (isset($blocks[$key]) && $blocks[$key]->getCacheData() !== false) {
         // If we already have a preprocessing cache, we don't need to rebuild
         // it.
         continue;
@@ -261,7 +281,7 @@ final class PhabricatorMarkupEngine {
         ->setCacheData($data)
         ->setMetadata($metadata);
 
-      if (isset($use_cache[$key])) {
+      if (isset($use_cache[$key]) && !$is_readonly) {
         // This is just filling a cache and always safe, even on a read pathway.
         $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
           $blocks[$key]->replace();
@@ -282,6 +302,24 @@ final class PhabricatorMarkupEngine {
    */
   public function setViewer(PhabricatorUser $viewer) {
     $this->viewer = $viewer;
+    return $this;
+  }
+
+  /**
+   * Set the context object. Used to implement object permissions.
+   *
+   * @param The object in which context this remarkup is used.
+   * @return this
+   * @task markup
+   */
+  public function setContextObject($object) {
+    $this->contextObject = $object;
+    return $this;
+  }
+
+  public function setAuxiliaryConfig($key, $value) {
+    // TODO: This is gross and should be removed. Avoid use.
+    $this->auxiliaryConfig[$key] = $value;
     return $this;
   }
 
@@ -313,9 +351,13 @@ final class PhabricatorMarkupEngine {
    * @task engine
    */
   public static function newPhameMarkupEngine() {
-    return self::newMarkupEngine(array(
-      'macros' => false,
-    ));
+    return self::newMarkupEngine(
+      array(
+        'macros' => false,
+        'uri.full' => true,
+        'uri.same-window' => true,
+        'uri.base' => PhabricatorEnv::getURI('/'),
+      ));
   }
 
 
@@ -327,8 +369,15 @@ final class PhabricatorMarkupEngine {
       array(
         'macros'      => false,
         'youtube'     => false,
-
       ));
+  }
+
+  /**
+   * @task engine
+   */
+  public static function newCalendarMarkupEngine() {
+    return self::newMarkupEngine(array(
+    ));
   }
 
 
@@ -347,6 +396,7 @@ final class PhabricatorMarkupEngine {
    */
   public static function newDiffusionMarkupEngine(array $options = array()) {
     return self::newMarkupEngine(array(
+      'header.generate-toc' => true,
     ));
   }
 
@@ -364,14 +414,33 @@ final class PhabricatorMarkupEngine {
       case 'default':
         $engine = self::newMarkupEngine(array());
         break;
+      case 'feed':
+        $engine = self::newMarkupEngine(array());
+        $engine->setConfig('autoplay.disable', true);
+        break;
+      case 'nolinebreaks':
+        $engine = self::newMarkupEngine(array());
+        $engine->setConfig('preserve-linebreaks', false);
+        break;
+      case 'diffusion-readme':
+        $engine = self::newMarkupEngine(array());
+        $engine->setConfig('preserve-linebreaks', false);
+        $engine->setConfig('header.generate-toc', true);
+        break;
       case 'diviner':
         $engine = self::newMarkupEngine(array());
         $engine->setConfig('preserve-linebreaks', false);
   //    $engine->setConfig('diviner.renderer', new DivinerDefaultRenderer());
         $engine->setConfig('header.generate-toc', true);
         break;
+      case 'extract':
+        // Engine used for reference/edge extraction. Turn off anything which
+        // is slow and doesn't change reference extraction.
+        $engine = self::newMarkupEngine(array());
+        $engine->setConfig('pygments.enabled', false);
+        break;
       default:
-        throw new Exception("Unknown engine ruleset: {$ruleset}!");
+        throw new Exception(pht('Unknown engine ruleset: %s!', $ruleset));
     }
 
     $engines[$ruleset] = $engine;
@@ -391,6 +460,7 @@ final class PhabricatorMarkupEngine {
       'macros'        => true,
       'uri.allowed-protocols' => PhabricatorEnv::getEnvConfig(
         'uri.allowed-protocols'),
+      'uri.full' => false,
       'syntax-highlighter.engine' => PhabricatorEnv::getEnvConfig(
         'syntax-highlighter.engine'),
       'preserve-linebreaks' => true,
@@ -402,12 +472,12 @@ final class PhabricatorMarkupEngine {
    * @task engine
    */
   public static function newMarkupEngine(array $options) {
-
     $options += self::getMarkupEngineDefaultConfiguration();
 
     $engine = new PhutilRemarkupEngine();
 
     $engine->setConfig('preserve-linebreaks', $options['preserve-linebreaks']);
+
     $engine->setConfig('pygments.enabled', $options['pygments']);
     $engine->setConfig(
       'uri.allowed-protocols',
@@ -418,16 +488,37 @@ final class PhabricatorMarkupEngine {
       'syntax-highlighter.engine',
       $options['syntax-highlighter.engine']);
 
+    $style_map = id(new PhabricatorDefaultSyntaxStyle())
+      ->getRemarkupStyleMap();
+    $engine->setConfig('phutil.codeblock.style-map', $style_map);
+
+    $engine->setConfig('uri.full', $options['uri.full']);
+
+    if (isset($options['uri.base'])) {
+      $engine->setConfig('uri.base', $options['uri.base']);
+    }
+
+    if (isset($options['uri.same-window'])) {
+      $engine->setConfig('uri.same-window', $options['uri.same-window']);
+    }
+
     $rules = array();
-    $rules[] = new PhutilRemarkupRuleEscapeRemarkup();
-    $rules[] = new PhutilRemarkupRuleMonospace();
+    $rules[] = new PhutilRemarkupEscapeRemarkupRule();
+    $rules[] = new PhutilRemarkupMonospaceRule();
 
 
-    $rules[] = new PhutilRemarkupRuleDocumentLink();
+    $rules[] = new PhutilRemarkupDocumentLinkRule();
+    $rules[] = new PhabricatorNavigationRemarkupRule();
+    $rules[] = new PhabricatorKeyboardRemarkupRule();
+    $rules[] = new PhabricatorConfigRemarkupRule();
 
     if ($options['youtube']) {
-      $rules[] = new PhabricatorRemarkupRuleYoutube();
+      $rules[] = new PhabricatorYoutubeRemarkupRule();
     }
+
+    $rules[] = new PhabricatorIconRemarkupRule();
+    $rules[] = new PhabricatorEmojiRemarkupRule();
+    $rules[] = new PhabricatorHandleRemarkupRule();
 
     $applications = PhabricatorApplication::getAllInstalledApplications();
     foreach ($applications as $application) {
@@ -436,33 +527,36 @@ final class PhabricatorMarkupEngine {
       }
     }
 
-    $rules[] = new PhutilRemarkupRuleHyperlink();
+    $rules[] = new PhutilRemarkupHyperlinkRule();
 
     if ($options['macros']) {
-      $rules[] = new PhabricatorRemarkupRuleImageMacro();
-      $rules[] = new PhabricatorRemarkupRuleMeme();
+      $rules[] = new PhabricatorImageMacroRemarkupRule();
+      $rules[] = new PhabricatorMemeRemarkupRule();
     }
 
-    $rules[] = new PhutilRemarkupRuleBold();
-    $rules[] = new PhutilRemarkupRuleItalic();
-    $rules[] = new PhutilRemarkupRuleDel();
+    $rules[] = new PhutilRemarkupBoldRule();
+    $rules[] = new PhutilRemarkupItalicRule();
+    $rules[] = new PhutilRemarkupDelRule();
+    $rules[] = new PhutilRemarkupUnderlineRule();
+    $rules[] = new PhutilRemarkupHighlightRule();
 
     foreach (self::loadCustomInlineRules() as $rule) {
-      $rules[] = $rule;
+      $rules[] = clone $rule;
     }
 
     $blocks = array();
-    $blocks[] = new PhutilRemarkupEngineRemarkupQuotesBlockRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupLiteralBlockRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupHeaderBlockRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupHorizontalRuleBlockRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupListBlockRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupCodeBlockRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupNoteBlockRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupTableBlockRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupSimpleTableBlockRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupInterpreterRule();
-    $blocks[] = new PhutilRemarkupEngineRemarkupDefaultBlockRule();
+    $blocks[] = new PhutilRemarkupQuotesBlockRule();
+    $blocks[] = new PhutilRemarkupReplyBlockRule();
+    $blocks[] = new PhutilRemarkupLiteralBlockRule();
+    $blocks[] = new PhutilRemarkupHeaderBlockRule();
+    $blocks[] = new PhutilRemarkupHorizontalRuleBlockRule();
+    $blocks[] = new PhutilRemarkupListBlockRule();
+    $blocks[] = new PhutilRemarkupCodeBlockRule();
+    $blocks[] = new PhutilRemarkupNoteBlockRule();
+    $blocks[] = new PhutilRemarkupTableBlockRule();
+    $blocks[] = new PhutilRemarkupSimpleTableBlockRule();
+    $blocks[] = new PhutilRemarkupInterpreterBlockRule();
+    $blocks[] = new PhutilRemarkupDefaultBlockRule();
 
     foreach (self::loadCustomBlockRules() as $rule) {
       $blocks[] = $rule;
@@ -477,16 +571,19 @@ final class PhabricatorMarkupEngine {
     return $engine;
   }
 
-  public static function extractPHIDsFromMentions(array $content_blocks) {
+  public static function extractPHIDsFromMentions(
+    PhabricatorUser $viewer,
+    array $content_blocks) {
+
     $mentions = array();
 
     $engine = self::newDifferentialMarkupEngine();
-    $engine->setConfig('viewer', PhabricatorUser::getOmnipotentUser());
+    $engine->setConfig('viewer', $viewer);
 
     foreach ($content_blocks as $content_block) {
       $engine->markupText($content_block);
       $phids = $engine->getTextMetadata(
-        PhabricatorRemarkupRuleMention::KEY_MENTIONED,
+        PhabricatorMentionRemarkupRule::KEY_MENTIONED,
         array());
       $mentions += $phids;
     }
@@ -495,21 +592,46 @@ final class PhabricatorMarkupEngine {
   }
 
   public static function extractFilePHIDsFromEmbeddedFiles(
+    PhabricatorUser $viewer,
     array $content_blocks) {
     $files = array();
 
     $engine = self::newDifferentialMarkupEngine();
-    $engine->setConfig('viewer', PhabricatorUser::getOmnipotentUser());
+    $engine->setConfig('viewer', $viewer);
 
     foreach ($content_blocks as $content_block) {
       $engine->markupText($content_block);
-      $ids = $engine->getTextMetadata(
-        PhabricatorRemarkupRuleEmbedFile::KEY_EMBED_FILE_PHIDS,
+      $phids = $engine->getTextMetadata(
+        PhabricatorEmbedFileRemarkupRule::KEY_EMBED_FILE_PHIDS,
         array());
-      $files += $ids;
+      foreach ($phids as $phid) {
+        $files[$phid] = $phid;
+      }
     }
 
-    return $files;
+    return array_values($files);
+  }
+
+  public static function summarizeSentence($corpus) {
+    $corpus = trim($corpus);
+    $blocks = preg_split('/\n+/', $corpus, 2);
+    $block = head($blocks);
+
+    $sentences = preg_split(
+      '/\b([.?!]+)\B/u',
+      $block,
+      2,
+      PREG_SPLIT_DELIM_CAPTURE);
+
+    if (count($sentences) > 1) {
+      $result = $sentences[0].$sentences[1];
+    } else {
+      $result = head($sentences);
+    }
+
+    return id(new PhutilUTF8StringTruncator())
+      ->setMaximumGlyphs(128)
+      ->truncateString($result);
   }
 
   /**
@@ -531,7 +653,7 @@ final class PhabricatorMarkupEngine {
     //  - Hopefully don't return too much text. We don't explicitly limit
     //    this right now.
 
-    $blocks = preg_split("/\n *\n\s*/", trim($corpus));
+    $blocks = preg_split("/\n *\n\s*/", $corpus);
 
     $best = null;
     foreach ($blocks as $block) {
@@ -562,15 +684,30 @@ final class PhabricatorMarkupEngine {
   }
 
   private static function loadCustomInlineRules() {
-    return id(new PhutilSymbolLoader())
+    return id(new PhutilClassMapQuery())
       ->setAncestorClass('PhabricatorRemarkupCustomInlineRule')
-      ->loadObjects();
+      ->execute();
   }
 
   private static function loadCustomBlockRules() {
-    return id(new PhutilSymbolLoader())
+    return id(new PhutilClassMapQuery())
       ->setAncestorClass('PhabricatorRemarkupCustomBlockRule')
-      ->loadObjects();
+      ->execute();
+  }
+
+  public static function digestRemarkupContent($object, $content) {
+    $parts = array();
+    $parts[] = get_class($object);
+
+    if ($object instanceof PhabricatorLiskDAO) {
+      $parts[] = $object->getID();
+    }
+
+    $parts[] = $content;
+
+    $message = implode("\n", $parts);
+
+    return PhabricatorHash::digestWithNamedKey($message, 'remarkup');
   }
 
 }

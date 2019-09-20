@@ -7,6 +7,7 @@
  */
 final class PHUIFormLayoutView extends AphrontView {
 
+  private $classes = array();
   private $fullWidth;
 
   public function setFullWidth($width) {
@@ -14,8 +15,32 @@ final class PHUIFormLayoutView extends AphrontView {
     return $this;
   }
 
+  public function addClass($class) {
+    $this->classes[] = $class;
+    return $this;
+  }
+
+  public function appendInstructions($text) {
+    return $this->appendChild(
+      phutil_tag(
+        'div',
+        array(
+          'class' => 'aphront-form-instructions',
+        ),
+        $text));
+  }
+
+  public function appendRemarkupInstructions($remarkup) {
+    $view = id(new AphrontFormView())
+      ->setViewer($this->getViewer())
+      ->newInstructionsRemarkupView($remarkup);
+
+    return $this->appendInstructions($view);
+  }
+
   public function render() {
-    $classes = array('phui-form-view');
+    $classes = $this->classes;
+    $classes[] = 'phui-form-view';
 
     if ($this->fullWidth) {
       $classes[] = 'phui-form-full-width';

@@ -1,26 +1,80 @@
 <?php
 
 /**
- *
- * @task  status  Method Status
- * @group conduit
+ * @task info Method Information
+ * @task status Method Status
+ * @task pager Paging Results
  */
 abstract class ConduitAPIMethod
   extends Phobject
   implements PhabricatorPolicyInterface {
 
-  const METHOD_STATUS_STABLE      = 'stable';
-  const METHOD_STATUS_UNSTABLE    = 'unstable';
-  const METHOD_STATUS_DEPRECATED  = 'deprecated';
+  private $viewer;
 
+  const METHOD_STATUS_STABLE = 'stable';
+  const METHOD_STATUS_UNSTABLE = 'unstable';
+  const METHOD_STATUS_DEPRECATED = 'deprecated';
+  const METHOD_STATUS_FROZEN = 'frozen';
+
+  const SCOPE_NEVER = 'scope.never';
+  const SCOPE_ALWAYS = 'scope.always';
+
+  /**
+   * Get a short, human-readable text summary of the method.
+   *
+   * @return string Short summary of method.
+   * @task info
+   */
+  public function getMethodSummary() {
+    return $this->getMethodDescription();
+  }
+
+
+  /**
+   * Get a detailed description of the method.
+   *
+   * This method should return remarkup.
+   *
+   * @return string Detailed description of the method.
+   * @task info
+   */
   abstract public function getMethodDescription();
-  abstract public function defineParamTypes();
-  abstract public function defineReturnType();
-  abstract public function defineErrorTypes();
+
+  public function getMethodDocumentation() {
+    return null;
+  }
+
+  abstract protected function defineParamTypes();
+  abstract protected function defineReturnType();
+
+  protected function defineErrorTypes() {
+    return array();
+  }
+
   abstract protected function execute(ConduitAPIRequest $request);
 
-  public function __construct() {
+  public function isInternalAPI() {
+    return false;
+  }
 
+  public function getParamTypes() {
+    $types = $this->defineParamTypes();
+
+    $query = $this->newQueryObject();
+    if ($query) {
+      $types['order'] = 'optional order';
+      $types += $this->getPagerParamTypes();
+    }
+
+    return $types;
+  }
+
+  public function getReturnType() {
+    return $this->defineReturnType();
+  }
+
+  public function getErrorTypes() {
+    return $this->defineErrorTypes();
   }
 
   /**
@@ -56,21 +110,20 @@ abstract class ConduitAPIMethod
   }
 
   public function getErrorDescription($error_code) {
-    return idx($this->defineErrorTypes(), $error_code, 'Unknown Error');
+    return idx($this->getErrorTypes(), $error_code, pht('Unknown Error'));
   }
 
   public function getRequiredScope() {
-    // by default, conduit methods are not accessible via OAuth
-    return PhabricatorOAuthServerScope::SCOPE_NOT_ACCESSIBLE;
+    return self::SCOPE_NEVER;
   }
 
   public function executeMethod(ConduitAPIRequest $request) {
+    $this->setViewer($request->getUser());
+
     return $this->execute($request);
   }
 
-  public function getAPIMethodName() {
-    return self::getAPIMethodNameFromClassName(get_class($this));
-  }
+  abstract public function getAPIMethodName();
 
   /**
    * Return a key which sorts methods by application name, then method status,
@@ -80,9 +133,9 @@ abstract class ConduitAPIMethod
     $name = $this->getAPIMethodName();
 
     $map = array(
-      ConduitAPIMethod::METHOD_STATUS_STABLE      => 0,
-      ConduitAPIMethod::METHOD_STATUS_UNSTABLE    => 1,
-      ConduitAPIMethod::METHOD_STATUS_DEPRECATED  => 2,
+      self::METHOD_STATUS_STABLE      => 0,
+      self::METHOD_STATUS_UNSTABLE    => 1,
+      self::METHOD_STATUS_DEPRECATED  => 2,
     );
     $ord = idx($map, $this->getMethodStatus(), 0);
 
@@ -91,13 +144,35 @@ abstract class ConduitAPIMethod
     return "{$head}.{$ord}.{$tail}";
   }
 
+  public static function getMethodStatusMap() {
+    $map = array(
+      self::METHOD_STATUS_STABLE => pht('Stable'),
+      self::METHOD_STATUS_UNSTABLE => pht('Unstable'),
+      self::METHOD_STATUS_DEPRECATED => pht('Deprecated'),
+    );
+
+    return $map;
+  }
+
   public function getApplicationName() {
     return head(explode('.', $this->getAPIMethodName(), 2));
   }
 
-  public static function getClassNameFromAPIMethodName($method_name) {
-    $method_fragment = str_replace('.', '_', $method_name);
-    return 'ConduitAPI_'.$method_fragment.'_Method';
+  public static function loadAllConduitMethods() {
+    return self::newClassMapQuery()->execute();
+  }
+
+  private static function newClassMapQuery() {
+    return id(new PhutilClassMapQuery())
+      ->setAncestorClass(__CLASS__)
+      ->setUniqueMethod('getAPIMethodName');
+  }
+
+  public static function getConduitMethod($method_name) {
+    return id(new PhabricatorCachedClassMapQuery())
+      ->setClassMapQuery(self::newClassMapQuery())
+      ->setMapKeyMethod('getAPIMethodName')
+      ->loadClass($method_name);
   }
 
   public function shouldRequireAuthentication() {
@@ -123,47 +198,149 @@ abstract class ConduitAPIMethod
     return null;
   }
 
-  public static function getAPIMethodNameFromClassName($class_name) {
-    $match = null;
-    $is_valid = preg_match(
-      '/^ConduitAPI_(.*)_Method$/',
-      $class_name,
-      $match);
-    if (!$is_valid) {
-      throw new Exception(
-        "Parameter '{$class_name}' is not a valid Conduit API method class.");
+  protected function formatStringConstants($constants) {
+    foreach ($constants as $key => $value) {
+      $constants[$key] = '"'.$value.'"';
     }
-    $method_fragment = $match[1];
-    return str_replace('_', '.', $method_fragment);
+    $constants = implode(', ', $constants);
+    return 'string-constant<'.$constants.'>';
   }
 
-  protected function validateHost($host) {
-    if (!$host) {
-      // If the client doesn't send a host key, don't complain. We should in
-      // the future, but this change isn't severe enough to bump the protocol
-      // version.
+  public static function getParameterMetadataKey($key) {
+    if (strncmp($key, 'api.', 4) === 0) {
+      // All keys passed beginning with "api." are always metadata keys.
+      return substr($key, 4);
+    } else {
+      switch ($key) {
+        // These are real keys which always belong to request metadata.
+        case 'access_token':
+        case 'scope':
+        case 'output':
 
-      // TODO: Remove this once the protocol version gets bumped past 2 (i.e.,
-      // require the host key be present and valid).
-      return;
+        // This is not a real metadata key; it is included here only to
+        // prevent Conduit methods from defining it.
+        case '__conduit__':
+
+        // This is prevented globally as a blanket defense against OAuth
+        // redirection attacks. It is included here to stop Conduit methods
+        // from defining it.
+        case 'code':
+
+        // This is not a real metadata key, but the presence of this
+        // parameter triggers an alternate request decoding pathway.
+        case 'params':
+          return $key;
+      }
     }
 
-    // NOTE: Compare domains only so we aren't sensitive to port specification
-    // or omission.
+    return null;
+  }
 
-    $host = new PhutilURI($host);
-    $host = $host->getDomain();
+  final public function setViewer(PhabricatorUser $viewer) {
+    $this->viewer = $viewer;
+    return $this;
+  }
 
-    $self = new PhutilURI(PhabricatorEnv::getURI('/'));
-    $self = $self->getDomain();
+  final public function getViewer() {
+    return $this->viewer;
+  }
 
-    if ($self !== $host) {
+/* -(  Paging Results  )----------------------------------------------------- */
+
+
+  /**
+   * @task pager
+   */
+  protected function getPagerParamTypes() {
+    return array(
+      'before' => 'optional string',
+      'after'  => 'optional string',
+      'limit'  => 'optional int (default = 100)',
+    );
+  }
+
+
+  /**
+   * @task pager
+   */
+  protected function newPager(ConduitAPIRequest $request) {
+    $limit = $request->getValue('limit', 100);
+    $limit = min(1000, $limit);
+    $limit = max(1, $limit);
+
+    $pager = id(new AphrontCursorPagerView())
+      ->setPageSize($limit);
+
+    $before_id = $request->getValue('before');
+    if ($before_id !== null) {
+      $pager->setBeforeID($before_id);
+    }
+
+    $after_id = $request->getValue('after');
+    if ($after_id !== null) {
+      $pager->setAfterID($after_id);
+    }
+
+    return $pager;
+  }
+
+
+  /**
+   * @task pager
+   */
+  protected function addPagerResults(
+    array $results,
+    AphrontCursorPagerView $pager) {
+
+    $results['cursor'] = array(
+      'limit' => $pager->getPageSize(),
+      'after' => $pager->getNextPageID(),
+      'before' => $pager->getPrevPageID(),
+    );
+
+    return $results;
+  }
+
+
+/* -(  Implementing Query Methods  )----------------------------------------- */
+
+
+  public function newQueryObject() {
+    return null;
+  }
+
+
+  protected function newQueryForRequest(ConduitAPIRequest $request) {
+    $query = $this->newQueryObject();
+
+    if (!$query) {
       throw new Exception(
-        "Your client is connecting to this install as '{$host}', but it is ".
-        "configured as '{$self}'. The client and server must use the exact ".
-        "same URI to identify the install. Edit your .arcconfig or ".
-        "phabricator/conf so they agree on the URI for the install.");
+        pht(
+          'You can not call newQueryFromRequest() in this method ("%s") '.
+          'because it does not implement newQueryObject().',
+          get_class($this)));
     }
+
+    if (!($query instanceof PhabricatorCursorPagedPolicyAwareQuery)) {
+      throw new Exception(
+        pht(
+          'Call to method newQueryObject() did not return an object of class '.
+          '"%s".',
+          'PhabricatorCursorPagedPolicyAwareQuery'));
+    }
+
+    $query->setViewer($request->getUser());
+
+    $order = $request->getValue('order');
+    if ($order !== null) {
+      if (is_scalar($order)) {
+        $query->setOrder($order);
+      } else {
+        $query->setOrderVector($order);
+      }
+    }
+
+    return $query;
   }
 
 
@@ -194,15 +371,57 @@ abstract class ConduitAPIMethod
 
   public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
     if (!$this->shouldRequireAuthentication()) {
-      // Make unauthenticated methods univerally visible.
+      // Make unauthenticated methods universally visible.
       return true;
     }
 
     return false;
   }
 
-  public function describeAutomaticCapability($capability) {
-    return null;
+  protected function hasApplicationCapability(
+    $capability,
+    PhabricatorUser $viewer) {
+
+    $application = $this->getApplication();
+
+    if (!$application) {
+      return false;
+    }
+
+    return PhabricatorPolicyFilter::hasCapability(
+      $viewer,
+      $application,
+      $capability);
+  }
+
+  protected function requireApplicationCapability(
+    $capability,
+    PhabricatorUser $viewer) {
+
+    $application = $this->getApplication();
+    if (!$application) {
+      return;
+    }
+
+    PhabricatorPolicyFilter::requireCapability(
+      $viewer,
+      $this->getApplication(),
+      $capability);
+  }
+
+  final protected function newRemarkupDocumentationView($remarkup) {
+    $viewer = $this->getViewer();
+
+    $view = new PHUIRemarkupView($viewer, $remarkup);
+
+    $view->setRemarkupOptions(
+      array(
+        PHUIRemarkupView::OPTION_PRESERVE_LINEBREAKS => false,
+      ));
+
+    return id(new PHUIBoxView())
+      ->appendChild($view)
+      ->addPadding(PHUI::PADDING_LARGE);
   }
 
 }

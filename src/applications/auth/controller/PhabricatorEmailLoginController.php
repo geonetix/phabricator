@@ -7,32 +7,44 @@ final class PhabricatorEmailLoginController
     return false;
   }
 
-  public function processRequest() {
-    $request = $this->getRequest();
-
-    if (!PhabricatorAuthProviderPassword::getPasswordProvider()) {
-      return new Aphront400Response();
-    }
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
+    $is_logged_in = $viewer->isLoggedIn();
 
     $e_email = true;
     $e_captcha = true;
     $errors = array();
 
-    $is_serious = PhabricatorEnv::getEnvConfig('phabricator.serious-business');
+    if ($is_logged_in) {
+      if (!$this->isPasswordAuthEnabled()) {
+        return $this->newDialog()
+          ->setTitle(pht('No Password Auth'))
+          ->appendParagraph(
+            pht(
+              'Password authentication is not enabled and you are already '.
+              'logged in. There is nothing for you here.'))
+          ->addCancelButton('/', pht('Continue'));
+      }
+
+      $v_email = $viewer->loadPrimaryEmailAddress();
+    } else {
+      $v_email = $request->getStr('email');
+    }
 
     if ($request->isFormPost()) {
       $e_email = null;
       $e_captcha = pht('Again');
 
-      $captcha_ok = AphrontFormRecaptchaControl::processCaptcha($request);
-      if (!$captcha_ok) {
-        $errors[] = pht("Captcha response is incorrect, try again.");
-        $e_captcha = pht('Invalid');
+      if (!$is_logged_in) {
+        $captcha_ok = AphrontFormRecaptchaControl::processCaptcha($request);
+        if (!$captcha_ok) {
+          $errors[] = pht('Captcha response is incorrect, try again.');
+          $e_captcha = pht('Invalid');
+        }
       }
 
-      $email = $request->getStr('email');
-      if (!strlen($email)) {
-       $errors[] = pht("You must provide an email address.");
+      if (!strlen($v_email)) {
+       $errors[] = pht('You must provide an email address.');
        $e_email = pht('Required');
       }
 
@@ -41,9 +53,17 @@ final class PhabricatorEmailLoginController
         // it expensive to fish for valid email addresses while giving the user
         // a better error if they goof their email.
 
+        $action_actor = PhabricatorSystemActionEngine::newActorFromRequest(
+          $request);
+
+        PhabricatorSystemActionEngine::willTakeAction(
+          array($action_actor),
+          new PhabricatorAuthTryEmailLoginAction(),
+          1);
+
         $target_email = id(new PhabricatorUserEmail())->loadOneWhere(
           'address = %s',
-          $email);
+          $v_email);
 
         $target_user = null;
         if ($target_email) {
@@ -54,106 +74,134 @@ final class PhabricatorEmailLoginController
 
         if (!$target_user) {
           $errors[] =
-            pht("There is no account associated with that email address.");
-          $e_email = pht("Invalid");
+            pht('There is no account associated with that email address.');
+          $e_email = pht('Invalid');
+        }
+
+        // If this address is unverified, only send a reset link to it if
+        // the account has no verified addresses. This prevents an opportunistic
+        // attacker from compromising an account if a user adds an email
+        // address but mistypes it and doesn't notice.
+
+        // (For a newly created account, all the addresses may be unverified,
+        // which is why we'll send to an unverified address in that case.)
+
+        if ($target_email && !$target_email->getIsVerified()) {
+          $verified_addresses = id(new PhabricatorUserEmail())->loadAllWhere(
+            'userPHID = %s AND isVerified = 1',
+            $target_email->getUserPHID());
+          if ($verified_addresses) {
+            $errors[] = pht(
+              'That email address is not verified, but the account it is '.
+              'connected to has at least one other verified address. When an '.
+              'account has at least one verified address, you can only send '.
+              'password reset links to one of the verified addresses. Try '.
+              'a verified address instead.');
+            $e_email = pht('Unverified');
+          }
         }
 
         if (!$errors) {
-          $uri = $target_user->getEmailLoginURI($target_email);
-          if ($is_serious) {
-            $body = <<<EOBODY
-You can use this link to reset your Phabricator password:
+          $target_address = new PhutilEmailAddress($target_email->getAddress());
 
-  {$uri}
+          $user_log = PhabricatorUserLog::initializeNewLog(
+            $viewer,
+            $target_user->getPHID(),
+            PhabricatorEmailLoginUserLogType::LOGTYPE);
 
-EOBODY;
-          } else {
-            $body = <<<EOBODY
-Condolences on forgetting your password. You can use this link to reset it:
+          $mail_engine = id(new PhabricatorPeopleEmailLoginMailEngine())
+            ->setSender($viewer)
+            ->setRecipient($target_user)
+            ->setRecipientAddress($target_address)
+            ->setActivityLog($user_log);
 
-  {$uri}
-
-After you set a new password, consider writing it down on a sticky note and
-attaching it to your monitor so you don't forget again! Choosing a very short,
-easy-to-remember password like "cat" or "1234" might also help.
-
-Best Wishes,
-Phabricator
-
-EOBODY;
+          try {
+            $mail_engine->validateMail();
+          } catch (PhabricatorPeopleMailEngineException $ex) {
+            return $this->newDialog()
+              ->setTitle($ex->getTitle())
+              ->appendParagraph($ex->getBody())
+              ->addCancelButton('/auth/start/', pht('Done'));
           }
 
-          // NOTE: Don't set the user as 'from', or they may not receive the
-          // mail if they have the "don't send me email about my own actions"
-          // preference set.
+          $mail_engine->sendMail();
 
-          $mail = new PhabricatorMetaMTAMail();
-          $mail->setSubject('[Phabricator] Password Reset');
-          $mail->addTos(
-            array(
-              $target_user->getPHID(),
-            ));
-          $mail->setBody($body);
-          $mail->saveAndSend();
+          if ($is_logged_in) {
+            $instructions = pht(
+              'An email has been sent containing a link you can use to set '.
+              'a password for your account.');
+          } else {
+            $instructions = pht(
+              'An email has been sent containing a link you can use to log '.
+              'in to your account.');
+          }
 
-          $view = new AphrontRequestFailureView();
-          $view->setHeader(pht('Check Your Email'));
-          $view->appendChild(phutil_tag('p', array(), pht(
-              'An email has been sent with a link you can use to login.')));
-          return $this->buildStandardPageResponse(
-            $view,
-            array(
-              'title' => pht('Email Sent'),
-            ));
+          return $this->newDialog()
+            ->setTitle(pht('Check Your Email'))
+            ->setShortTitle(pht('Email Sent'))
+            ->appendParagraph($instructions)
+            ->addCancelButton('/', pht('Done'));
         }
       }
-
     }
 
-    $error_view = null;
-    if ($errors) {
-      $error_view = new AphrontErrorView();
-      $error_view->setErrors($errors);
+    $form = id(new AphrontFormView())
+      ->setViewer($viewer);
+
+    if ($this->isPasswordAuthEnabled()) {
+      if ($is_logged_in) {
+        $title = pht('Set Password');
+        $form->appendRemarkupInstructions(
+          pht(
+            'A password reset link will be sent to your primary email '.
+            'address. Follow the link to set an account password.'));
+      } else {
+        $title = pht('Password Reset');
+        $form->appendRemarkupInstructions(
+          pht(
+            'To reset your password, provide your email address. An email '.
+            'with a login link will be sent to you.'));
+      }
+    } else {
+      $title = pht('Email Login');
+      $form->appendRemarkupInstructions(
+        pht(
+          'To access your account, provide your email address. An email '.
+          'with a login link will be sent to you.'));
     }
 
-    $email_auth = new PHUIFormLayoutView();
-    $email_auth->appendChild($error_view);
-    $email_auth
-      ->setUser($request->getUser())
-      ->setFullWidth(true)
-      ->appendChild(
-        id(new AphrontFormTextControl())
-          ->setLabel(pht('Email'))
-          ->setName('email')
-          ->setValue($request->getStr('email'))
-          ->setError($e_email))
-      ->appendChild(
+    if ($is_logged_in) {
+      $address_control = new AphrontFormStaticControl();
+    } else {
+      $address_control = id(new AphrontFormTextControl())
+        ->setName('email')
+        ->setError($e_email);
+    }
+
+    $address_control
+      ->setLabel(pht('Email Address'))
+      ->setValue($v_email);
+
+    $form
+      ->appendControl($address_control);
+
+    if (!$is_logged_in) {
+      $form->appendControl(
         id(new AphrontFormRecaptchaControl())
           ->setLabel(pht('Captcha'))
           ->setError($e_captcha));
+    }
 
-    $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('Reset Password')));
-
-    $dialog = new AphrontDialogView();
-    $dialog->setUser($request->getUser());
-    $dialog->setTitle(pht(
-      'Forgot Password / Email Login'));
-    $dialog->appendChild($email_auth);
-    $dialog->addSubmitButton(pht('Send Email'));
-    $dialog->setSubmitURI('/login/email/');
-
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $dialog,
-      ),
-      array(
-        'title' => pht('Forgot Password'),
-        'device' => true,
-      ));
+    return $this->newDialog()
+      ->setTitle($title)
+      ->setErrors($errors)
+      ->setWidth(AphrontDialogView::WIDTH_FORM)
+      ->appendForm($form)
+      ->addCancelButton('/auth/start/')
+      ->addSubmitButton(pht('Send Email'));
   }
 
+  private function isPasswordAuthEnabled() {
+    return (bool)PhabricatorPasswordAuthProvider::getPasswordProvider();
+  }
 }

@@ -43,6 +43,7 @@ final class PhabricatorSSHPassthruCommand extends Phobject {
   private $execFuture;
   private $willWriteCallback;
   private $willReadCallback;
+  private $pauseIOReads;
 
   public function setCommandChannelFromExecFuture(ExecFuture $exec_future) {
     $exec_channel = new PhutilExecChannel($exec_future);
@@ -76,13 +77,11 @@ final class PhabricatorSSHPassthruCommand extends Phobject {
 
   public function writeErrorIOCallback(PhutilChannel $channel, $data) {
     $this->errorChannel->write($data);
+  }
 
-    // TODO: Because of the way `waitForAny()` works, we degrade to a busy
-    // wait if we hand it a writable, write-only channel. We should handle this
-    // case better in `waitForAny()`. For now, just flush the error channel
-    // explicity after writing data over it.
-
-    $this->errorChannel->flush();
+  public function setPauseIOReads($pause) {
+    $this->pauseIOReads = $pause;
+    return $this;
   }
 
   public function execute() {
@@ -91,40 +90,80 @@ final class PhabricatorSSHPassthruCommand extends Phobject {
     $error_channel = $this->errorChannel;
 
     if (!$command_channel) {
-      throw new Exception("Set a command channel before calling execute()!");
+      throw new Exception(
+        pht(
+          'Set a command channel before calling %s!',
+          __FUNCTION__.'()'));
     }
 
     if (!$io_channel) {
-      throw new Exception("Set an IO channel before calling execute()!");
+      throw new Exception(
+        pht(
+          'Set an IO channel before calling %s!',
+          __FUNCTION__.'()'));
     }
 
     if (!$error_channel) {
-      throw new Exception("Set an error channel before calling execute()!");
+      throw new Exception(
+        pht(
+          'Set an error channel before calling %s!',
+          __FUNCTION__.'()'));
     }
 
     $channels = array($command_channel, $io_channel, $error_channel);
 
+    // We want to limit the amount of data we'll hold in memory for this
+    // process. See T4241 for a discussion of this issue in general.
+
+    $buffer_size = (1024 * 1024); // 1MB
+    $io_channel->setReadBufferSize($buffer_size);
+    $command_channel->setReadBufferSize($buffer_size);
+
+    // TODO: This just makes us throw away stderr after the first 1MB, but we
+    // don't currently have the support infrastructure to buffer it correctly.
+    // It's difficult to imagine this causing problems in practice, though.
+    $this->execFuture->getStderrSizeLimit($buffer_size);
+
     while (true) {
-      // TODO: See note in writeErrorIOCallback!
-      $wait = array($command_channel, $io_channel);
-      PhutilChannel::waitForAny($wait);
+      PhutilChannel::waitForAny($channels);
 
       $io_channel->update();
       $command_channel->update();
       $error_channel->update();
 
-      $done = !$command_channel->isOpen();
+      // If any channel is blocked on the other end, wait for it to flush before
+      // we continue reading. For example, if a user is running `git clone` on
+      // a 1GB repository, the underlying `git-upload-pack` may
+      // be able to produce data much more quickly than we can send it over
+      // the network. If we don't throttle the reads, we may only send a few
+      // MB over the I/O channel in the time it takes to read the entire 1GB off
+      // the command channel. That leaves us with 1GB of data in memory.
 
-      $in_message = $io_channel->read();
-      if ($in_message !== null) {
-        $in_message = $this->willWriteData($in_message);
+      while ($command_channel->isOpen() &&
+             $io_channel->isOpenForWriting() &&
+             ($command_channel->getWriteBufferSize() >= $buffer_size ||
+             $io_channel->getWriteBufferSize() >= $buffer_size ||
+             $error_channel->getWriteBufferSize() >= $buffer_size)) {
+        PhutilChannel::waitForActivity(array(), $channels);
+        $io_channel->update();
+        $command_channel->update();
+        $error_channel->update();
+      }
+
+      // If the subprocess has exited and we've read everything from it,
+      // we're all done.
+      $done = !$command_channel->isOpenForReading() &&
+               $command_channel->isReadBufferEmpty();
+
+      if (!$this->pauseIOReads) {
+        $in_message = $io_channel->read();
         if ($in_message !== null) {
-          $command_channel->write($in_message);
+          $this->writeIORead($in_message);
         }
       }
 
       $out_message = $command_channel->read();
-      if ($out_message !== null) {
+      if (strlen($out_message)) {
         $out_message = $this->willReadData($out_message);
         if ($out_message !== null) {
           $io_channel->write($out_message);
@@ -142,14 +181,29 @@ final class PhabricatorSSHPassthruCommand extends Phobject {
 
       // If the client has disconnected, kill the subprocess and bail.
       if (!$io_channel->isOpenForWriting()) {
-        $this->execFuture->resolveKill();
+        $this->execFuture
+          ->setStdoutSizeLimit(0)
+          ->setStderrSizeLimit(0)
+          ->setReadBufferSize(null)
+          ->resolveKill();
         break;
       }
     }
 
-    list($err) = $this->execFuture->resolve();
+    list($err) = $this->execFuture
+      ->setStdoutSizeLimit(0)
+      ->setStderrSizeLimit(0)
+      ->setReadBufferSize(null)
+      ->resolve();
 
     return $err;
+  }
+
+  public function writeIORead($in_message) {
+    $in_message = $this->willWriteData($in_message);
+    if (strlen($in_message)) {
+      $this->commandChannel->write($in_message);
+    }
   }
 
   public function willWriteData($message) {

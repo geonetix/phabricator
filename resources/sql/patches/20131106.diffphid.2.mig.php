@@ -13,14 +13,14 @@ foreach ($chunk_iter as $chunk) {
 
   foreach ($chunk as $diff) {
     $id = $diff->getID();
-    echo "Migrating diff ID {$id}...\n";
+    echo pht('Migrating diff ID %d...', $id)."\n";
 
     $phid = $diff->getPHID();
     if (strlen($phid)) {
       continue;
     }
 
-    $type_diff = DifferentialPHIDTypeDiff::TYPECONST;
+    $type_diff = DifferentialDiffPHIDType::TYPECONST;
     $new_phid = PhabricatorPHID::generateNewPHID($type_diff);
 
     $sql[] = qsprintf(
@@ -34,14 +34,14 @@ foreach ($chunk_iter as $chunk) {
     continue;
   }
 
-  foreach (PhabricatorLiskDAO::chunkSQL($sql, ', ') as $sql_chunk) {
+  foreach (PhabricatorLiskDAO::chunkSQL($sql) as $sql_chunk) {
     queryfx(
       $conn_w,
-      'INSERT IGNORE INTO %T (id, phid) VALUES %Q
+      'INSERT IGNORE INTO %T (id, phid) VALUES %LQ
         ON DUPLICATE KEY UPDATE phid = VALUES(phid)',
       $diff_table->getTableName(),
       $sql_chunk);
   }
 }
 
-echo "Done.\n";
+echo pht('Done.')."\n";

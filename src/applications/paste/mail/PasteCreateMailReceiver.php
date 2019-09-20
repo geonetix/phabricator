@@ -1,73 +1,50 @@
 <?php
 
-/**
- * @group paste
- */
 final class PasteCreateMailReceiver
-  extends PhabricatorMailReceiver {
+  extends PhabricatorApplicationMailReceiver {
 
-  public function isEnabled() {
-    $app_class = 'PhabricatorApplicationPaste';
-    return PhabricatorApplication::isClassInstalled($app_class);
-  }
-
-  public function canAcceptMail(PhabricatorMetaMTAReceivedMail $mail) {
-    $config_key = 'metamta.paste.public-create-email';
-    $create_address = PhabricatorEnv::getEnvConfig($config_key);
-    if (!$create_address) {
-      return false;
-    }
-
-    foreach ($mail->getToAddresses() as $to_address) {
-      if ($this->matchAddresses($create_address, $to_address)) {
-        return true;
-      }
-    }
-
-    return false;
+  protected function newApplication() {
+    return new PhabricatorPasteApplication();
   }
 
   protected function processReceivedMail(
     PhabricatorMetaMTAReceivedMail $mail,
-    PhabricatorUser $sender) {
+    PhutilEmailAddress $target) {
+    $author = $this->getAuthor();
 
     $title = $mail->getSubject();
     if (!$title) {
-      $title = pht('Pasted via email.');
+      $title = pht('Email Paste');
     }
-    $xactions = array();
-    $xactions[] = id(new PhabricatorPasteTransaction())
-      ->setTransactionType(PhabricatorPasteTransaction::TYPE_CREATE)
-      ->setNewValue(array(
-        'title' => $title,
-        'text' => $mail->getCleanTextBody()));
-    $xactions[] = id(new PhabricatorPasteTransaction())
-      ->setTransactionType(PhabricatorPasteTransaction::TYPE_TITLE)
-      ->setNewValue($title);
-    $xactions[] = id(new PhabricatorPasteTransaction())
-      ->setTransactionType(PhabricatorPasteTransaction::TYPE_LANGUAGE)
-      ->setNewValue(''); // auto-detect
-    $xactions[] = id(new PhabricatorPasteTransaction())
-      ->setTransactionType(PhabricatorTransactions::TYPE_VIEW_POLICY)
-      ->setNewValue(PhabricatorPolicies::POLICY_USER);
 
-    $paste = id(new PhabricatorPaste())
-      ->setAuthorPHID($sender->getPHID());
-    $content_source = PhabricatorContentSource::newForSource(
-      PhabricatorContentSource::SOURCE_EMAIL,
-      array(
-        'id' => $mail->getID(),
-      ));
+    $xactions = array();
+
+    $xactions[] = id(new PhabricatorPasteTransaction())
+      ->setTransactionType(PhabricatorPasteContentTransaction::TRANSACTIONTYPE)
+      ->setNewValue($mail->getCleanTextBody());
+
+    $xactions[] = id(new PhabricatorPasteTransaction())
+      ->setTransactionType(PhabricatorPasteTitleTransaction::TRANSACTIONTYPE)
+      ->setNewValue($title);
+
+    $paste = PhabricatorPaste::initializeNewPaste($author);
+
+    $content_source = $mail->newContentSource();
+
     $editor = id(new PhabricatorPasteEditor())
-      ->setActor($sender)
+      ->setActor($author)
       ->setContentSource($content_source)
       ->setContinueOnNoEffect(true);
     $xactions = $editor->applyTransactions($paste, $xactions);
 
     $mail->setRelatedPHID($paste->getPHID());
 
-    $subject_prefix =
-      PhabricatorEnv::getEnvConfig('metamta.paste.subject-prefix');
+    $sender = $this->getSender();
+    if (!$sender) {
+      return;
+    }
+
+    $subject_prefix = pht('[Paste]');
     $subject = pht('You successfully created a paste.');
     $paste_uri = PhabricatorEnv::getProductionURI($paste->getURI());
     $body = new PhabricatorMetaMTAMailBody();
@@ -82,7 +59,6 @@ final class PasteCreateMailReceiver
       ->setRelatedPHID($paste->getPHID())
       ->setBody($body->render())
       ->saveAndSend();
-
   }
 
 }

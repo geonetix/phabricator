@@ -1,6 +1,6 @@
 <?php
 
-final class DiffusionPathChangeQuery {
+final class DiffusionPathChangeQuery extends Phobject {
 
   private $request;
   private $limit;
@@ -14,11 +14,11 @@ final class DiffusionPathChangeQuery {
     return $this->limit;
   }
 
-  final private function __construct() {
+  private function __construct() {
     // <private>
   }
 
-  final public static function newFromDiffusionRequest(
+  public static function newFromDiffusionRequest(
     DiffusionRequest $request) {
     $query = new DiffusionPathChangeQuery();
     $query->request = $request;
@@ -26,11 +26,11 @@ final class DiffusionPathChangeQuery {
     return $query;
   }
 
-  final protected function getRequest() {
+  protected function getRequest() {
     return $this->request;
   }
 
-  final public function loadChanges() {
+  public function loadChanges() {
     return $this->executeQuery();
   }
 
@@ -43,12 +43,13 @@ final class DiffusionPathChangeQuery {
 
     $conn_r = $repository->establishConnection('r');
 
-    $limit = '';
     if ($this->limit) {
       $limit = qsprintf(
         $conn_r,
         'LIMIT %d',
         $this->limit + 1);
+    } else {
+      $limit = qsprintf($conn_r, '');
     }
 
     $raw_changes = queryfx_all(

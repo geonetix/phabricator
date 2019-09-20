@@ -9,10 +9,11 @@ final class AphrontFormView extends AphrontView {
   private $encType;
   private $workflow;
   private $id;
-  private $shaded = false;
   private $sigils = array();
   private $metadata;
-
+  private $controls = array();
+  private $fullWidth = false;
+  private $classes = array();
 
   public function setMetadata($metadata) {
     $this->metadata = $metadata;
@@ -43,11 +44,6 @@ final class AphrontFormView extends AphrontView {
     return $this;
   }
 
-  public function setShaded($shaded) {
-    $this->shaded = $shaded;
-    return $this;
-  }
-
   public function addHiddenInput($key, $value) {
     $this->data[$key] = $value;
     return $this;
@@ -63,6 +59,20 @@ final class AphrontFormView extends AphrontView {
     return $this;
   }
 
+  public function addClass($class) {
+    $this->classes[] = $class;
+    return $this;
+  }
+
+  public function setFullWidth($full_width) {
+    $this->fullWidth = $full_width;
+    return $this;
+  }
+
+  public function getFullWidth() {
+    return $this->fullWidth;
+  }
+
   public function appendInstructions($text) {
     return $this->appendChild(
       phutil_tag(
@@ -74,22 +84,61 @@ final class AphrontFormView extends AphrontView {
   }
 
   public function appendRemarkupInstructions($remarkup) {
-    return $this->appendInstructions(
-      PhabricatorMarkupEngine::renderOneObject(
-        id(new PhabricatorMarkupOneOff())->setContent($remarkup),
-        'default',
-        $this->getUser()));
+    $view = $this->newInstructionsRemarkupView($remarkup);
+    return $this->appendInstructions($view);
   }
 
-  public function render() {
+  public function newInstructionsRemarkupView($remarkup) {
+    $viewer = $this->getViewer();
+    $view = new PHUIRemarkupView($viewer, $remarkup);
 
-    require_celerity_resource('phui-form-view-css');
-    $layout = id (new PHUIFormLayoutView())
+    $view->setRemarkupOptions(
+      array(
+        PHUIRemarkupView::OPTION_PRESERVE_LINEBREAKS => false,
+      ));
+
+    return $view;
+  }
+
+  public function buildLayoutView() {
+    foreach ($this->controls as $control) {
+      $control->setViewer($this->getViewer());
+      $control->willRender();
+    }
+
+    return id(new PHUIFormLayoutView())
+      ->setFullWidth($this->getFullWidth())
       ->appendChild($this->renderDataInputs())
       ->appendChild($this->renderChildren());
+  }
 
-    if (!$this->user) {
-      throw new Exception(pht('You must pass the user to AphrontFormView.'));
+
+  /**
+   * Append a control to the form.
+   *
+   * This method behaves like @{method:appendChild}, but it only takes
+   * controls. It will propagate some information from the form to the
+   * control to simplify rendering.
+   *
+   * @param AphrontFormControl Control to append.
+   * @return this
+   */
+  public function appendControl(AphrontFormControl $control) {
+    $this->controls[] = $control;
+    return $this->appendChild($control);
+  }
+
+
+  public function render() {
+    require_celerity_resource('phui-form-view-css');
+
+    $layout = $this->buildLayoutView();
+
+    if (!$this->hasViewer()) {
+      throw new Exception(
+        pht(
+          'You must pass the user to %s.',
+          __CLASS__));
     }
 
     $sigils = $this->sigils;
@@ -98,9 +147,9 @@ final class AphrontFormView extends AphrontView {
     }
 
     return phabricator_form(
-      $this->user,
+      $this->getViewer(),
       array(
-        'class'   => $this->shaded ? 'phui-form-shaded' : null,
+        'class'   => implode(' ', $this->classes),
         'action'  => $this->action,
         'method'  => $this->method,
         'enctype' => $this->encType,

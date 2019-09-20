@@ -1,17 +1,13 @@
 <?php
 
-/**
- * @task markup Markup Interface
- *
- * @group phriction
- */
-final class PhrictionContent extends PhrictionDAO
-  implements PhabricatorMarkupInterface {
+final class PhrictionContent
+  extends PhrictionDAO
+  implements
+    PhabricatorPolicyInterface,
+    PhabricatorDestructibleInterface,
+    PhabricatorConduitResultInterface {
 
-  const MARKUP_FIELD_BODY = 'markup:body';
-
-  protected $id;
-  protected $documentID;
+  protected $documentPHID;
   protected $version;
   protected $authorPHID;
 
@@ -23,76 +19,121 @@ final class PhrictionContent extends PhrictionDAO
   protected $changeType;
   protected $changeRef;
 
-  public function renderContent(PhabricatorUser $viewer) {
-    return PhabricatorMarkupEngine::renderOneObject(
-      $this,
-      self::MARKUP_FIELD_BODY,
-      $viewer);
+  private $document = self::ATTACHABLE;
+
+  protected function getConfiguration() {
+    return array(
+      self::CONFIG_AUX_PHID => true,
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'version' => 'uint32',
+        'title' => 'sort',
+        'slug' => 'text128',
+        'content' => 'text',
+        'changeType' => 'uint32',
+        'changeRef' => 'uint32?',
+        'description' => 'text',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_version' => array(
+          'columns' => array('documentPHID', 'version'),
+          'unique' => true,
+        ),
+        'authorPHID' => array(
+          'columns' => array('authorPHID'),
+        ),
+        'slug' => array(
+          'columns' => array('slug'),
+        ),
+      ),
+    ) + parent::getConfiguration();
+  }
+
+  public function getPHIDType() {
+    return PhrictionContentPHIDType::TYPECONST;
+  }
+
+  public function newRemarkupView(PhabricatorUser $viewer) {
+    return id(new PHUIRemarkupView($viewer, $this->getContent()))
+      ->setContextObject($this)
+      ->setRemarkupOption(PHUIRemarkupView::OPTION_GENERATE_TOC, true)
+      ->setGenerateTableOfContents(true);
+  }
+
+  public function attachDocument(PhrictionDocument $document) {
+    $this->document = $document;
+    return $this;
+  }
+
+  public function getDocument() {
+    return $this->assertAttached($this->document);
   }
 
 
-/* -(  Markup Interface  )--------------------------------------------------- */
+/* -(  PhabricatorPolicyInterface  )----------------------------------------- */
 
 
-  /**
-   * @task markup
-   */
-  public function getMarkupFieldKey($field) {
-    if ($this->shouldUseMarkupCache($field)) {
-      $id = $this->getID();
-    } else {
-      $id = PhabricatorHash::digest($this->getMarkupText($field));
-    }
-    return "phriction:{$field}:{$id}";
+  public function getCapabilities() {
+    return array(
+      PhabricatorPolicyCapability::CAN_VIEW,
+    );
+  }
+
+  public function getPolicy($capability) {
+    return PhabricatorPolicies::getMostOpenPolicy();
+  }
+
+  public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
+    return false;
   }
 
 
-  /**
-   * @task markup
-   */
-  public function getMarkupText($field) {
-    return $this->getContent();
+/* -(  PhabricatorExtendedPolicyInterface  )--------------------------------- */
+
+
+  public function getExtendedPolicy($capability, PhabricatorUser $viewer) {
+    return array(
+      array($this->getDocument(), PhabricatorPolicyCapability::CAN_VIEW),
+    );
   }
 
 
-  /**
-   * @task markup
-   */
-  public function newMarkupEngine($field) {
-    return PhabricatorMarkupEngine::newPhrictionMarkupEngine();
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+    $this->delete();
   }
 
 
-  /**
-   * @task markup
-   */
-  public function didMarkupText(
-    $field,
-    $output,
-    PhutilMarkupEngine $engine) {
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
 
-    $toc = PhutilRemarkupEngineRemarkupHeaderBlockRule::renderTableOfContents(
-      $engine);
 
-    if ($toc) {
-      $toc = phutil_tag_div('phabricator-remarkup-toc', array(
-        phutil_tag_div(
-          'phabricator-remarkup-toc-header',
-          pht('Table of Contents')),
-        $toc,
-      ));
-    }
-
-    return phutil_tag_div('phabricator-remarkup', array($toc, $output));
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('documentPHID')
+        ->setType('phid')
+        ->setDescription(pht('Document this content is for.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('version')
+        ->setType('int')
+        ->setDescription(pht('Content version.')),
+    );
   }
 
-
-  /**
-   * @task markup
-   */
-  public function shouldUseMarkupCache($field) {
-    return (bool)$this->getID();
+  public function getFieldValuesForConduit() {
+    return array(
+      'documentPHID' => $this->getDocument()->getPHID(),
+      'version' => (int)$this->getVersion(),
+    );
   }
 
+  public function getConduitSearchAttachments() {
+    return array(
+      id(new PhrictionContentSearchEngineAttachment())
+        ->setAttachmentKey('content'),
+    );
+  }
 
 }

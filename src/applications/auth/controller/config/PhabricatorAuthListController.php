@@ -3,67 +3,48 @@
 final class PhabricatorAuthListController
   extends PhabricatorAuthProviderConfigController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+  public function handleRequest(AphrontRequest $request) {
+    $viewer = $this->getViewer();
 
     $configs = id(new PhabricatorAuthProviderConfigQuery())
       ->setViewer($viewer)
       ->execute();
 
     $list = new PHUIObjectItemListView();
+    $can_manage = $this->hasApplicationCapability(
+        AuthManageProvidersCapability::CAPABILITY);
+    $is_locked = PhabricatorEnv::getEnvConfig('auth.lock-config');
+
     foreach ($configs as $config) {
       $item = new PHUIObjectItemView();
 
       $id = $config->getID();
 
-      $edit_uri = $this->getApplicationURI('config/edit/'.$id.'/');
-      $enable_uri = $this->getApplicationURI('config/enable/'.$id.'/');
-      $disable_uri = $this->getApplicationURI('config/disable/'.$id.'/');
+      $view_uri = $config->getURI();
 
       $provider = $config->getProvider();
-      if ($provider) {
-        $name = $provider->getProviderName();
-      } else {
-        $name = $config->getProviderType().' ('.$config->getProviderClass().')';
-      }
+      $name = $provider->getProviderName();
 
       $item
-        ->setHeader($name);
+        ->setHeader($name)
+        ->setHref($view_uri);
 
-      if ($provider) {
-        $item->setHref($edit_uri);
-      } else {
-        $item->addAttribute(pht('Provider Implementation Missing!'));
-      }
-
-      $domain = null;
-      if ($provider) {
-        $domain = $provider->getProviderDomain();
-        if ($domain !== 'self') {
-          $item->addAttribute($domain);
-        }
+      $domain = $provider->getProviderDomain();
+      if ($domain !== 'self') {
+        $item->addAttribute($domain);
       }
 
       if ($config->getShouldAllowRegistration()) {
         $item->addAttribute(pht('Allows Registration'));
+      } else {
+        $item->addAttribute(pht('Does Not Allow Registration'));
       }
 
       if ($config->getIsEnabled()) {
-        $item->setBarColor('green');
-        $item->addAction(
-          id(new PHUIListItemView())
-            ->setIcon('delete')
-            ->setHref($disable_uri)
-            ->addSigil('workflow'));
+        $item->setStatusIcon('fa-check-circle green');
       } else {
-        $item->setBarColor('grey');
-        $item->addIcon('delete-grey', pht('Disabled'));
-        $item->addAction(
-          id(new PHUIListItemView())
-            ->setIcon('new')
-            ->setHref($enable_uri)
-            ->addSigil('workflow'));
+        $item->setStatusIcon('fa-ban red');
+        $item->addIcon('fa-ban grey', pht('Disabled'));
       }
 
       $list->addItem($item);
@@ -83,22 +64,59 @@ final class PhabricatorAuthListController
           array(
             'href' => $this->getApplicationURI('config/new/'),
           ),
-          pht('Add Authentication Provider'))));
+          pht('Add Provider'))));
 
     $crumbs = $this->buildApplicationCrumbs();
-    $crumbs->addCrumb(
-      id(new PhabricatorCrumbView())
-        ->setName(pht('Auth Providers')));
+    $crumbs->addTextCrumb(pht('Login and Registration'));
+    $crumbs->setBorder(true);
 
-    return $this->buildApplicationPage(
-      array(
-        $crumbs,
-        $list,
-      ),
-      array(
-        'title' => pht('Authentication Providers'),
-        'device' => true,
-      ));
+    $guidance_context = id(new PhabricatorAuthProvidersGuidanceContext())
+      ->setCanManage($can_manage);
+
+    $guidance = id(new PhabricatorGuidanceEngine())
+      ->setViewer($viewer)
+      ->setGuidanceContext($guidance_context)
+      ->newInfoView();
+
+    $is_disabled = (!$can_manage || $is_locked);
+    $button = id(new PHUIButtonView())
+      ->setTag('a')
+      ->setButtonType(PHUIButtonView::BUTTONTYPE_SIMPLE)
+      ->setIcon('fa-plus')
+      ->setDisabled($is_disabled)
+      ->setWorkflow($is_disabled)
+      ->setHref($this->getApplicationURI('config/new/'))
+      ->setText(pht('Add Provider'));
+
+    $list->setFlush(true);
+    $list = id(new PHUIObjectBoxView())
+      ->setHeaderText(pht('Providers'))
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->appendChild($list);
+
+    $title = pht('Login and Registration Providers');
+    $header = id(new PHUIHeaderView())
+      ->setHeader($title)
+      ->setHeaderIcon('fa-key')
+      ->addActionLink($button);
+
+    $view = id(new PHUITwoColumnView())
+      ->setHeader($header)
+      ->setFooter(
+        array(
+          $guidance,
+          $list,
+        ));
+
+    $nav = $this->newNavigation()
+      ->setCrumbs($crumbs)
+      ->appendChild($view);
+
+    $nav->selectFilter('login');
+
+    return $this->newPage()
+      ->setTitle($title)
+      ->appendChild($nav);
   }
 
 }

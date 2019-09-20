@@ -5,19 +5,26 @@ final class PHUIObjectItemListView extends AphrontTagView {
   private $header;
   private $items;
   private $pager;
-  private $stackable;
-  private $cards;
   private $noDataString;
   private $flush;
-  private $plain;
+  private $simple;
+  private $big;
+  private $drag;
+  private $allowEmptyList;
+  private $itemClass = 'phui-oi-standard';
+  private $tail = array();
 
-  public function setFlush($flush) {
-    $this->flush = $flush;
+  public function setAllowEmptyList($allow_empty_list) {
+    $this->allowEmptyList = $allow_empty_list;
     return $this;
   }
 
-  public function setPlain($plain) {
-    $this->plain = $plain;
+  public function getAllowEmptyList() {
+    return $this->allowEmptyList;
+  }
+
+  public function setFlush($flush) {
+    $this->flush = $flush;
     return $this;
   }
 
@@ -31,6 +38,22 @@ final class PHUIObjectItemListView extends AphrontTagView {
     return $this;
   }
 
+  public function setSimple($simple) {
+    $this->simple = $simple;
+    return $this;
+  }
+
+  public function setBig($big) {
+    $this->big = $big;
+    return $this;
+  }
+
+  public function setDrag($drag) {
+    $this->drag = $drag;
+    $this->setItemClass('phui-oi-drag');
+    return $this;
+  }
+
   public function setNoDataString($no_data_string) {
     $this->noDataString = $no_data_string;
     return $this;
@@ -41,13 +64,8 @@ final class PHUIObjectItemListView extends AphrontTagView {
     return $this;
   }
 
-  public function setStackable($stackable) {
-    $this->stackable = $stackable;
-    return $this;
-  }
-
-  public function setCards($cards) {
-    $this->cards = $cards;
+  public function setItemClass($item_class) {
+    $this->itemClass = $item_class;
     return $this;
   }
 
@@ -55,21 +73,40 @@ final class PHUIObjectItemListView extends AphrontTagView {
     return 'ul';
   }
 
+  public function newTailButton() {
+    $button = id(new PHUIButtonView())
+      ->setTag('a')
+      ->setColor(PHUIButtonView::GREY)
+      ->setIcon('fa-chevron-down')
+      ->setText(pht('View All Results'));
+
+    $this->tail[] = $button;
+
+    return $button;
+  }
+
   protected function getTagAttributes() {
     $classes = array();
+    $classes[] = 'phui-oi-list-view';
 
-    $classes[] = 'phui-object-item-list-view';
-    if ($this->stackable) {
-      $classes[] = 'phui-object-list-stackable';
-    }
-    if ($this->cards) {
-      $classes[] = 'phui-object-list-cards';
-    }
     if ($this->flush) {
-      $classes[] = 'phui-object-list-flush';
+      $classes[] = 'phui-oi-list-flush';
+      require_celerity_resource('phui-oi-flush-ui-css');
     }
-    if ($this->plain) {
-      $classes[] = 'phui-object-list-plain';
+
+    if ($this->simple) {
+      $classes[] = 'phui-oi-list-simple';
+      require_celerity_resource('phui-oi-simple-ui-css');
+    }
+
+    if ($this->big) {
+      $classes[] = 'phui-oi-list-big';
+      require_celerity_resource('phui-oi-big-ui-css');
+    }
+
+    if ($this->drag) {
+      $classes[] = 'phui-oi-list-drag';
+      require_celerity_resource('phui-oi-drag-ui-css');
     }
 
     return array(
@@ -78,25 +115,46 @@ final class PHUIObjectItemListView extends AphrontTagView {
   }
 
   protected function getTagContent() {
-    require_celerity_resource('phui-object-item-list-view-css');
+    $viewer = $this->getUser();
+    require_celerity_resource('phui-oi-list-view-css');
+    require_celerity_resource('phui-oi-color-css');
 
     $header = null;
     if (strlen($this->header)) {
       $header = phutil_tag(
         'h1',
         array(
-          'class' => 'phui-object-item-list-header',
+          'class' => 'phui-oi-list-header',
         ),
         $this->header);
     }
 
     if ($this->items) {
+      if ($viewer) {
+        foreach ($this->items as $item) {
+          $item->setUser($viewer);
+        }
+      }
+
+      foreach ($this->items as $item) {
+        $item->addClass($this->itemClass);
+      }
+
       $items = $this->items;
+    } else if ($this->allowEmptyList) {
+      $items = null;
     } else {
       $string = nonempty($this->noDataString, pht('No data.'));
-      $items = id(new AphrontErrorView())
-        ->setSeverity(AphrontErrorView::SEVERITY_NODATA)
+      $string = id(new PHUIInfoView())
+        ->setSeverity(PHUIInfoView::SEVERITY_NODATA)
         ->appendChild($string);
+      $items = phutil_tag(
+        'li',
+        array(
+          'class' => 'phui-oi-empty',
+        ),
+        $string);
+
     }
 
     $pager = null;
@@ -104,9 +162,20 @@ final class PHUIObjectItemListView extends AphrontTagView {
       $pager = $this->pager;
     }
 
+    $tail = array();
+    foreach ($this->tail as $tail_item) {
+      $tail[] = phutil_tag(
+        'li',
+        array(
+          'class' => 'phui-oi-tail',
+        ),
+        $tail_item);
+    }
+
     return array(
       $header,
       $items,
+      $tail,
       $pager,
       $this->renderChildren(),
     );

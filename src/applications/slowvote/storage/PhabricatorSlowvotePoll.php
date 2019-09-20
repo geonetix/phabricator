@@ -1,14 +1,16 @@
 <?php
 
-/**
- * @group slowvote
- */
 final class PhabricatorSlowvotePoll extends PhabricatorSlowvoteDAO
   implements
+    PhabricatorApplicationTransactionInterface,
     PhabricatorPolicyInterface,
     PhabricatorSubscribableInterface,
     PhabricatorFlaggableInterface,
-    PhabricatorTokenReceiverInterface {
+    PhabricatorTokenReceiverInterface,
+    PhabricatorProjectInterface,
+    PhabricatorDestructibleInterface,
+    PhabricatorSpacesInterface,
+    PhabricatorConduitResultInterface {
 
   const RESPONSES_VISIBLE = 0;
   const RESPONSES_VOTERS  = 1;
@@ -20,10 +22,13 @@ final class PhabricatorSlowvotePoll extends PhabricatorSlowvoteDAO
   protected $question;
   protected $description;
   protected $authorPHID;
-  protected $responseVisibility;
-  protected $shuffle;
+  protected $responseVisibility = 0;
+  protected $shuffle = 0;
   protected $method;
+  protected $mailKey;
   protected $viewPolicy;
+  protected $isClosed = 0;
+  protected $spacePHID;
 
   private $options = self::ATTACHABLE;
   private $choices = self::ATTACHABLE;
@@ -32,26 +37,43 @@ final class PhabricatorSlowvotePoll extends PhabricatorSlowvoteDAO
   public static function initializeNewPoll(PhabricatorUser $actor) {
     $app = id(new PhabricatorApplicationQuery())
       ->setViewer($actor)
-      ->withClasses(array('PhabricatorApplicationSlowvote'))
+      ->withClasses(array('PhabricatorSlowvoteApplication'))
       ->executeOne();
 
     $view_policy = $app->getPolicy(
-      PhabricatorSlowvoteCapabilityDefaultView::CAPABILITY);
+      PhabricatorSlowvoteDefaultViewCapability::CAPABILITY);
 
     return id(new PhabricatorSlowvotePoll())
       ->setAuthorPHID($actor->getPHID())
-      ->setViewPolicy($view_policy);
+      ->setViewPolicy($view_policy)
+      ->setSpacePHID($actor->getDefaultSpacePHID());
   }
 
-  public function getConfiguration() {
+  protected function getConfiguration() {
     return array(
       self::CONFIG_AUX_PHID => true,
+      self::CONFIG_COLUMN_SCHEMA => array(
+        'question' => 'text255',
+        'responseVisibility' => 'uint32',
+        'shuffle' => 'bool',
+        'method' => 'uint32',
+        'description' => 'text',
+        'isClosed' => 'bool',
+        'mailKey' => 'bytes20',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_phid' => null,
+        'phid' => array(
+          'columns' => array('phid'),
+          'unique' => true,
+        ),
+      ),
     ) + parent::getConfiguration();
   }
 
   public function generatePHID() {
     return PhabricatorPHID::generateNewPHID(
-      PhabricatorSlowvotePHIDTypePoll::TYPECONST);
+      PhabricatorSlowvotePollPHIDType::TYPECONST);
   }
 
   public function getOptions() {
@@ -87,6 +109,33 @@ final class PhabricatorSlowvotePoll extends PhabricatorSlowvoteDAO
     return $this;
   }
 
+  public function getMonogram() {
+    return 'V'.$this->getID();
+  }
+
+  public function getURI() {
+    return '/'.$this->getMonogram();
+  }
+
+  public function save() {
+    if (!$this->getMailKey()) {
+      $this->setMailKey(Filesystem::readRandomCharacters(20));
+    }
+    return parent::save();
+  }
+
+
+/* -(  PhabricatorApplicationTransactionInterface  )------------------------- */
+
+
+  public function getApplicationTransactionEditor() {
+    return new PhabricatorSlowvoteEditor();
+  }
+
+  public function getApplicationTransactionTemplate() {
+    return new PhabricatorSlowvoteTransaction();
+  }
+
 
 /* -(  PhabricatorPolicyInterface  )----------------------------------------- */
 
@@ -112,8 +161,7 @@ final class PhabricatorSlowvotePoll extends PhabricatorSlowvoteDAO
   }
 
   public function describeAutomaticCapability($capability) {
-    return pht(
-      'The author of a poll can always view and edit it.');
+    return pht('The author of a poll can always view and edit it.');
   }
 
 
@@ -133,5 +181,58 @@ final class PhabricatorSlowvotePoll extends PhabricatorSlowvoteDAO
     return array($this->getAuthorPHID());
   }
 
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+
+    $this->openTransaction();
+      $choices = id(new PhabricatorSlowvoteChoice())->loadAllWhere(
+        'pollID = %d',
+        $this->getID());
+      foreach ($choices as $choice) {
+        $choice->delete();
+      }
+      $options = id(new PhabricatorSlowvoteOption())->loadAllWhere(
+        'pollID = %d',
+        $this->getID());
+      foreach ($options as $option) {
+        $option->delete();
+      }
+      $this->delete();
+    $this->saveTransaction();
+  }
+
+/* -(  PhabricatorSpacesInterface  )----------------------------------------- */
+
+  public function getSpacePHID() {
+    return $this->spacePHID;
+  }
+
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
+
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('name')
+        ->setType('string')
+        ->setDescription(pht('The name of the poll.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('authorPHID')
+        ->setType('string')
+        ->setDescription(pht('The author of the poll.')),
+    );
+  }
+
+  public function getFieldValuesForConduit() {
+    return array(
+      'name' => $this->getQuestion(),
+      'authorPHID' => $this->getAuthorPHID(),
+    );
+  }
+
+  public function getConduitSearchAttachments() {
+    return array();
+  }
 
 }

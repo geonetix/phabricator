@@ -2,162 +2,112 @@
 
 abstract class DrydockController extends PhabricatorController {
 
-  final protected function buildSideNav($selected) {
-    $nav = new AphrontSideNavFilterView();
-    $nav->setBaseURI(new PhutilURI('/drydock/'));
-    $nav->addFilter('resource', 'Resources');
-    $nav->addFilter('lease',    'Leases');
-    $nav->addFilter('log',      'Logs');
-
-    $nav->selectFilter($selected, 'resource');
-
-    return $nav;
-  }
-
-  public function buildApplicationMenu() {
-    return $this->buildSideNav(null)->getMenu();
-  }
-
-  protected function buildLogTableView(array $logs) {
-    assert_instances_of($logs, 'DrydockLog');
-
-    $user = $this->getRequest()->getUser();
+  protected function buildLocksTab($owner_phid) {
+    $locks = DrydockSlotLock::loadLocks($owner_phid);
 
     $rows = array();
-    foreach ($logs as $log) {
-      $resource_uri = '/resource/'.$log->getResourceID().'/';
-      $resource_uri = $this->getApplicationURI($resource_uri);
-
-      $lease_uri = '/lease/'.$log->getLeaseID().'/';
-      $lease_uri = $this->getApplicationURI($lease_uri);
-
+    foreach ($locks as $lock) {
       $rows[] = array(
-        phutil_tag(
-          'a',
-          array(
-            'href' => $resource_uri,
-          ),
-          $log->getResourceID()),
-        phutil_tag(
-          'a',
-          array(
-            'href' => $lease_uri,
-          ),
-          $log->getLeaseID()),
-        $log->getMessage(),
-        phabricator_date($log->getEpoch(), $user),
+        $lock->getID(),
+        $lock->getLockKey(),
       );
     }
 
-    $table = new AphrontTableView($rows);
-    $table->setDeviceReadyTable(true);
-    $table->setHeaders(
-      array(
-        'Resource',
-        'Lease',
-        'Message',
-        'Date',
-      ));
-    $table->setShortHeaders(
-      array(
-        'R',
-        'L',
-        'Message',
-        '',
-      ));
-    $table->setColumnClasses(
-      array(
-        '',
-        '',
-        'wide',
-        '',
-      ));
+    $table = id(new AphrontTableView($rows))
+      ->setNoDataString(pht('No slot locks held.'))
+      ->setHeaders(
+        array(
+          pht('ID'),
+          pht('Lock Key'),
+        ))
+      ->setColumnClasses(
+        array(
+          null,
+          'wide',
+        ));
 
-    return $table;
+    return id(new PHUIPropertyListView())
+      ->addRawContent($table);
   }
 
-  protected function buildLeaseListView(array $leases) {
-    assert_instances_of($leases, 'DrydockLease');
+  protected function buildCommandsTab($target_phid) {
+    $viewer = $this->getViewer();
 
-    $user = $this->getRequest()->getUser();
-    $view = new PHUIObjectItemListView();
+    $commands = id(new DrydockCommandQuery())
+      ->setViewer($viewer)
+      ->withTargetPHIDs(array($target_phid))
+      ->execute();
 
-    foreach ($leases as $lease) {
-      $item = id(new PHUIObjectItemView())
-        ->setHeader($lease->getLeaseName())
-        ->setHref($this->getApplicationURI('/lease/'.$lease->getID().'/'));
+    $consumed_yes = id(new PHUIIconView())
+      ->setIcon('fa-check green');
+    $consumed_no = id(new PHUIIconView())
+      ->setIcon('fa-clock-o grey');
 
-      if ($lease->hasAttachedResource()) {
-        $resource = $lease->getResource();
-
-        $resource_href = '/resource/'.$resource->getID().'/';
-        $resource_href = $this->getApplicationURI($resource_href);
-
-        $resource_name = $resource->getName();
-
-        $item->addAttribute(
-          phutil_tag(
-            'a',
-            array(
-              'href' => $resource_href,
-            ),
-            $resource_name));
-      }
-
-      $status = DrydockLeaseStatus::getNameForStatus($lease->getStatus());
-      $item->addAttribute($status);
-
-      $date_created = phabricator_date($lease->getDateCreated(), $user);
-      $item->addAttribute(pht('Created on %s', $date_created));
-
-      if ($lease->isActive()) {
-        $item->setBarColor('green');
-      } else {
-        $item->setBarColor('red');
-      }
-
-      $view->addItem($item);
+    $rows = array();
+    foreach ($commands as $command) {
+      $rows[] = array(
+        $command->getID(),
+        $viewer->renderHandle($command->getAuthorPHID()),
+        $command->getCommand(),
+        ($command->getIsConsumed()
+          ? $consumed_yes
+          : $consumed_no),
+        phabricator_datetime($command->getDateCreated(), $viewer),
+      );
     }
 
-    return $view;
+    $table = id(new AphrontTableView($rows))
+      ->setNoDataString(pht('No commands issued.'))
+      ->setHeaders(
+        array(
+          pht('ID'),
+          pht('From'),
+          pht('Command'),
+          null,
+          pht('Date'),
+        ))
+      ->setColumnClasses(
+        array(
+          null,
+          null,
+          'wide',
+          null,
+          null,
+        ));
+
+    return id(new PHUIPropertyListView())
+      ->addRawContent($table);
   }
 
-  protected function buildResourceListView(array $resources) {
-    assert_instances_of($resources, 'DrydockResource');
+  protected function buildLogTable(DrydockLogQuery $query) {
+    $viewer = $this->getViewer();
 
-    $user = $this->getRequest()->getUser();
-    $view = new PHUIObjectItemListView();
+    $logs = $query
+      ->setViewer($viewer)
+      ->setLimit(100)
+      ->execute();
 
-    foreach ($resources as $resource) {
-      $name = pht('Resource %d', $resource->getID()).': '.$resource->getName();
+    $log_table = id(new DrydockLogListView())
+      ->setUser($viewer)
+      ->setLogs($logs);
 
-      $item = id(new PHUIObjectItemView())
-        ->setHref($this->getApplicationURI('/resource/'.$resource->getID().'/'))
-        ->setHeader($name);
-
-      $status = DrydockResourceStatus::getNameForStatus($resource->getStatus());
-      $item->addAttribute($status);
-
-      switch ($resource->getStatus()) {
-        case DrydockResourceStatus::STATUS_PENDING:
-          $item->setBarColor('yellow');
-          break;
-        case DrydockResourceStatus::STATUS_OPEN:
-          $item->setBarColor('green');
-          break;
-        case DrydockResourceStatus::STATUS_DESTROYED:
-          $item->setBarColor('black');
-          break;
-        default:
-          $item->setBarColor('red');
-          break;
-      }
-
-      $view->addItem($item);
-    }
-
-    return $view;
+    return $log_table;
   }
 
+  protected function buildLogBox(DrydockLogListView $log_table, $all_uri) {
+    $log_header = id(new PHUIHeaderView())
+      ->setHeader(pht('Logs'))
+      ->addActionLink(
+        id(new PHUIButtonView())
+          ->setTag('a')
+          ->setHref($all_uri)
+          ->setIcon('fa-search')
+          ->setText(pht('View All')));
+
+    return id(new PHUIObjectBoxView())
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->setHeader($log_header)
+      ->setTable($log_table);
+  }
 
 }

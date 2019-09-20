@@ -2,30 +2,6 @@
  * @provides phabricator-feed-css
  */
 
-.phabricator-feed-frame {
-  margin: 20px 10px;
-}
-
-.phabricator-public-feed-frame {
-  margin: 10px;
-  max-width: 600px;
-  overflow-x: auto;
-}
-
-.phabricator-feed-frame .phabricator-action-header-title {
-  font-size: 16px;
-  margin-bottom: 5px;
-}
-
-.device-desktop .phabricator-feed-frame {
-  max-width: 600px;
-  margin: 20px;
-}
-
-.phabricator-feed-story-date-separator {
-  margin-top: 2em;
-}
-
 .phabricator-feed-newer-link {
   float: left;
   font-weight: bold;

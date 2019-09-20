@@ -1,22 +1,28 @@
 <?php
 
 final class ReleephRequestCommentController
-  extends ReleephProjectController {
+  extends ReleephRequestController {
 
-  public function processRequest() {
-    $request = $this->getRequest();
-    $user = $request->getUser();
-
-    $rq = $this->getReleephRequest();
+  public function handleRequest(AphrontRequest $request) {
+    $id = $request->getURIData('requestID');
+    $viewer = $request->getViewer();
 
     if (!$request->isFormPost()) {
       return new Aphront400Response();
     }
 
+    $pull = id(new ReleephRequestQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($id))
+      ->executeOne();
+    if (!$pull) {
+      return new Aphront404Response();
+    }
+
     $is_preview = $request->isPreviewRequest();
     $draft = PhabricatorDraft::buildFromRequest($request);
 
-    $view_uri = $this->getApplicationURI('/RQ'.$rq->getID());
+    $view_uri = $this->getApplicationURI('/'.$pull->getMonogram());
 
     $xactions = array();
     $xactions[] = id(new ReleephRequestTransaction())
@@ -26,13 +32,13 @@ final class ReleephRequestCommentController
           ->setContent($request->getStr('comment')));
 
     $editor = id(new ReleephRequestTransactionalEditor())
-      ->setActor($user)
+      ->setActor($viewer)
       ->setContinueOnNoEffect($request->isContinueRequest())
       ->setContentSourceFromRequest($request)
       ->setIsPreview($is_preview);
 
     try {
-      $xactions = $editor->applyTransactions($rq, $xactions);
+      $xactions = $editor->applyTransactions($pull, $xactions);
     } catch (PhabricatorApplicationTransactionNoEffectException $ex) {
       return id(new PhabricatorApplicationTransactionNoEffectResponse())
         ->setCancelURI($view_uri)
@@ -43,12 +49,12 @@ final class ReleephRequestCommentController
       $draft->replaceOrDelete();
     }
 
-    if ($request->isAjax()) {
+    if ($request->isAjax() && $is_preview) {
       return id(new PhabricatorApplicationTransactionResponse())
-        ->setViewer($user)
+        ->setObject($pull)
+        ->setViewer($viewer)
         ->setTransactions($xactions)
-        ->setIsPreview($is_preview)
-        ->setAnchorOffset($request->getStr('anchor'));
+        ->setIsPreview($is_preview);
     } else {
       return id(new AphrontRedirectResponse())
         ->setURI($view_uri);
